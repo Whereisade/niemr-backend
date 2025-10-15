@@ -5,6 +5,7 @@ from rest_framework import viewsets, mixins, status
 from rest_framework.decorators import action
 from rest_framework.permissions import IsAuthenticated, AllowAny
 from rest_framework.response import Response
+from notifications.services.notify import notify_user
 
 from .models import LabTest, LabOrder, LabOrderItem
 from .serializers import (
@@ -147,8 +148,19 @@ class LabOrderViewSet(viewsets.GenericViewSet,
         item = s.save(item=item, user=request.user)
 
         # if order completed, optionally notify patient by email (non-blocking)
-        if order.status == OrderStatus.COMPLETED and order.patient.email:
-            notify_result_ready(order.patient.email, order.id)
+        if order.status == OrderStatus.COMPLETED:
+            if order.patient and order.patient.email:
+                notify_result_ready(order.patient.email, order.id)
+
+            if order.patient and order.patient.user_id:
+                notify_user(
+                    user=order.patient.user,
+                    topic="LAB_RESULT_READY",
+                    title="Your lab result is ready",
+                    body=f"Lab order #{order.id} now has results.",
+                    data={"order_id": order.id},
+                    facility_id=order.facility_id,
+                )
 
         return Response(LabOrderItemReadSerializer(item).data)
 

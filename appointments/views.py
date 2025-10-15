@@ -10,6 +10,7 @@ from .serializers import AppointmentSerializer, AppointmentUpdateSerializer
 from .permissions import IsStaff, CanViewAppointment
 from .enums import ApptStatus
 from .services.notify import send_confirmation, send_reminder
+from notifications.services.notify import notify_user
 
 class AppointmentViewSet(viewsets.GenericViewSet,
                          mixins.CreateModelMixin,
@@ -152,5 +153,14 @@ class AppointmentViewSet(viewsets.GenericViewSet,
         n = 0
         for appt in qs:
             send_reminder(appt)
+            if appt.patient and appt.patient.user_id:
+                notify_user(
+                    user=appt.patient.user,
+                    topic="APPT_REMINDER",
+                    title="Appointment Reminder",
+                    body=f"Reminder: appointment at {appt.start_at}.",
+                    data={"appointment_id": appt.id},
+                    facility_id=appt.facility_id,
+                )
             n += 1
         return Response({"sent": n})

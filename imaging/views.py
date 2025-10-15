@@ -15,6 +15,7 @@ from .serializers import (
 from .permissions import IsStaff, CanViewRequest
 from .enums import RequestStatus
 from .services.notify import notify_report_ready
+from notifications.services.notify import notify_user
 
 class ProcedureViewSet(viewsets.GenericViewSet, mixins.ListModelMixin, mixins.CreateModelMixin):
     queryset = ImagingProcedure.objects.filter(is_active=True).order_by("name")
@@ -161,8 +162,18 @@ class ImagingRequestViewSet(viewsets.GenericViewSet,
         req.save(update_fields=["status"])
 
         # notify patient (non-blocking)
-        if req.patient.email:
+        if req.patient and req.patient.email:
             notify_report_ready(req.patient.email, req.id)
+        
+        if req.patient and req.patient.user_id:
+            notify_user(
+                user=req.patient.user,
+                topic="IMAGING_REPORT_READY",
+                title="Your imaging report is ready",
+                body=f"Report for {req.procedure.name} is available.",
+                data={"request_id": req.id},
+                facility_id=req.facility_id,
+            )
 
         return Response(ImagingReportSerializer(rep).data, status=201)
 

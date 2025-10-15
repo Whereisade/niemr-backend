@@ -15,6 +15,7 @@ from .serializers import (
 )
 from .permissions import IsStaff
 from .enums import ChargeStatus, PaymentMethod
+from notifications.services.notify import notify_user
 
 # --- Service Catalog ---
 class ServiceViewSet(viewsets.GenericViewSet, mixins.ListModelMixin, mixins.CreateModelMixin):
@@ -95,7 +96,21 @@ class ChargeViewSet(viewsets.GenericViewSet, mixins.CreateModelMixin, mixins.Ret
     def create(self, request, *args, **kwargs):
         self.permission_classes = [IsAuthenticated, IsStaff]
         self.check_permissions(request)
-        return super().create(request, *args, **kwargs)
+        resp = super().create(request, *args, **kwargs)
+        try:
+            charge = Charge.objects.get(id=resp.data["id"])
+            if charge.patient and charge.patient.user_id:
+                notify_user(
+                    user=charge.patient.user,
+                    topic="BILL_CHARGE_ADDED",
+                    title="New charge added",
+                    body=f"{charge.service.name} - {charge.amount}",
+                    data={"charge_id": charge.id},
+                    facility_id=charge.facility_id,
+                )
+        except Exception:
+            pass
+        return resp
 
     @action(detail=False, methods=["get"])
     def statuses(self, request):
@@ -155,4 +170,17 @@ class PaymentViewSet(viewsets.GenericViewSet, mixins.CreateModelMixin, mixins.Re
         self.permission_classes = [IsAuthenticated, IsStaff]
         self.check_permissions(request)
         resp = super().create(request, *args, **kwargs)
+        try:
+            payment = Payment.objects.get(id=resp.data["id"])
+            if payment.patient and payment.patient.user_id:
+                notify_user(
+                    user=payment.patient.user,
+                    topic="BILL_PAYMENT_POSTED",
+                    title="Payment received",
+                    body=f"Amount: {payment.amount} ({payment.method}) Ref: {payment.reference}",
+                    data={"payment_id": payment.id},
+                    facility_id=payment.facility_id,
+                )
+        except Exception:
+            pass
         return resp
