@@ -40,6 +40,7 @@ INSTALLED_APPS = [
     "core",
     "accounts",
     "facilities",
+    "patients",
 ]
 
 AUTH_USER_MODEL = "accounts.User"
