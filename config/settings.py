@@ -25,8 +25,13 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 SECRET_KEY = os.getenv("DJANGO_SECRET_KEY", "dev-secret")
 DEBUG = os.getenv("DJANGO_DEBUG", "True") == "True"
 ALLOWED_HOSTS = ["*"]
-
-
+RESEND_API_KEY = os.getenv("RESEND_API_KEY", "")
+RESEND_FROM    = os.getenv("RESEND_FROM", "no-reply@niemr.app")
+if not RESEND_API_KEY:
+    raise RuntimeError("RESEND_API_KEY is required (Resend-only mode).")
+EMAILS_WEBHOOK_SECRET = os.getenv("EMAILS_WEBHOOK_SECRET", "")  # optional Resend webhook signature secret
+EMAILS_MAX_RETRIES = int(os.getenv("EMAILS_MAX_RETRIES", "6"))
+EMAILS_RETRY_BACKOFF_SEC = int(os.getenv("EMAILS_RETRY_BACKOFF_SEC", "120"))
 # Application definition
 
 INSTALLED_APPS = [
@@ -52,9 +57,13 @@ INSTALLED_APPS = [
     "notifications",
     "providers",
     "audit",
+    "emails",
 ]
 
 AUTH_USER_MODEL = "accounts.User"
+
+
+
 
 REST_FRAMEWORK = {
     "DEFAULT_AUTHENTICATION_CLASSES": (
@@ -100,7 +109,7 @@ TEMPLATES = [
 
 WSGI_APPLICATION = 'config.wsgi.application'
 
-
+EMAILS_PROVIDER = "RESEND"
 # Database
 # https://docs.djangoproject.com/en/5.2/ref/settings/#databases
 
