@@ -49,6 +49,7 @@ INSTALLED_APPS = [
     "appointments",
     "billing",
     "attachments",
+    "notifications",
 ]
 
 AUTH_USER_MODEL = "accounts.User"
