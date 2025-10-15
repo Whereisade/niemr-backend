@@ -45,6 +45,7 @@ INSTALLED_APPS = [
     "encounters",
     "labs",
     "imaging",
+    "pharmacy",
 ]
 
 AUTH_USER_MODEL = "accounts.User"
