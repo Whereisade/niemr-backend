@@ -1,0 +1,60 @@
+{% extends "reports/base.html" %}
+{% block content %}
+<h2>Billing Statement</h2>
+<div class="section">
+  <strong>Patient:</strong> {{ patient.first_name }} {{ patient.last_name }} (ID: {{ patient.id }})<br>
+  <strong>Period:</strong> {{ period.start|default:"(start)" }} – {{ period.end|default:"(end)" }}
+</div>
+
+<div class="section">
+  <h3>Charges</h3>
+  <table>
+    <thead><tr><th>Date</th><th>Service</th><th class="right">Qty</th><th class="right">Unit Price</th><th class="right">Amount</th></tr></thead>
+    <tbody>
+      {% for c in charges %}
+      <tr>
+        <td>{{ c.created_at|date:"Y-m-d" }}</td>
+        <td>{{ c.service.name }}</td>
+        <td class="right">{{ c.qty }}</td>
+        <td class="right">{{ c.unit_price }}</td>
+        <td class="right">{{ c.amount }}</td>
+      </tr>
+      {% empty %}
+      <tr><td colspan="5" class="muted">No charges.</td></tr>
+      {% endfor %}
+      <tr>
+        <td colspan="4" class="right"><strong>Total</strong></td>
+        <td class="right"><strong>{{ total_charges }}</strong></td>
+      </tr>
+    </tbody>
+  </table>
+</div>
+
+<div class="section">
+  <h3>Payments</h3>
+  <table>
+    <thead><tr><th>Date</th><th>Method</th><th>Reference</th><th class="right">Amount</th></tr></thead>
+    <tbody>
+      {% for p in payments %}
+      <tr>
+        <td>{{ p.received_at|date:"Y-m-d" }}</td>
+        <td>{{ p.method }}</td>
+        <td>{{ p.reference }}</td>
+        <td class="right">{{ p.amount }}</td>
+      </tr>
+      {% empty %}
+      <tr><td colspan="4" class="muted">No payments.</td></tr>
+      {% endfor %}
+      <tr>
+        <td colspan="3" class="right"><strong>Total</strong></td>
+        <td class="right"><strong>{{ total_payments }}</strong></td>
+      </tr>
+    </tbody>
+  </table>
+</div>
+
+<div class="section">
+  <h3>Balance</h3>
+  <p><strong>{{ balance }}</strong></p>
+</div>
+{% endblock %}

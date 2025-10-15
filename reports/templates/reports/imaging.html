@@ -1,0 +1,22 @@
+{% extends "reports/base.html" %}
+{% block content %}
+<h2>Imaging Report</h2>
+<div class="section">
+  <strong>Patient:</strong> {{ patient.first_name }} {{ patient.last_name }} (ID: {{ patient.id }})<br>
+  <strong>Request #:</strong> {{ request.id }} • <strong>Procedure:</strong> {{ procedure.name }} ({{ procedure.modality }})<br>
+</div>
+
+{% if report %}
+<div class="section">
+  <h3>Findings</h3>
+  <div>{{ report.findings|linebreaks }}</div>
+</div>
+
+<div class="section">
+  <h3>Impression</h3>
+  <div><strong>{{ report.impression|linebreaks }}</strong></div>
+</div>
+{% else %}
+<div class="section muted">No report yet.</div>
+{% endif %}
+{% endblock %}

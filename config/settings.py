@@ -58,12 +58,21 @@ INSTALLED_APPS = [
     "providers",
     "audit",
     "emails",
+    "reports",
 ]
 
 AUTH_USER_MODEL = "accounts.User"
 
 
+REPORTS_ENABLE_PDF = os.getenv("REPORTS_ENABLE_PDF", "1") in ("1","true","True")
 
+# Optional: default brand info for headers/footers
+REPORTS_BRAND = {
+    "name": os.getenv("REPORTS_BRAND_NAME", "NIEMR"),
+    "address": os.getenv("REPORTS_BRAND_ADDR", "123 Health St, Lagos"),
+    "phone": os.getenv("REPORTS_BRAND_PHONE", "+234-800-000-0000"),
+    "email": os.getenv("REPORTS_BRAND_EMAIL", "care@niemr.app"),
+}
 
 REST_FRAMEWORK = {
     "DEFAULT_AUTHENTICATION_CLASSES": (

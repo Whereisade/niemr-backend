@@ -1,0 +1,32 @@
+{% extends "reports/base.html" %}
+{% block content %}
+<h2>Encounter Summary</h2>
+<div class="section">
+  <strong>Patient:</strong> {{ patient.first_name }} {{ patient.last_name }} (ID: {{ patient.id }})<br>
+  <strong>Facility:</strong> {{ facility.name }}<br>
+  <strong>Author:</strong> {{ author.get_full_name|default:author.email }}
+</div>
+
+<div class="section">
+  <h3>Notes</h3>
+  <div>{{ notes|linebreaks }}</div>
+</div>
+
+{% if diagnoses %}
+<div class="section">
+  <h3>Diagnoses</h3>
+  <ul>
+    {% for d in diagnoses %}<li>{{ d }}</li>{% endfor %}
+  </ul>
+</div>
+{% endif %}
+
+{% if plans %}
+<div class="section">
+  <h3>Plan</h3>
+  <ul>
+    {% for p in plans %}<li>{{ p }}</li>{% endfor %}
+  </ul>
+</div>
+{% endif %}
+{% endblock %}
