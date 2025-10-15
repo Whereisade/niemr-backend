@@ -51,6 +51,7 @@ INSTALLED_APPS = [
     "attachments",
     "notifications",
     "providers",
+    "audit",
 ]
 
 AUTH_USER_MODEL = "accounts.User"
@@ -77,6 +78,7 @@ MIDDLEWARE = [
     'django.contrib.auth.middleware.AuthenticationMiddleware',
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
+    'audit.middleware.AuditRequestMiddleware',
 ]
 
 ROOT_URLCONF = 'config.urls'
