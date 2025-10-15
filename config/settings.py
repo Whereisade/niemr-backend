@@ -47,6 +47,7 @@ INSTALLED_APPS = [
     "imaging",
     "pharmacy",
     "appointments",
+    "billing",
 ]
 
 AUTH_USER_MODEL = "accounts.User"
