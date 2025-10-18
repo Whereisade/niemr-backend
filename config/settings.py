@@ -14,6 +14,7 @@ from datetime import timedelta
 from pathlib import Path
 from dotenv import load_dotenv
 load_dotenv()
+import dj_database_url
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
 
@@ -62,6 +63,7 @@ INSTALLED_APPS = [
     "drf_spectacular",
     "drf_spectacular_sidecar",
     "gunicorn",
+    "storages",
 ]
 
 AUTH_USER_MODEL = "accounts.User"
@@ -119,6 +121,7 @@ SIMPLE_JWT = {
 
 MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',
+    'whitenoise.middleware.WhiteNoiseMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.common.CommonMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
@@ -151,11 +154,18 @@ EMAILS_PROVIDER = "RESEND"
 # Database
 # https://docs.djangoproject.com/en/5.2/ref/settings/#databases
 
-DATABASES = {
-    'default': {
-        'ENGINE': 'django.db.backends.sqlite3',
-        'NAME': BASE_DIR / 'db.sqlite3',
-    }
+STORAGES = {                              
+    "staticfiles": {
+        "BACKEND": "whitenoise.storage.CompressedManifestStaticFilesStorage",
+    },
+}
+
+DATABASES = {  # <— REPLACE
+    "default": dj_database_url.config(
+        env="DATABASE_URL",
+        conn_max_age=60,
+        ssl_require=True,
+    )
 }
 
 
@@ -177,8 +187,34 @@ AUTH_PASSWORD_VALIDATORS = [
     },
 ]
 
-MEDIA_URL = "/media/"
-MEDIA_ROOT = BASE_DIR / "media"
+DEFAULT_FILE_STORAGE = "storages.backends.s3boto3.S3Boto3Storage"
+
+# Supabase S3 creds (from Storage -> Connection -> S3 protocol)
+AWS_ACCESS_KEY_ID = os.getenv("SUPABASE_S3_ACCESS_KEY_ID")
+AWS_SECRET_ACCESS_KEY = os.getenv("SUPABASE_S3_SECRET_ACCESS_KEY")
+
+# Your bucket name in Supabase Storage
+AWS_STORAGE_BUCKET_NAME = os.getenv("SUPABASE_BUCKET", "media")
+
+# Your project ref (the part before .storage.supabase.co) e.g. qfqzlsjkrgzbzxkgrpsk
+SUPABASE_PROJECT_REF = os.getenv("SUPABASE_PROJECT_REF", "")
+
+# Supabase S3 endpoint
+AWS_S3_ENDPOINT_URL = f"https://{SUPABASE_PROJECT_REF}.storage.supabase.co/storage/v1/s3"
+AWS_S3_REGION_NAME = "auto"
+AWS_S3_SIGNATURE_VERSION = "s3v4"
+
+# Public vs Private media
+# If your 'media' bucket is PUBLIC, set this False and MEDIA_URL becomes a public path.
+# If your bucket is PRIVATE and you need signed URLs, set this True.
+AWS_QUERYSTRING_AUTH = os.getenv("SUPABASE_MEDIA_SIGNED", "False").lower() == "true"
+
+# MEDIA_URL for public bucket (no querystrings)
+if not AWS_QUERYSTRING_AUTH and SUPABASE_PROJECT_REF:
+    MEDIA_URL = f"https://{SUPABASE_PROJECT_REF}.storage.supabase.co/storage/v1/object/public/{AWS_STORAGE_BUCKET_NAME}/"
+else:
+    # fallback (Django will generate signed S3-style URLs when AWS_QUERYSTRING_AUTH=True)
+    MEDIA_URL = "/media/"
 # Internationalization
 # https://docs.djangoproject.com/en/5.2/topics/i18n/
 
@@ -195,6 +231,7 @@ USE_TZ = True
 # https://docs.djangoproject.com/en/5.2/howto/static-files/
 
 STATIC_URL = 'static/'
+STATIC_ROOT = BASE_DIR / "staticfiles"
 
 # Default primary key field type
 # https://docs.djangoproject.com/en/5.2/ref/settings/#default-auto-field
