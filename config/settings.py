@@ -59,6 +59,9 @@ INSTALLED_APPS = [
     "audit",
     "emails",
     "reports",
+    "drf_spectacular",
+    "drf_spectacular_sidecar",
+    "gunicorn",
 ]
 
 AUTH_USER_MODEL = "accounts.User"
@@ -80,6 +83,32 @@ REST_FRAMEWORK = {
     ),
     "DEFAULT_SCHEMA_CLASS": "rest_framework.schemas.openapi.AutoSchema",
 }
+
+# REST_FRAMEWORK.update({
+#     "DEFAULT_SCHEMA_CLASS": "drf_spectacular.openapi.AutoSchema",
+# })
+
+# SPECTACULAR_SETTINGS = {
+#     "TITLE": "NIEMR API",
+#     "DESCRIPTION": "Modern EMR backend for hospitals, providers, and patients.",
+#     "VERSION": "1.0.0",
+#     "SERVE_INCLUDE_SCHEMA": False,  # we'll expose /schema/ explicitly
+#     "COMPONENT_SPLIT_REQUEST": True,
+#     "SERVE_PERMISSIONS": [],  # Swagger/Redoc public; lock with IsAdminUser if needed
+#     "SECURITY": [{"bearerAuth": []}],
+#     "COMPONENTS": {
+#         "securitySchemes": {
+#             "bearerAuth": {
+#                 "type": "http",
+#                 "scheme": "bearer",
+#                 "bearerFormat": "JWT",
+#             }
+#         }
+#     },
+#     # Optional: prettify operation IDs
+#     "SCHEMA_PATH_PREFIX": r"/api",
+#     "ENUM_NAME_OVERWRITE": True,
+# }
 
 SIMPLE_JWT = {
     "ACCESS_TOKEN_LIFETIME": timedelta(minutes=int(os.getenv("ACCESS_TOKEN_LIFETIME_MIN", "30"))),
