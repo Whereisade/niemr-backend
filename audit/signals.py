@@ -3,6 +3,9 @@ from django.dispatch import receiver
 import sys
 from django.db import connection, OperationalError
 
+import json
+from django.core.serializers.json import DjangoJSONEncoder
+
 from django.contrib.contenttypes.models import ContentType
 from django.db.models import Model, ManyToManyField
 
@@ -12,6 +15,11 @@ from .local import get_request
 from .utils import safe_model_dict
 
 AUDIT_APPS = None  # set to a list like ["patients","vitals",...] to restrict; None = all apps
+
+def json_ready(payload):
+    """Convert Python objects (datetime, Decimal, etc.) into JSON-serializable types."""
+    # dumps with DjangoJSONEncoder, then loads back to plain Python types
+    return json.loads(json.dumps(payload, cls=DjangoJSONEncoder))
 
 def _ctx():
     req = get_request()
@@ -75,23 +83,25 @@ def audit_post_save(sender, instance, created, **kwargs):
     ct = ContentType.objects.get_for_model(instance.__class__)
     ctx = _ctx()
     if created:
+        after_payload = json_ready({"after": safe_model_dict(instance)})
         AuditLog.objects.create(
             actor=ctx["user"], actor_email=ctx["email"],
             ip_address=ctx["ip"], user_agent=ctx["ua"],
             verb=Verb.CREATE, message="Created",
             target_ct=ct, target_id=str(instance.pk),
-            changes={"after": safe_model_dict(instance)},
+            changes=after_payload,
         )
     else:
         before = getattr(instance, "__audit_before__", None) or {}
         after = safe_model_dict(instance)
         if before != after:
+            changes_payload = json_ready({"before": before, "after": after})
             AuditLog.objects.create(
                 actor=ctx["user"], actor_email=ctx["email"],
                 ip_address=ctx["ip"], user_agent=ctx["ua"],
                 verb=Verb.UPDATE, message="Updated",
                 target_ct=ct, target_id=str(instance.pk),
-                changes={"before": before, "after": after},
+                changes=changes_payload,
             )
 
 @receiver(pre_delete)
@@ -102,12 +112,13 @@ def audit_pre_delete(sender, instance, **kwargs):
         return
     ct = ContentType.objects.get_for_model(instance.__class__)
     ctx = _ctx()
+    before_payload = json_ready({"before": safe_model_dict(instance)})
     AuditLog.objects.create(
         actor=ctx["user"], actor_email=ctx["email"],
         ip_address=ctx["ip"], user_agent=ctx["ua"],
         verb=Verb.DELETE, message="Deleted",
         target_ct=ct, target_id=str(instance.pk),
-        changes={"before": safe_model_dict(instance)},
+        changes=before_payload,
     )
 
 @receiver(m2m_changed)
@@ -122,10 +133,11 @@ def audit_m2m(sender, instance, action, reverse, model, pk_set, **kwargs):
         return
     ct = ContentType.objects.get_for_model(instance.__class__)
     ctx = _ctx()
+    m2m_payload = json_ready({"related_model": model._meta.label_lower, "pks": list(pk_set) if pk_set else []})
     AuditLog.objects.create(
         actor=ctx["user"], actor_email=ctx["email"],
         ip_address=ctx["ip"], user_agent=ctx["ua"],
         verb=Verb.M2M, message=f"M2M {action}",
         target_ct=ct, target_id=str(instance.pk),
-        changes={"related_model": model._meta.label_lower, "pks": list(pk_set) if pk_set else []},
+        changes=m2m_payload,
     )

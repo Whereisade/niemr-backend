@@ -154,7 +154,10 @@ EMAILS_PROVIDER = "RESEND"
 # Database
 # https://docs.djangoproject.com/en/5.2/ref/settings/#databases
 
-STORAGES = {                              
+STORAGES = {        
+    "default": {
+        "BACKEND": "storages.backends.s3boto3.S3Boto3Storage",
+    },                      
     "staticfiles": {
         "BACKEND": "whitenoise.storage.CompressedManifestStaticFilesStorage",
     },
@@ -203,6 +206,7 @@ SUPABASE_PROJECT_REF = os.getenv("SUPABASE_PROJECT_REF", "")
 AWS_S3_ENDPOINT_URL = f"https://{SUPABASE_PROJECT_REF}.storage.supabase.co/storage/v1/s3"
 AWS_S3_REGION_NAME = "auto"
 AWS_S3_SIGNATURE_VERSION = "s3v4"
+AWS_QUERYSTRING_AUTH = False
 
 # Public vs Private media
 # If your 'media' bucket is PUBLIC, set this False and MEDIA_URL becomes a public path.
