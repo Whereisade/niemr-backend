@@ -34,6 +34,14 @@ EMAILS_WEBHOOK_SECRET = os.getenv("EMAILS_WEBHOOK_SECRET", "")  # optional Resen
 EMAILS_MAX_RETRIES = int(os.getenv("EMAILS_MAX_RETRIES", "6"))
 EMAILS_RETRY_BACKOFF_SEC = int(os.getenv("EMAILS_RETRY_BACKOFF_SEC", "120"))
 # Application definition
+EMAIL_BACKEND = "django.core.mail.backends.smtp.EmailBackend"
+EMAIL_HOST = "smtp.resend.com"
+EMAIL_PORT = 465
+EMAIL_USE_SSL = True          # <-- SMTPS
+EMAIL_USE_TLS = False
+EMAIL_HOST_USER = "resend"
+EMAIL_HOST_PASSWORD = os.getenv("RESEND_API_KEY")
+DEFAULT_FROM_EMAIL = "Niemr <no-reply@mail.niemr.africa>"
 
 INSTALLED_APPS = [
     'django.contrib.admin',
@@ -86,31 +94,7 @@ REST_FRAMEWORK = {
     "DEFAULT_SCHEMA_CLASS": "rest_framework.schemas.openapi.AutoSchema",
 }
 
-# REST_FRAMEWORK.update({
-#     "DEFAULT_SCHEMA_CLASS": "drf_spectacular.openapi.AutoSchema",
-# })
 
-# SPECTACULAR_SETTINGS = {
-#     "TITLE": "NIEMR API",
-#     "DESCRIPTION": "Modern EMR backend for hospitals, providers, and patients.",
-#     "VERSION": "1.0.0",
-#     "SERVE_INCLUDE_SCHEMA": False,  # we'll expose /schema/ explicitly
-#     "COMPONENT_SPLIT_REQUEST": True,
-#     "SERVE_PERMISSIONS": [],  # Swagger/Redoc public; lock with IsAdminUser if needed
-#     "SECURITY": [{"bearerAuth": []}],
-#     "COMPONENTS": {
-#         "securitySchemes": {
-#             "bearerAuth": {
-#                 "type": "http",
-#                 "scheme": "bearer",
-#                 "bearerFormat": "JWT",
-#             }
-#         }
-#     },
-#     # Optional: prettify operation IDs
-#     "SCHEMA_PATH_PREFIX": r"/api",
-#     "ENUM_NAME_OVERWRITE": True,
-# }
 
 SIMPLE_JWT = {
     "ACCESS_TOKEN_LIFETIME": timedelta(minutes=int(os.getenv("ACCESS_TOKEN_LIFETIME_MIN", "30"))),
