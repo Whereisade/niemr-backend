@@ -12,7 +12,7 @@ services:
     autoDeploy: true
     envVars:
       - key: PYTHON_VERSION
-        value: 3.12
+        value: 3.12.3
 
       # Django
       - key: DJANGO_DEBUG
