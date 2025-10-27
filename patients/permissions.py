@@ -24,3 +24,55 @@ class IsStaff(BasePermission):
     def has_permission(self, request, view):
         u = request.user
         return bool(u and u.is_authenticated and u.role in self.staff_roles)
+
+class IsStaffOrGuardianForDependent(BasePermission):
+    """
+    Staff can access dependents within their facility/tenant (enforced in queryset).
+    A patient (guardian) can only access dependents where they are the parent_patient.
+    """
+
+    message = "Not permitted to access this dependent."
+
+    def has_object_permission(self, request, view, obj):
+        user = request.user
+        if not user or not user.is_authenticated:
+            return False
+
+        # Staff & clinical users: let the view's queryset scoping do the heavy lifting
+        if getattr(user, "is_staff", False) or getattr(user, "is_clinician", False) or getattr(user, "is_admin", False):
+            return True
+
+        # Patient/guardian:
+        patient_profile = getattr(user, "patient_profile", None)
+        if not patient_profile:
+            return False
+
+        # obj is a Patient instance representing the dependent
+        if obj.parent_patient_id and obj.parent_patient_id == patient_profile.id:
+            return True
+
+        return False
+
+
+class IsStaffOrSelfPatient(BasePermission):
+    """
+    For /patients/{id}/dependents/ actions: allow staff OR the patient owner of {id}.
+    """
+
+    message = "Not permitted to manage dependents for this patient."
+
+    def has_permission(self, request, view):
+        user = request.user
+        if not user or not user.is_authenticated:
+            return False
+
+        if getattr(user, "is_staff", False) or getattr(user, "is_clinician", False) or getattr(user, "is_admin", False):
+            return True
+
+        # For patient users: they must own the path patient_id
+        patient_profile = getattr(user, "patient_profile", None)
+        if not patient_profile:
+            return False
+
+        path_patient_id = view.kwargs.get("pk") or view.kwargs.get("patient_pk")
+        return str(patient_profile.id) == str(path_patient_id)

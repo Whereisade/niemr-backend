@@ -1,4 +1,5 @@
 from django.db.models import Q
+from django.shortcuts import get_object_or_404
 from rest_framework import viewsets, mixins, status
 from rest_framework.decorators import action, api_view, permission_classes
 from rest_framework.permissions import IsAuthenticated, AllowAny
@@ -7,9 +8,10 @@ from rest_framework.response import Response
 from .models import Patient, PatientDocument, HMO
 from .serializers import (
     PatientSerializer, PatientCreateByStaffSerializer, PatientDocumentSerializer,
-    HMOSerializer, SelfRegisterSerializer
+    HMOSerializer, SelfRegisterSerializer,
+    DependentCreateSerializer, DependentDetailSerializer, DependentUpdateSerializer,
 )
-from .permissions import IsSelfOrFacilityStaff, IsStaff
+from .permissions import IsSelfOrFacilityStaff, IsStaff, IsStaffOrGuardianForDependent, IsStaffOrSelfPatient
 from accounts.enums import UserRole
 
 class PatientViewSet(viewsets.GenericViewSet,
@@ -87,3 +89,70 @@ def self_register(request):
     s.is_valid(raise_exception=True)
     patient = s.save()
     return Response({"patient_id": patient.id}, status=201)
+
+# --- Dependent endpoints / viewset below ---
+
+class DependentViewSet(viewsets.ModelViewSet):
+    """
+    CRUD for individual dependents:
+      GET    /api/patients/dependents/{id}/
+      PATCH  /api/patients/dependents/{id}/
+      DELETE /api/patients/dependents/{id}/
+    """
+    queryset = Patient.objects.select_related("parent_patient").all()
+    permission_classes = [IsAuthenticated, IsStaffOrGuardianForDependent]
+
+    def get_serializer_class(self):
+        if self.request.method in ("PATCH", "PUT"):
+            return DependentUpdateSerializer
+        return DependentDetailSerializer
+
+    def get_queryset(self):
+        qs = super().get_queryset().filter(parent_patient__isnull=False)
+        user = self.request.user
+        
+        # Staff users should only see dependents from their facility
+        if getattr(user, "is_staff", False) or getattr(user, "is_clinician", False) or getattr(user, "is_admin", False):
+            if getattr(user, "facility_id", None):
+                return qs.filter(parent_patient__facility_id=user.facility_id)
+            return qs
+
+        # Guardian (patient user) 
+        patient_profile = getattr(user, "patient_profile", None)
+        if patient_profile:
+            return qs.filter(parent_parent_id=patient_profile.id)
+
+        # No access otherwise
+        return qs.none()
+
+
+def add_dependents_actions_to_patient_viewset(PatientViewSet):
+    @action(detail=True, methods=["get", "post"], url_path="dependents", permission_classes=[IsStaffOrSelfPatient])
+    def dependents(self, request, pk=None):
+        parent_patient = get_object_or_404(Patient, pk=pk)
+
+        if request.method.lower() == "get":
+            qs = Patient.objects.filter(parent_patient=parent_patient)
+            serializer = DependentDetailSerializer(qs, many=True)
+            return Response(serializer.data)
+
+        # POST create
+        serializer = DependentCreateSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        dependent = Patient(
+            **serializer.validated_data,
+            parent_patient=parent_patient,
+        )
+        # enforce model validation (clean) before save
+        dependent.full_clean()
+        dependent.save()
+
+        out = DependentDetailSerializer(dependent)
+        return Response(out.data, status=status.HTTP_201_CREATED)
+
+    setattr(PatientViewSet, "dependents", dependents)
+    return PatientViewSet
+
+# patch the existing PatientViewSet to add nested dependents action
+PatientViewSet = add_dependents_actions_to_patient_viewset(PatientViewSet)

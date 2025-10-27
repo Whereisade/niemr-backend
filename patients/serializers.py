@@ -82,3 +82,42 @@ class PatientDocumentSerializer(serializers.ModelSerializer):
     class Meta:
         model = PatientDocument
         fields = ["id","doc_type","file","uploaded_at"]
+
+# --- Dependent serializers added below ---
+
+from rest_framework import serializers as rf_serializers  # keep namespace clear if needed
+# using the existing Patient model fields: dob and gender
+BASIC_DEPENDENT_FIELDS = (
+    "id", "first_name", "last_name", "dob", "gender",
+    "parent_patient",  # read-only on list/detail; set on create by the view
+)
+
+class DependentCreateSerializer(serializers.ModelSerializer):
+    """
+    Create a dependent (child) for a parent patient.
+    parent_patient must be assigned by the view (not via client payload).
+    Dependents should not be created with a linked user account.
+    """
+    class Meta:
+        model = Patient
+        fields = ("first_name", "last_name", "dob", "gender")
+        # parent_patient set in view; user remains null for dependents
+
+    def validate(self, attrs):
+        # Prevent clients from attempting to attach a user via payload
+        if self.initial_data.get("user") or self.initial_data.get("user_id"):
+            raise rf_serializers.ValidationError("Dependents cannot be created with a linked user.")
+        return attrs
+
+
+class DependentDetailSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Patient
+        fields = BASIC_DEPENDENT_FIELDS
+        read_only_fields = ("parent_patient",)
+
+
+class DependentUpdateSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Patient
+        fields = ("first_name", "last_name", "dob", "gender")

@@ -2,6 +2,7 @@ from decimal import Decimal, ROUND_HALF_UP
 from django.conf import settings
 from django.core.validators import RegexValidator, MinValueValidator
 from django.db import models
+from django.core.exceptions import ValidationError
 from facilities.models import Facility
 from .enums import (PatientStatus, EncounterType, BloodGroup, Genotype, InsuranceStatus)
 
@@ -18,7 +19,16 @@ class Patient(models.Model):
     # ownership / scoping
     user = models.OneToOneField(settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL)
     facility = models.ForeignKey(Facility, null=True, blank=True, on_delete=models.SET_NULL, related_name="patients")
-    guardian_user = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL, related_name="dependents")  # parent/guardian
+    guardian_user = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL, related_name="guardian_dependents")  # parent/guardian
+    # self-referential parent (a Patient can be a dependent of another Patient)
+    parent_patient = models.ForeignKey(
+        "self",
+        null=True,
+        blank=True,
+        related_name="dependents",
+        on_delete=models.PROTECT,  # require reassignment/removal before deleting guardian
+        help_text="If set, this Patient is a dependent of `parent_patient`."
+    )
 
     # core demographics
     first_name = models.CharField(max_length=120)
@@ -69,14 +79,41 @@ class Patient(models.Model):
         bmi = (self.weight_kg / (h_m * h_m)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
         return bmi
 
+    def clean(self):
+        # self-parent validation
+        if self.parent_patient_id and self.parent_patient_id == self.id:
+            raise ValidationError("A patient cannot be their own parent.")
+
+        # prevent multi-level nesting 
+        if self.parent_patient and self.parent_patient.parent_patient_id:
+            raise ValidationError("Dependents cannot be nested more than one level.")
+
+        # facility alignment validation
+        if self.parent_patient_id:
+            if getattr(self, "facility_id", None) and self.facility_id != self.parent_patient.facility_id:
+                raise ValidationError("Dependent must belong to the same facility as guardian.")
+
     def save(self, *args, **kwargs):
+        # inherit scoping from guardian
+        if self.parent_patient_id:
+            if hasattr(self, "facility_id"):
+                self.facility_id = self.parent_patient.facility_id
+            if hasattr(self, "enterprise_id") and hasattr(self.parent_patient, "enterprise_id"):
+                self.enterprise_id = self.parent_patient.enterprise_id
+                
+        # existing calculations
         self.bmi = self._calc_bmi()
-        # normalize OTHER fields
         if self.blood_group != BloodGroup.OTHER:
             self.blood_group_other = ""
         if self.genotype != Genotype.OTHER:
             self.genotype_other = ""
+            
         super().save(*args, **kwargs)
+
+    @property
+    def is_dependent(self) -> bool:
+        """True if this patient is a dependent of another patient."""
+        return bool(self.parent_patient_id)
 
     def __str__(self):
         return f"{self.last_name}, {self.first_name}"

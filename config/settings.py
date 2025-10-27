@@ -73,6 +73,7 @@ INSTALLED_APPS = [
     "drf_spectacular_sidecar",
     "gunicorn",
     "storages",
+    "django_extensions",
 ]
 
 AUTH_USER_MODEL = "accounts.User"
