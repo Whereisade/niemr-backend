@@ -11,6 +11,7 @@ https://docs.djangoproject.com/en/5.2/ref/settings/
 """
 import os
 from datetime import timedelta
+from drf_spectacular.openapi import AutoSchema
 from pathlib import Path
 from dotenv import load_dotenv
 load_dotenv()
@@ -24,7 +25,7 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 
 # SECURITY WARNING: keep the secret key used in production secret!
 SECRET_KEY = os.getenv("DJANGO_SECRET_KEY", "dev-secret")
-DEBUG = os.getenv("DJANGO_DEBUG", "True") == "True"
+DEBUG =False
 ALLOWED_HOSTS = ["*"]
 RESEND_API_KEY = os.getenv("RESEND_API_KEY", "")
 RESEND_FROM    = os.getenv("RESEND_FROM", "no-reply@niemr.app")
@@ -91,10 +92,21 @@ REST_FRAMEWORK = {
     "DEFAULT_AUTHENTICATION_CLASSES": (
         "rest_framework_simplejwt.authentication.JWTAuthentication",
     ),
-    "DEFAULT_SCHEMA_CLASS": "rest_framework.schemas.openapi.AutoSchema",
+    "DEFAULT_SCHEMA_CLASS": "drf_spectacular.schemas.openapi.AutoSchema",
 }
 
-
+SPECTACULAR_SETTINGS = {
+    "TITLE": "NIEMR API",
+    "VERSION": "1.0.0",
+    "SERVE_INCLUDE_SCHEMA": False,
+    "COMPONENT_SPLIT_REQUEST": True,
+    "SECURITY": [{"bearerAuth": []}],
+    "COMPONENTS": {
+        "securitySchemes": {
+            "bearerAuth": {"type": "http", "scheme": "bearer", "bearerFormat": "JWT"}
+        }
+    },
+}
 
 SIMPLE_JWT = {
     "ACCESS_TOKEN_LIFETIME": timedelta(minutes=int(os.getenv("ACCESS_TOKEN_LIFETIME_MIN", "30"))),

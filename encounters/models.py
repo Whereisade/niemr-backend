@@ -7,7 +7,7 @@ from facilities.models import Facility
 from patients.models import Patient
 from .enums import EncounterStatus, EncounterType, Priority
 
-LOCK_AFTER_HOURS = 24 
+LOCK_AFTER_HOURS = 24
 
 class Encounter(models.Model):
     patient     = models.ForeignKey(Patient, on_delete=models.CASCADE, related_name="encounters")
@@ -22,21 +22,21 @@ class Encounter(models.Model):
     occurred_at    = models.DateTimeField(help_text="When the encounter took place")
 
     # subjective / objective
-    chief_complaint = models.TextField(blank=True)   # supports “1000 chars into 10 lines” in UI
-    duration_value  = models.PositiveIntegerField(null=True, blank=True)  # 3 chr limit in UI
-    duration_unit   = models.CharField(max_length=16, blank=True)         # minutes/hours/days/weeks/months/years
-    hpi             = models.TextField(blank=True)   # History of Present Illness
-    ros             = models.TextField(blank=True)   # Review of Systems
-    physical_exam   = models.TextField(blank=True)   # Objective
+    chief_complaint = models.TextField(blank=True)
+    duration_value  = models.PositiveIntegerField(null=True, blank=True)
+    duration_unit   = models.CharField(max_length=16, blank=True)
+    hpi             = models.TextField(blank=True)
+    ros             = models.TextField(blank=True)
+    physical_exam   = models.TextField(blank=True)
 
     # assessment & plan
-    diagnoses       = models.TextField(blank=True)   # free text (ICD later)
+    diagnoses       = models.TextField(blank=True)
     plan            = models.TextField(blank=True)
 
     # orders (hooks—actual items live in labs/imaging/pharmacy modules)
-    lab_order_ids      = models.JSONField(default=list, blank=True)     # list of LabOrder IDs
-    imaging_request_ids= models.JSONField(default=list, blank=True)     # list of ImagingRequest IDs
-    prescription_ids   = models.JSONField(default=list, blank=True)     # list of Prescription IDs
+    lab_order_ids       = models.JSONField(default=list, blank=True)
+    imaging_request_ids = models.JSONField(default=list, blank=True)
+    prescription_ids    = models.JSONField(default=list, blank=True)
 
     # immutability
     locked_at     = models.DateTimeField(null=True, blank=True)
@@ -81,8 +81,8 @@ class EncounterAmendment(models.Model):
     """
     encounter   = models.ForeignKey(Encounter, on_delete=models.CASCADE, related_name="amendments")
     added_by    = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, on_delete=models.SET_NULL)
-    reason      = models.CharField(max_length=255)         # why amendment
-    content     = models.TextField()                       # the amendment text (strike-through rendering is a UI concern)
+    reason      = models.CharField(max_length=255)
+    content     = models.TextField()
     created_at  = models.DateTimeField(auto_now_add=True)
 
     def __str__(self):

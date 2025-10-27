@@ -1,53 +1,78 @@
-from datetime import timedelta
-from django.utils import timezone
 from rest_framework import serializers
+from .models import Encounter, EncounterAmendment, LOCK_AFTER_HOURS
+from .enums import EncounterStatus
 
-from .models import Encounter, EncounterAmendment
-from .enums import EncounterStatus, EncounterType, Priority
+# Clinical payload that becomes immutable post-lock
+IMMUTABLE_FIELDS = {
+    "chief_complaint", "duration_value", "duration_unit",
+    "hpi", "ros", "physical_exam",
+    "diagnoses", "plan",
+    "lab_order_ids", "imaging_request_ids", "prescription_ids",
+    "occurred_at", "priority", "encounter_type",
+}
 
-IMMUTABLE_WINDOW_HOURS = 24
+def _immutable_changes(instance: Encounter, incoming: dict) -> set:
+    changed = set()
+    for f in IMMUTABLE_FIELDS:
+        if f in incoming and getattr(instance, f) != incoming[f]:
+            changed.add(f)
+    return changed
 
-class EncounterSerializer(serializers.ModelSerializer):
-    is_locked = serializers.BooleanField(read_only=True)
+class EncounterListSerializer(serializers.ModelSerializer):
+    locked = serializers.SerializerMethodField(read_only=True)
 
     class Meta:
         model = Encounter
-        fields = [
-            "id","patient","facility","created_by","updated_by",
-            "encounter_type","status","priority","occurred_at",
-            "chief_complaint","duration_value","duration_unit",
-            "hpi","ros","physical_exam",
-            "diagnoses","plan",
-            "lab_order_ids","imaging_request_ids","prescription_ids",
-            "locked_at","is_locked",
-            "created_at","updated_at",
-        ]
-        read_only_fields = ["facility","created_by","updated_by","locked_at","is_locked","created_at","updated_at"]
+        fields = ("id", "patient", "facility", "occurred_at", "status", "priority", "encounter_type",
+                  "chief_complaint", "diagnoses", "plan", "locked", "created_at")
+
+    def get_locked(self, obj):
+        return obj.is_locked
+
+class EncounterSerializer(serializers.ModelSerializer):
+    locked = serializers.SerializerMethodField(read_only=True)
+
+    class Meta:
+        model = Encounter
+        fields = "__all__"
+        read_only_fields = ("created_by","updated_by","locked_at","created_at","updated_at")
+
+    def get_locked(self, obj):
+        return obj.is_locked
 
     def create(self, validated):
-        validated["created_by"] = self.context["request"].user
+        req = self.context.get("request")
+        if req and req.user.is_authenticated:
+            validated["created_by"] = req.user
         return super().create(validated)
 
     def update(self, instance, validated):
-        # enforce immutability
-        now = timezone.now()
-        if instance.is_locked or now >= (instance.created_at + timedelta(hours=IMMUTABLE_WINDOW_HOURS)):
-            raise serializers.ValidationError("Encounter is locked after 24 hours. Please add an amendment instead.")
-        validated["updated_by"] = self.context["request"].user
+        # opportunistically lock if elapsed
+        instance.maybe_lock()
+
+        # Hard block: if locked or crossed out, clinical fields cannot change
+        if instance.is_locked or instance.status == EncounterStatus.CROSSED_OUT:
+            changed = _immutable_changes(instance, validated)
+            if changed:
+                raise serializers.ValidationError({
+                    "detail": f"Encounter becomes immutable after {LOCK_AFTER_HOURS} hours "
+                              f"or when crossed out. Blocked fields: {sorted(changed)}"
+                })
+
+        # Soft allow: we still permit status updates (e.g., OPEN→CLOSED) even after lock
+        req = self.context.get("request")
+        if req and req.user.is_authenticated:
+            validated["updated_by"] = req.user
         return super().update(instance, validated)
-
-
-class EncounterListSerializer(serializers.ModelSerializer):
-    class Meta:
-        model = Encounter
-        fields = [
-            "id","patient","occurred_at","encounter_type","status","priority",
-            "chief_complaint","diagnoses","plan","is_locked","created_at"
-        ]
-
 
 class AmendmentSerializer(serializers.ModelSerializer):
     class Meta:
         model = EncounterAmendment
-        fields = ["id","encounter","reason","content","added_by","created_at"]
-        read_only_fields = ["encounter","added_by","created_at"]
+        fields = ("id","encounter","added_by","reason","content","created_at")
+        read_only_fields = ("added_by","created_at")
+
+    def create(self, validated):
+        req = self.context.get("request")
+        if req and req.user.is_authenticated:
+            validated["added_by"] = req.user
+        return super().create(validated)

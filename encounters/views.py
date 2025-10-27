@@ -8,6 +8,7 @@ from rest_framework.response import Response
 from .models import Encounter, EncounterAmendment
 from .serializers import EncounterSerializer, EncounterListSerializer, AmendmentSerializer
 from .permissions import IsStaff, CanViewEncounter
+from .enums import EncounterStatus
 
 class EncounterViewSet(viewsets.GenericViewSet,
                        mixins.CreateModelMixin,
@@ -27,12 +28,11 @@ class EncounterViewSet(viewsets.GenericViewSet,
         u = self.request.user
 
         # patients see only their own encounters
-        if u.role == "PATIENT":
+        if getattr(u, "role", None) == "PATIENT":
             q = q.filter(patient__user_id=u.id)
-            # allow date filters
         else:
             # staff limited by facility
-            if u.facility_id:
+            if getattr(u, "facility_id", None):
                 q = q.filter(facility_id=u.facility_id)
 
         # filters
@@ -67,11 +67,11 @@ class EncounterViewSet(viewsets.GenericViewSet,
         obj = self.get_object()
         self.permission_classes = [IsAuthenticated, CanViewEncounter]
         self.check_object_permissions(request, obj)
-        ser = EncounterSerializer(obj)
+        ser = EncounterSerializer(obj, context={"request": request})
         return Response(ser.data)
 
     def update(self, request, *args, **kwargs):
-        # only staff may update (and only within 24h)
+        # only staff may update; serializer enforces the immutability
         self.permission_classes = [IsAuthenticated, IsStaff]
         self.check_permissions(request)
         return super().update(request, *args, **kwargs)
@@ -83,16 +83,15 @@ class EncounterViewSet(viewsets.GenericViewSet,
         payload: { "reason": "...", "content": "..." }
         """
         enc = self.get_object()
-        # anyone trying to amend must be staff on same facility or original creator
         self.permission_classes = [IsAuthenticated, IsStaff]
         self.check_permissions(request)
 
         if not enc.is_locked:
             return Response({"detail": "Encounter is not locked; edit the encounter instead."}, status=400)
 
-        s = AmendmentSerializer(data=request.data)
+        s = AmendmentSerializer(data=request.data, context={"request": request})
         s.is_valid(raise_exception=True)
-        obj = s.save(encounter=enc, added_by=request.user)
+        obj = s.save(encounter=enc)
         return Response(AmendmentSerializer(obj).data, status=201)
 
     @action(detail=True, methods=["get"])
@@ -111,8 +110,24 @@ class EncounterViewSet(viewsets.GenericViewSet,
         enc = self.get_object()
         self.permission_classes = [IsAuthenticated, IsStaff]
         self.check_permissions(request)
-        if enc.status == "CLOSED":
+        if enc.status == EncounterStatus.CLOSED:
             return Response({"detail":"Already closed"}, status=400)
-        enc.status = "CLOSED"
+        enc.status = EncounterStatus.CLOSED
         enc.save(update_fields=["status","updated_at"])
         return Response({"ok": True})
+
+    @action(detail=True, methods=["post"])
+    def cross_out(self, request, pk=None):
+        """
+        Cross-out an encounter: mark as CROSSED_OUT and prevent further clinical edits.
+        It remains visible for audit/history.
+        """
+        enc = self.get_object()
+        self.permission_classes = [IsAuthenticated, IsStaff]
+        self.check_permissions(request)
+
+        # ensure lock is applied if window elapsed, then cross out
+        enc.maybe_lock()
+        enc.status = EncounterStatus.CROSSED_OUT
+        enc.save(update_fields=["status","locked_at","updated_at"])
+        return Response({"detail": "Encounter crossed out.", "status": enc.status})

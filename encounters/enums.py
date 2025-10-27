@@ -1,8 +1,9 @@
 from django.db import models
 
 class EncounterStatus(models.TextChoices):
-    OPEN     = "OPEN", "Open"
-    CLOSED   = "CLOSED", "Closed"
+    OPEN        = "OPEN", "Open"
+    CLOSED      = "CLOSED", "Closed"
+    CROSSED_OUT = "CROSSED_OUT", "Crossed Out"  # already present
 
 class EncounterType(models.TextChoices):
     NEW       = "NEW","New"
