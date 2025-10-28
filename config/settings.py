@@ -25,7 +25,7 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 
 # SECURITY WARNING: keep the secret key used in production secret!
 SECRET_KEY = os.getenv("DJANGO_SECRET_KEY", "dev-secret")
-DEBUG =False
+DEBUG =True
 ALLOWED_HOSTS = ["*"]
 RESEND_API_KEY = os.getenv("RESEND_API_KEY", "")
 RESEND_FROM    = os.getenv("RESEND_FROM", "no-reply@niemr.app")
@@ -73,7 +73,6 @@ INSTALLED_APPS = [
     "drf_spectacular_sidecar",
     "gunicorn",
     "storages",
-    "django_extensions",
 ]
 
 AUTH_USER_MODEL = "accounts.User"
