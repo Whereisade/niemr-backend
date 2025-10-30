@@ -5,6 +5,8 @@ from django.db import connection, OperationalError
 
 import json
 from django.core.serializers.json import DjangoJSONEncoder
+from django.db import models
+from django.db.models.fields.files import FieldFile
 
 from django.contrib.contenttypes.models import ContentType
 from django.db.models import Model, ManyToManyField
@@ -12,14 +14,22 @@ from django.db.models import Model, ManyToManyField
 from .models import AuditLog
 from .enums import Verb
 from .local import get_request
-from .utils import safe_model_dict
 
 AUDIT_APPS = None  # set to a list like ["patients","vitals",...] to restrict; None = all apps
 
-def json_ready(payload):
-    """Convert Python objects (datetime, Decimal, etc.) into JSON-serializable types."""
-    # dumps with DjangoJSONEncoder, then loads back to plain Python types
-    return json.loads(json.dumps(payload, cls=DjangoJSONEncoder))
+class SafeJSONEncoder(DjangoJSONEncoder):
+    def default(self, o):
+        # FieldFile -> stored name or None
+        if isinstance(o, FieldFile):
+            return o.name or None
+        # sets -> lists
+        if isinstance(o, set):
+            return list(o)
+        return super().default(o)
+
+def json_ready(payload: dict):
+    # Use SafeJSONEncoder so files and sets don’t crash dumps()
+    return json.loads(json.dumps(payload, cls=SafeJSONEncoder))
 
 def _ctx():
     req = get_request()
@@ -60,6 +70,36 @@ def _skip_sender(sender) -> bool:
         "auth.permission",
         "auth.group",
     }
+
+def safe_model_dict(instance) -> dict:
+    """Return a dict of concrete field values for an instance.
+
+    - Skips reverse relations and m2m
+    - Converts FileField values to their stored name (or None)
+    """
+    data = {}
+    for f in instance._meta.get_fields():
+        # Skip reverse relations and m2m
+        if f.many_to_many or f.one_to_many or getattr(f, "auto_created", False):
+            continue
+
+        # Only concrete fields
+        if not hasattr(f, "attname"):
+            continue
+
+        val = getattr(instance, f.attname, None)
+
+        # File/ImageField → stored name
+        if isinstance(f, models.FileField):
+            data[f.name] = val.name if isinstance(val, FieldFile) else (val or None)
+            continue
+
+        # Normal fields
+        try:
+            data[f.name] = f.value_from_object(instance)
+        except Exception:
+            data[f.name] = val
+    return data
 
 @receiver(pre_save)
 def audit_pre_save(sender, instance, **kwargs):
