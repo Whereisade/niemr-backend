@@ -1,5 +1,7 @@
 from django.db import transaction
 from rest_framework import viewsets, mixins, status
+from rest_framework.views import APIView
+from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
 from rest_framework.decorators import action
 from rest_framework.permissions import IsAuthenticated, AllowAny
 from rest_framework.response import Response
@@ -10,7 +12,8 @@ from .models import Facility, Specialty, Ward, Bed, FacilityExtraDocument
 from .serializers import (
     FacilityCreateSerializer, FacilityDetailSerializer,
     SpecialtySerializer, WardSerializer, BedSerializer,
-    FacilityExtraDocumentSerializer
+    FacilityExtraDocumentSerializer,
+    FacilityAdminSignupSerializer
 )
 from .permissions import IsFacilityAdmin
 
@@ -88,7 +91,7 @@ class FacilityViewSet(viewsets.GenericViewSet,
         s.save()
         return Response(s.data, status=201)
 
-    @action(detail=False, methods=["get"], permission_classes=[IsAuthenticated])
+    @action(detail=False, methods=["get"], permission_classes=[AllowAny])
     def specialties(self, request):
         qs = Specialty.objects.all().order_by("name")
         return Response(SpecialtySerializer(qs, many=True).data)
@@ -125,3 +128,15 @@ class FacilityViewSet(viewsets.GenericViewSet,
         u.role = role
         u.save()
         return Response({"ok": True})
+
+
+# --- NIEMR: Public endpoint to create Facility + Super Admin and return tokens ---
+class FacilityAdminRegisterView(APIView):
+    permission_classes = [AllowAny]
+    parser_classes = [MultiPartParser, FormParser, JSONParser]
+
+    def post(self, request, *args, **kwargs):
+        s = FacilityAdminSignupSerializer(data=request.data, context={"request": request})
+        s.is_valid(raise_exception=True)
+        payload = s.save()  # dict with facility, user, tokens
+        return Response(payload, status=status.HTTP_201_CREATED)

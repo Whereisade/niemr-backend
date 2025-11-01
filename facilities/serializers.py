@@ -1,5 +1,10 @@
 from rest_framework import serializers
 from .models import Facility, Specialty, Ward, Bed, FacilityExtraDocument
+from django.contrib.auth import get_user_model
+from django.contrib.auth.password_validation import validate_password
+from django.core.exceptions import ValidationError as DjangoValidationError
+from django.db import transaction
+from rest_framework_simplejwt.tokens import RefreshToken
 
 class SpecialtySerializer(serializers.ModelSerializer):
     class Meta:
@@ -87,3 +92,102 @@ class FacilityDetailSerializer(serializers.ModelSerializer):
             "nhis_certificate","md_practice_license","state_registration_cert",
             "is_active","created_at","updated_at",
         ]
+
+# --- NIEMR: Public signup serializer to create Facility + Super Admin (with password) ---
+class FacilityAdminSignupSerializer(serializers.Serializer):
+    """Create Facility and the first SUPER_ADMIN user atomically, then return JWTs."""
+    # Admin fields
+    admin_email = serializers.EmailField()
+    admin_password = serializers.CharField(write_only=True, min_length=8)
+    admin_first_name = serializers.CharField(max_length=150)
+    admin_last_name = serializers.CharField(max_length=150)
+    admin_phone = serializers.CharField(max_length=50, required=False, allow_blank=True)
+
+    # Facility fields (align with models.Facility)
+    name = serializers.CharField(max_length=255)
+    facility_type = serializers.CharField(max_length=32, required=False, allow_blank=True)
+    controlled_by = serializers.CharField(max_length=32, required=False, allow_blank=True)
+    country = serializers.CharField(max_length=64)
+    state = serializers.CharField(max_length=64, required=False, allow_blank=True)
+    lga = serializers.CharField(max_length=64, required=False, allow_blank=True)
+    city = serializers.CharField(max_length=64, required=False, allow_blank=True)
+    address = serializers.CharField(required=False, allow_blank=True, max_length=500)
+    email = serializers.EmailField(required=False, allow_blank=True)
+    phone = serializers.CharField(required=False, allow_blank=True, max_length=32)
+    registration_number = serializers.CharField(required=False, allow_blank=True, max_length=120)
+    nhis_approved = serializers.BooleanField(required=False)
+    nhis_number = serializers.CharField(required=False, allow_blank=True, max_length=120)
+
+    # optional single specialty id or list of names
+    specialty = serializers.PrimaryKeyRelatedField(queryset=Specialty.objects.all(), required=False, allow_null=True)
+    specialties = serializers.ListField(
+        child=serializers.CharField(max_length=120), write_only=True, required=False
+    )
+
+    def validate_admin_email(self, value):
+        User = get_user_model()
+        if User.objects.filter(email__iexact=value).exists():
+            raise serializers.ValidationError("Email is already in use.")
+        return value
+
+    def validate_admin_password(self, value):
+        try:
+            validate_password(value)
+        except DjangoValidationError as e:
+            raise serializers.ValidationError(list(e.messages))
+        return value
+
+    @transaction.atomic
+    def create(self, validated_data):
+        from accounts.enums import UserRole  # local import to avoid cycles
+        User = get_user_model()
+
+        # extract admin bits
+        admin_email = validated_data.pop("admin_email")
+        admin_password = validated_data.pop("admin_password")
+        admin_first_name = validated_data.pop("admin_first_name")
+        admin_last_name = validated_data.pop("admin_last_name")
+        admin_phone = validated_data.pop("admin_phone", "")
+
+        specialty_pk = validated_data.pop("specialty", None)
+        specialties_names = validated_data.pop("specialties", None)
+
+        # create facility
+        facility = Facility.objects.create(**validated_data)
+
+        # specialties handling
+        if specialty_pk:
+            facility.specialties.add(specialty_pk)
+        if specialties_names:
+            for name in specialties_names:
+                sp, _ = Specialty.objects.get_or_create(name=name.strip())
+                facility.specialties.add(sp)
+
+        # create admin user
+        user = User(
+            email=admin_email,
+            first_name=admin_first_name,
+            last_name=admin_last_name,
+            role=getattr(UserRole, "SUPER_ADMIN", "SUPER_ADMIN"),
+            facility=facility,
+            is_active=True,
+        )
+        user.set_password(admin_password)
+        # if the custom User has 'phone' field, set it
+        if hasattr(user, "phone") and admin_phone:
+            user.phone = admin_phone
+        user.save()
+
+        # tokens
+        refresh = RefreshToken.for_user(user)
+        return {
+            "facility": {"id": str(getattr(facility, "id", "")), "name": facility.name},
+            "user": {
+                "id": str(getattr(user, "id", "")),
+                "email": user.email,
+                "first_name": user.first_name,
+                "last_name": user.last_name,
+                "role": getattr(user, "role", None),
+            },
+            "tokens": {"refresh": str(refresh), "access": str(refresh.access_token)},
+        }
