@@ -73,7 +73,7 @@ INSTALLED_APPS = [
     "drf_spectacular_sidecar",
     "gunicorn",
     "storages",
-    "corsheaders",
+    # "corsheaders",
 ]
 
 AUTH_USER_MODEL = "accounts.User"
@@ -115,13 +115,13 @@ SIMPLE_JWT = {
     "AUTH_HEADER_TYPES": ("Bearer", "JWT"),
 }
 
-CORS_ALLOW_ALL_ORIGINS = True
-CORS_ALLOW_CREDENTIALS = True           # since we’re using Authorization header for direct calls
-CORS_ALLOW_METHODS = ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"]
-CORS_ALLOW_HEADERS = ["authorization", "content-type", "accept", "origin", "x-requested-with"]
+# CORS_ALLOW_ALL_ORIGINS = True
+# CORS_ALLOW_CREDENTIALS = True           # since we’re using Authorization header for direct calls
+# CORS_ALLOW_METHODS = ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"]
+# CORS_ALLOW_HEADERS = ["authorization", "content-type", "accept", "origin", "x-requested-with"]
 
 
-CSRF_TRUSTED_ORIGINS = ["http://localhost:3000"]
+# CSRF_TRUSTED_ORIGINS = ["http://localhost:3000"]
 
 MIDDLEWARE = [
     "corsheaders.middleware.CorsMiddleware",
