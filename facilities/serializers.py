@@ -5,6 +5,8 @@ from django.contrib.auth.password_validation import validate_password
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db import transaction
 from rest_framework_simplejwt.tokens import RefreshToken
+from django.utils.text import slugify
+from accounts.models import UserRole
 
 class SpecialtySerializer(serializers.ModelSerializer):
     class Meta:
@@ -139,18 +141,21 @@ class FacilityAdminSignupSerializer(serializers.Serializer):
 
     @transaction.atomic
     def create(self, validated_data):
-        from accounts.enums import UserRole  # local import to avoid cycles
         User = get_user_model()
 
-        # extract admin bits
-        admin_email = validated_data.pop("admin_email")
+        # normalize and extract admin fields
+        admin_email = validated_data.pop("admin_email").strip().lower()
         admin_password = validated_data.pop("admin_password")
-        admin_first_name = validated_data.pop("admin_first_name")
-        admin_last_name = validated_data.pop("admin_last_name")
-        admin_phone = validated_data.pop("admin_phone", "")
+        admin_first_name = validated_data.pop("admin_first_name", "").strip()
+        admin_last_name = validated_data.pop("admin_last_name", "").strip()
+        admin_phone = validated_data.pop("admin_phone", "").strip()
 
         specialty_pk = validated_data.pop("specialty", None)
         specialties_names = validated_data.pop("specialties", None)
+
+        # fail fast if email already taken
+        if User.objects.filter(email__iexact=admin_email).exists():
+            raise serializers.ValidationError({"admin_email": "Email is already registered."})
 
         # create facility
         facility = Facility.objects.create(**validated_data)
@@ -163,20 +168,20 @@ class FacilityAdminSignupSerializer(serializers.Serializer):
                 sp, _ = Specialty.objects.get_or_create(name=name.strip())
                 facility.specialties.add(sp)
 
-        # create admin user
-        user = User(
-            email=admin_email,
+        # Create user using email as the USERNAME_FIELD (pass email as first positional arg)
+        user = User.objects.create_user(
+            admin_email,
+            password=admin_password,
             first_name=admin_first_name,
             last_name=admin_last_name,
-            role=getattr(UserRole, "SUPER_ADMIN", "SUPER_ADMIN"),
+            role=getattr(UserRole, "SUPER_ADMIN", None),
             facility=facility,
             is_active=True,
+            is_staff=True,
         )
-        user.set_password(admin_password)
-        # if the custom User has 'phone' field, set it
         if hasattr(user, "phone") and admin_phone:
             user.phone = admin_phone
-        user.save()
+            user.save()
 
         # tokens
         refresh = RefreshToken.for_user(user)

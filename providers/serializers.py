@@ -77,9 +77,10 @@ class SelfRegisterProviderSerializer(serializers.Serializer):
 
     @transaction.atomic
     def create(self, validated):
-        email = validated["email"]
-        if User.objects.filter(email=email).exists():
-            raise serializers.ValidationError("A user with this email already exists.")
+        email = validated["email"].strip().lower()
+        if User.objects.filter(email__iexact=email).exists():
+            raise serializers.ValidationError({"email": "Email is already registered."})
+
         # role mapping: prefer specific roles for RBAC
         pt = validated["provider_type"]
         role_map = {
@@ -90,14 +91,13 @@ class SelfRegisterProviderSerializer(serializers.Serializer):
         }
         role = role_map.get(pt, UserRole.DOCTOR)
 
-        user = User.objects.create(
-            email=email,
-            username=email.split("@")[0],
-            role=role,
+        user = User.objects.create_user(
+            email,
+            password=validated["password"],
             first_name=validated["first_name"],
             last_name=validated["last_name"],
+            role=role,
         )
-        user.set_password(validated["password"]); user.save()
 
         prof = ProviderProfile.objects.create(
             user=user,

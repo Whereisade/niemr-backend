@@ -25,7 +25,7 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 
 # SECURITY WARNING: keep the secret key used in production secret!
 SECRET_KEY = os.getenv("DJANGO_SECRET_KEY", "dev-secret")
-DEBUG =False
+DEBUG =True
 ALLOWED_HOSTS = ["*"]
 RESEND_API_KEY = os.getenv("RESEND_API_KEY", "")
 RESEND_FROM    = os.getenv("RESEND_FROM", "no-reply@niemr.app")
@@ -158,22 +158,43 @@ EMAILS_PROVIDER = "RESEND"
 # Database
 # https://docs.djangoproject.com/en/5.2/ref/settings/#databases
 
-STORAGES = {        
+# STORAGES = {        
+#     "default": {
+#         "BACKEND": "storages.backends.s3boto3.S3Boto3Storage",
+#     },                      
+#     "staticfiles": {
+#         "BACKEND": "whitenoise.storage.CompressedManifestStaticFilesStorage",
+#     },
+# }
+
+# DATABASES = {  # <— REPLACE
+#     "default": dj_database_url.config(
+#         env="DATABASE_URL",
+#         conn_max_age=60,
+#         ssl_require=True,
+#     )
+# }
+
+
+
+DATABASES = {
     "default": {
-        "BACKEND": "storages.backends.s3boto3.S3Boto3Storage",
-    },                      
+        "ENGINE": "django.db.backends.sqlite3",
+        "NAME": BASE_DIR / "db.sqlite3",
+    }
+}
+
+
+STORAGES = {
+    "default": {
+        "BACKEND": "django.core.files.storage.FileSystemStorage",
+    },
     "staticfiles": {
-        "BACKEND": "whitenoise.storage.CompressedManifestStaticFilesStorage",
+        "BACKEND": "django.contrib.staticfiles.storage.StaticFilesStorage",
     },
 }
 
-DATABASES = {  # <— REPLACE
-    "default": dj_database_url.config(
-        env="DATABASE_URL",
-        conn_max_age=60,
-        ssl_require=True,
-    )
-}
+
 
 
 # Password validation

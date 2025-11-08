@@ -1,14 +1,24 @@
+# facilities/admin.py
 from django.contrib import admin, messages
 from django import forms
 from django.contrib.auth import get_user_model
 from django.contrib.auth.password_validation import validate_password, ValidationError as PWValidationError
 
 from .models import Facility, Ward, Bed, Specialty, FacilityExtraDocument
-from accounts.enums import UserRole  # your project already uses this in views
+
+# Try both import paths so we don't crash if project uses a different location
+try:
+    from accounts.enums import UserRole  # preferred
+except Exception:
+    try:
+        from accounts.constants import UserRole  # fallback
+    except Exception:
+        UserRole = type("UserRole", (), {"SUPER_ADMIN": "SUPER_ADMIN"})
 
 class FacilityAdminForm(forms.ModelForm):
     """
-    Extends the Facility admin form with optional fields to create the first Super Admin.
+    Extends the Facility admin form with optional fields to create
+    the first Super Admin (with password).
     """
     create_super_admin = forms.BooleanField(
         required=False,
@@ -18,9 +28,9 @@ class FacilityAdminForm(forms.ModelForm):
     admin_email = forms.EmailField(required=False, help_text="Email for the Super Admin to log in.")
     admin_password1 = forms.CharField(required=False, widget=forms.PasswordInput, label="Password")
     admin_password2 = forms.CharField(required=False, widget=forms.PasswordInput, label="Confirm password")
-    admin_first_name = forms.CharField(required=False)
-    admin_last_name = forms.CharField(required=False)
-    admin_phone = forms.CharField(required=False)
+    admin_first_name = forms.CharField(required=False, label="First name")
+    admin_last_name = forms.CharField(required=False, label="Last name")
+    admin_phone = forms.CharField(required=False, label="Phone")
 
     class Meta:
         model = Facility
@@ -29,7 +39,6 @@ class FacilityAdminForm(forms.ModelForm):
     def clean(self):
         cleaned = super().clean()
         if cleaned.get("create_super_admin"):
-            # Require core fields
             required_fields = ["admin_email", "admin_password1", "admin_password2", "admin_first_name", "admin_last_name"]
             missing = [f for f in required_fields if not cleaned.get(f)]
             if missing:
@@ -40,7 +49,6 @@ class FacilityAdminForm(forms.ModelForm):
             if p1 != p2:
                 raise forms.ValidationError({"admin_password2": "Passwords do not match."})
 
-            # Validate password strength
             try:
                 validate_password(p1)
             except PWValidationError as e:
@@ -57,30 +65,46 @@ class FacilityAdmin(admin.ModelAdmin):
     search_fields = ("name", "email", "registration_number", "state", "lga")
     list_filter = ("facility_type", "nhis_approved", "country", "state")
 
-    fieldsets = (
-        (None, {
-            "fields": (
-                "facility_type", "name", "controlled_by",
-                "country", "state", "lga", "address",
-                "email", "registration_number", "phone",
-                "nhis_approved", "nhis_number",
-                "total_bed_capacity", "specialties",
-                "nhis_certificate", "md_practice_license", "state_registration_cert",
-                "is_active",
-            )
-        }),
-        ("Create first Super Admin (optional)", {
-            "classes": ("collapse",),  # expand/collapse in admin UI
-            "fields": (
-                "create_super_admin",
-                "admin_email", "admin_password1", "admin_password2",
-                "admin_first_name", "admin_last_name", "admin_phone",
+    def _existing_model_fields(self):
+        """
+        Return a set of field names that actually exist on Facility to avoid fieldset crashes.
+        """
+        return {f.name for f in Facility._meta.get_fields() if getattr(f, "editable", False) or f.many_to_many}
+
+    def get_fieldsets(self, request, obj=None):
+        # Candidate facility fields (we'll filter by model reality)
+        candidates = (
+            "facility_type", "name", "controlled_by",
+            "country", "state", "lga", "city", "address",
+            "email", "registration_number", "phone",
+            "nhis_approved", "nhis_number",
+            "total_bed_capacity", "specialties",
+            "nhis_certificate", "md_practice_license", "state_registration_cert",
+            "is_active", "logo",
+        )
+        existing = self._existing_model_fields()
+        main_fields = tuple([f for f in candidates if f in existing])
+
+        fieldsets = [
+            (None, {"fields": main_fields}),
+            (
+                "Create first Super Admin (optional)",
+                {
+                    "classes": ("collapse",),
+                    "fields": (
+                        "create_super_admin",
+                        "admin_email", "admin_password1", "admin_password2",
+                        "admin_first_name", "admin_last_name", "admin_phone",
+                    ),
+                    "description": (
+                        "Create or attach the first SUPER_ADMIN for this facility. "
+                        "If an account with this email already exists, it will be linked and promoted. "
+                        "If a new password is provided for an existing user, it will be updated."
+                    ),
+                },
             ),
-            "description": "Create or attach the first SUPER_ADMIN for this facility. "
-                           "If an account with this email already exists, it will be linked to this facility and "
-                           "promoted to SUPER_ADMIN. If you enter a new password for an existing user, it will be updated."
-        }),
-    )
+        ]
+        return fieldsets
 
     def save_model(self, request, obj: Facility, form, change):
         """
@@ -89,40 +113,34 @@ class FacilityAdmin(admin.ModelAdmin):
         super().save_model(request, obj, form, change)
 
         if not form.cleaned_data.get("create_super_admin"):
-            return  # nothing else to do
+            return
 
         User = get_user_model()
 
-        admin_email = form.cleaned_data.get("admin_email")
-        admin_first_name = form.cleaned_data.get("admin_first_name") or ""
-        admin_last_name = form.cleaned_data.get("admin_last_name") or ""
-        admin_phone = form.cleaned_data.get("admin_phone") or ""
-        admin_password = form.cleaned_data.get("admin_password1")
+        admin_email = (form.cleaned_data.get("admin_email") or "").strip()
+        admin_first_name = (form.cleaned_data.get("admin_first_name") or "").strip()
+        admin_last_name = (form.cleaned_data.get("admin_last_name") or "").strip()
+        admin_phone = (form.cleaned_data.get("admin_phone") or "").strip()
+        admin_password = form.cleaned_data.get("admin_password1") or ""
 
-        user, created = User.objects.get_or_create(
-            email__iexact=admin_email,
-            defaults={
-                "email": admin_email,
-                "first_name": admin_first_name,
-                "last_name": admin_last_name,
-                "is_active": True,
-            },
-        )
-        # get_or_create with email__iexact uses lookup; if not created, we must fetch again by email
-        if not created and not hasattr(user, "id"):
-            try:
-                user = User.objects.get(email__iexact=admin_email)
-            except User.DoesNotExist:
-                # Fallback: create explicitly
-                user = User(email=admin_email, first_name=admin_first_name, last_name=admin_last_name, is_active=True)
-                created = True
+        if not admin_email:
+            messages.warning(request, "Super Admin not created: email missing.")
+            return
 
-        # Update (or set) fields
-        # Only change password if a new one was supplied
+        # Case-insensitive lookup WITHOUT using get_or_create with lookups
+        qs = User._default_manager.filter(email__iexact=admin_email)
+        created = False
+        if qs.exists():
+            user = qs.first()
+        else:
+            user = User(email=admin_email, first_name=admin_first_name, last_name=admin_last_name, is_active=True)
+            created = True
+
+        # Set password only if provided, so we don't accidentally blank it
         if admin_password:
             user.set_password(admin_password)
 
-        # Update names/phone if provided (don’t overwrite with blanks)
+        # Update fields if provided
         if admin_first_name:
             user.first_name = admin_first_name
         if admin_last_name:
@@ -131,8 +149,14 @@ class FacilityAdmin(admin.ModelAdmin):
             user.phone = admin_phone
 
         # Attach to facility & elevate role
-        user.facility = obj
-        user.role = getattr(UserRole, "SUPER_ADMIN", "SUPER_ADMIN")
+        try:
+            user.role = getattr(UserRole, "SUPER_ADMIN", "SUPER_ADMIN")
+        except Exception:
+            user.role = "SUPER_ADMIN"
+
+        if hasattr(user, "facility"):
+            user.facility = obj
+
         user.is_active = True
         user.save()
 
@@ -140,7 +164,6 @@ class FacilityAdmin(admin.ModelAdmin):
             messages.success(request, f"Super Admin '{user.email}' created and attached to {obj.name}.")
         else:
             messages.success(request, f"Super Admin '{user.email}' attached/updated for {obj.name}.")
-        
 
 admin.site.register(Ward)
 admin.site.register(Bed)

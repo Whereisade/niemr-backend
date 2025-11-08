@@ -65,13 +65,18 @@ class SelfRegisterSerializer(serializers.Serializer):
     @transaction.atomic
     def create(self, validated):
         # 1) Create User with PATIENT role
-        email = validated["email"]
+        email = validated["email"].strip().lower()
         password = validated["password"]
-        if User.objects.filter(email=email).exists():
-            raise serializers.ValidationError("A user with this email already exists.")
-        user = User.objects.create(email=email, username=email.split("@")[0], role=UserRole.PATIENT)
-        user.set_password(password)
-        user.save()
+        if User.objects.filter(email__iexact=email).exists():
+            raise serializers.ValidationError({"email": "Email is already registered."})
+
+        user = User.objects.create_user(
+            email,
+            password=password,
+            first_name=validated["first_name"],
+            last_name=validated["last_name"],
+            role=UserRole.PATIENT,
+        )
 
         # 2) Create Patient linked to user
         p_fields = {k: v for k, v in validated.items() if k not in ("email","password")}
