@@ -1,9 +1,10 @@
 from django.db.models import Q
 from django.utils.dateparse import parse_datetime
 from rest_framework import viewsets, mixins, status
-from rest_framework.decorators import action, api_view, permission_classes
+from rest_framework.decorators import action, api_view, permission_classes, parser_classes
 from rest_framework.permissions import IsAuthenticated, AllowAny
 from rest_framework.response import Response
+from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
 
 from .models import ProviderProfile, ProviderDocument
 from .serializers import (
@@ -86,11 +87,44 @@ class ProviderViewSet(viewsets.GenericViewSet,
 
 @api_view(["POST"])
 @permission_classes([AllowAny])
+@parser_classes([MultiPartParser, FormParser, JSONParser])
 def self_register(request):
     """
     Public: create User (role derived from provider_type) + ProviderProfile (PENDING).
+    Accepts multipart/form-data for document uploads.
     """
     s = SelfRegisterProviderSerializer(data=request.data)
     s.is_valid(raise_exception=True)
-    prof = s.save()
-    return Response({"provider_id": prof.id, "verification_status": prof.verification_status}, status=201)
+    result = s.save()
+
+    # Handle both dictionary and ProviderProfile instance returns
+    if isinstance(result, dict):
+        provider_id = result.get("profile_id") or result.get("provider_id")
+        
+        # Get verification status from DB if not in result
+        verification_status = result.get("verification_status")
+        if provider_id and verification_status is None:
+            verification_status = (
+                ProviderProfile.objects
+                .only("verification_status")
+                .get(id=provider_id)
+                .verification_status
+            )
+
+        response_data = {
+            "provider_id": provider_id,
+            "verification_status": verification_status,
+        }
+
+        # Include tokens if present
+        if "access" in result:
+            response_data["access"] = result["access"]
+            response_data["refresh"] = result["refresh"]
+
+        return Response(response_data, status=201)
+
+    # Handle ProviderProfile instance return
+    return Response(
+        {"provider_id": result.id, "verification_status": result.verification_status}, 
+        status=201
+    )

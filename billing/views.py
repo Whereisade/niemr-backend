@@ -6,6 +6,7 @@ from rest_framework import viewsets, mixins, status
 from rest_framework.decorators import action
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
+from rest_framework_simplejwt.authentication import JWTAuthentication
 
 from .models import Service, Price, Charge, Payment, PaymentAllocation
 from .serializers import (
@@ -21,6 +22,7 @@ from notifications.services.notify import notify_user
 class ServiceViewSet(viewsets.GenericViewSet, mixins.ListModelMixin, mixins.CreateModelMixin):
     queryset = Service.objects.filter(is_active=True).order_by("name")
     serializer_class = ServiceSerializer
+    authentication_classes = [JWTAuthentication]
     permission_classes = [IsAuthenticated]
 
     def create(self, request, *args, **kwargs):
@@ -54,6 +56,7 @@ class ServiceViewSet(viewsets.GenericViewSet, mixins.ListModelMixin, mixins.Crea
 # --- Facility Prices ---
 class PriceViewSet(viewsets.GenericViewSet, mixins.ListModelMixin, mixins.CreateModelMixin):
     serializer_class = PriceSerializer
+    authentication_classes = [JWTAuthentication]
     permission_classes = [IsAuthenticated, IsStaff]
 
     def get_queryset(self):
@@ -62,6 +65,7 @@ class PriceViewSet(viewsets.GenericViewSet, mixins.ListModelMixin, mixins.Create
 # --- Charges ---
 class ChargeViewSet(viewsets.GenericViewSet, mixins.CreateModelMixin, mixins.RetrieveModelMixin, mixins.ListModelMixin):
     queryset = Charge.objects.select_related("patient","facility","service","created_by")
+    authentication_classes = [JWTAuthentication]
     permission_classes = [IsAuthenticated]
 
     def get_serializer_class(self):
@@ -142,6 +146,7 @@ class ChargeViewSet(viewsets.GenericViewSet, mixins.CreateModelMixin, mixins.Ret
 # --- Payments ---
 class PaymentViewSet(viewsets.GenericViewSet, mixins.CreateModelMixin, mixins.RetrieveModelMixin, mixins.ListModelMixin):
     queryset = Payment.objects.select_related("patient","facility","received_by")
+    authentication_classes = [JWTAuthentication]
     permission_classes = [IsAuthenticated]
 
     def get_serializer_class(self):

@@ -5,6 +5,7 @@ from rest_framework import viewsets, mixins, status
 from rest_framework.decorators import action
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
+from rest_framework_simplejwt.authentication import JWTAuthentication
 
 from .models import Drug, StockItem, StockTxn, Prescription
 from .serializers import (
@@ -18,6 +19,7 @@ from .enums import RxStatus, TxnType
 class DrugViewSet(viewsets.GenericViewSet, mixins.ListModelMixin, mixins.CreateModelMixin):
     queryset = Drug.objects.filter(is_active=True).order_by("name")
     serializer_class = DrugSerializer
+    authentication_classes = [JWTAuthentication]
     permission_classes = [IsAuthenticated]
 
     def create(self, request, *args, **kwargs):
@@ -92,6 +94,7 @@ class StockViewSet(viewsets.GenericViewSet, mixins.ListModelMixin):
 # --- Prescriptions ---
 class PrescriptionViewSet(viewsets.GenericViewSet, mixins.CreateModelMixin, mixins.RetrieveModelMixin, mixins.ListModelMixin):
     queryset = Prescription.objects.select_related("patient","facility","prescribed_by").prefetch_related("items","items__drug")
+    authentication_classes = [JWTAuthentication]
     permission_classes = [IsAuthenticated]
 
     def get_serializer_class(self):

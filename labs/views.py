@@ -5,6 +5,7 @@ from rest_framework import viewsets, mixins, status
 from rest_framework.decorators import action
 from rest_framework.permissions import IsAuthenticated, AllowAny
 from rest_framework.response import Response
+from rest_framework_simplejwt.authentication import JWTAuthentication
 from notifications.services.notify import notify_user
 
 from .models import LabTest, LabOrder, LabOrderItem
@@ -20,6 +21,7 @@ from .services.notify import notify_result_ready
 class LabTestViewSet(viewsets.GenericViewSet, mixins.ListModelMixin, mixins.CreateModelMixin):
     queryset = LabTest.objects.filter(is_active=True).order_by("name")
     serializer_class = LabTestSerializer
+    authentication_classes = [JWTAuthentication]
     permission_classes = [IsAuthenticated]
 
     def create(self, request, *args, **kwargs):
@@ -61,6 +63,7 @@ class LabOrderViewSet(viewsets.GenericViewSet,
                       mixins.RetrieveModelMixin,
                       mixins.ListModelMixin):
     queryset = LabOrder.objects.select_related("patient","facility","ordered_by").prefetch_related("items","items__test")
+    authentication_classes = [JWTAuthentication]
     permission_classes = [IsAuthenticated]
 
     def get_serializer_class(self):

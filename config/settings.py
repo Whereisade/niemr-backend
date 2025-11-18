@@ -91,7 +91,7 @@ REPORTS_BRAND = {
 
 REST_FRAMEWORK = {
     "DEFAULT_AUTHENTICATION_CLASSES": (
-        "rest_framework_simplejwt.authentication.JWTAuthentication",
+        "accounts.authentication.HeaderJWTAuthentication",
     ),
     "DEFAULT_SCHEMA_CLASS": "drf_spectacular.schemas.openapi.AutoSchema",
 }

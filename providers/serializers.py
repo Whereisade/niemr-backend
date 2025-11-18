@@ -1,87 +1,171 @@
+# providers/serializers.py
 from django.db import transaction
+from django.contrib.auth import get_user_model
+from django.contrib.auth.password_validation import validate_password
+
 from rest_framework import serializers
-from accounts.models import User
+from rest_framework_simplejwt.tokens import RefreshToken
+
 from accounts.enums import UserRole
 from facilities.models import Specialty
 from .models import ProviderProfile, ProviderDocument
 from .enums import ProviderType, Council, VerificationStatus
 
+# -------------------------
+# Country/State Choices
+# -------------------------
+# Prefer a single source of truth if your project defines it.
+try:
+    # expected: COUNTRY_CHOICES = [("nigeria","Nigeria"), ...]
+    #           NIGERIA_STATES_BY_CODE = {"Lagos": "Lagos", ...} or {"LA": "Lagos", ...}
+    from core.choices import COUNTRY_CHOICES, NIGERIA_STATES_BY_CODE  # type: ignore
+except Exception:
+    # Fallbacks if core.choices isn't available
+    COUNTRY_CHOICES = [("nigeria", "Nigeria")]
+    DEFAULT_NG_STATES = [
+        "Abia","Adamawa","Akwa Ibom","Anambra","Bauchi","Bayelsa","Benue","Borno",
+        "Cross River","Delta","Ebonyi","Edo","Ekiti","Enugu","Gombe","Imo","Jigawa",
+        "Kaduna","Kano","Katsina","Kebbi","Kogi","Kwara","Lagos","Nasarawa","Niger",
+        "Ogun","Ondo","Osun","Oyo","Plateau","Rivers","Sokoto","Taraba","Yobe","Zamfara","FCT"
+    ]
+    NIGERIA_STATES_BY_CODE = {s: s for s in DEFAULT_NG_STATES}
+
+User = get_user_model()
+
+
+# -------------------------
+# Provider Profile (read/write)
+# -------------------------
 class ProviderProfileSerializer(serializers.ModelSerializer):
+    """
+    General ProviderProfile serializer used by internal/admin endpoints.
+    Supports writing specialties via a plain string list and reads them back with `specialties_read`.
+    """
+    # Write specialties as a simple list of strings; store as M2M to Specialty
     specialties = serializers.ListField(
-        child=serializers.CharField(max_length=120), write_only=True, required=False
+        child=serializers.CharField(max_length=120),
+        write_only=True,
+        required=False
     )
     specialties_read = serializers.SerializerMethodField(read_only=True)
 
+    # Make user read-only in this serializer (created elsewhere)
+    user = serializers.PrimaryKeyRelatedField(read_only=True)
+
+    # Read-only nested documents (avoids relying on related_name)
+    documents_read = serializers.SerializerMethodField(read_only=True)
+
     class Meta:
         model = ProviderProfile
-        fields = [
-            "id","user","provider_type","specialties","specialties_read",
-            "license_council","license_number","license_expiry",
-            "years_experience","bio",
-            "phone","country","state","lga","address",
-            "consultation_fee",
-            "verification_status","verified_at","verified_by","rejection_reason",
-            "created_at","updated_at",
-        ]
-        read_only_fields = ["user","verification_status","verified_at","verified_by","rejection_reason","created_at","updated_at"]
+        fields = "__all__"
 
     def get_specialties_read(self, obj):
         return [s.name for s in obj.specialties.all()]
 
-    def _upsert_specialties(self, profile, names):
-        if not names:
+    def get_documents_read(self, obj):
+        qs = ProviderDocument.objects.filter(profile=obj).order_by("-uploaded_at")
+        return ProviderDocumentSerializer(qs, many=True).data
+
+    def _upsert_specialties(self, prof: ProviderProfile, names):
+        if names is None:
             return
-        specs = []
+        prof.specialties.clear()
         for n in names:
-            s, _ = Specialty.objects.get_or_create(name=n.strip())
-            specs.append(s)
-        profile.specialties.set(specs)
+            n = (n or "").strip()
+            if not n:
+                continue
+            s, _ = Specialty.objects.get_or_create(name=n)
+            prof.specialties.add(s)
 
-    def create(self, validated):
-        # only used by admin-created profiles; self-register uses SelfRegisterProviderSerializer
-        prof = ProviderProfile.objects.create(**validated)
-        self._upsert_specialties(prof, self.initial_data.get("specialties"))
+    def create(self, validated_data):
+        names = self.initial_data.get("specialties")
+        prof = super().create(validated_data)
+        self._upsert_specialties(prof, names)
         return prof
 
-    def update(self, instance, validated):
-        prof = super().update(instance, validated)
-        if "specialties" in self.initial_data:
-            self._upsert_specialties(prof, self.initial_data.get("specialties"))
+    def update(self, instance, validated_data):
+        names = self.initial_data.get("specialties")
+        prof = super().update(instance, validated_data)
+        self._upsert_specialties(prof, names)
         return prof
 
+
+# -------------------------
+# Documents
+# -------------------------
+class ProviderDocumentSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = ProviderDocument
+        fields = ["id", "kind", "file", "uploaded_at"]
+        read_only_fields = ["id", "uploaded_at"]
+
+
+# -------------------------
+# Public Self-Registration (with nested documents)
+# -------------------------
 class SelfRegisterProviderSerializer(serializers.Serializer):
     """
     Public endpoint to create an independent provider:
-    - User (role set from provider_type; no facility)
-    - ProviderProfile (PENDING verification)
+      - Creates User (email is USERNAME_FIELD)
+      - Creates ProviderProfile (PENDING verification)
+      - Optional nested documents upload
+      - Returns JWT tokens for immediate sign-in
     """
+
+    # Account
     email = serializers.EmailField()
-    password = serializers.CharField(write_only=True, min_length=8)
+    password = serializers.CharField(write_only=True, min_length=8, trim_whitespace=False)
     first_name = serializers.CharField(max_length=120)
     last_name = serializers.CharField(max_length=120)
 
+    # Provider type and licensing
     provider_type = serializers.ChoiceField(choices=ProviderType.choices)
     specialties = serializers.ListField(child=serializers.CharField(max_length=120), required=False)
     license_council = serializers.ChoiceField(choices=Council.choices)
     license_number = serializers.CharField(max_length=64)
     license_expiry = serializers.DateField(required=False, allow_null=True)
 
+    # Contact & location (Nigeria-only for now)
     phone = serializers.CharField(max_length=20, required=False, allow_blank=True)
-    country = serializers.CharField(max_length=120, required=False, allow_blank=True)
-    state = serializers.CharField(max_length=120, required=False, allow_blank=True)
+    country = serializers.ChoiceField(choices=COUNTRY_CHOICES, default="nigeria")
+    state = serializers.ChoiceField(
+        choices=[(k, v) for k, v in NIGERIA_STATES_BY_CODE.items()],
+        required=False,
+        allow_blank=True
+    )
     lga = serializers.CharField(max_length=120, required=False, allow_blank=True)
     address = serializers.CharField(required=False, allow_blank=True)
+
+    # Other profile fields
     years_experience = serializers.IntegerField(required=False, min_value=0)
     bio = serializers.CharField(required=False, allow_blank=True)
     consultation_fee = serializers.DecimalField(max_digits=12, decimal_places=2, required=False)
 
+    # Nested documents
+    documents = ProviderDocumentSerializer(many=True, required=False)
+
+    # ---- Validators ----
+    def validate_password(self, value):
+        validate_password(value)
+        return value
+
+    def validate(self, attrs):
+        # Ensure the selected state is valid for Nigeria (when provided)
+        if (attrs.get("country") or "nigeria") == "nigeria" and attrs.get("state"):
+            if attrs["state"] not in NIGERIA_STATES_BY_CODE:
+                raise serializers.ValidationError({"state": "Select a valid Nigerian state."})
+        return attrs
+
     @transaction.atomic
     def create(self, validated):
+        documents = validated.pop("documents", [])
+
+        # Create user
         email = validated["email"].strip().lower()
         if User.objects.filter(email__iexact=email).exists():
             raise serializers.ValidationError({"email": "Email is already registered."})
 
-        # role mapping: prefer specific roles for RBAC
+        # Map provider_type -> UserRole
         pt = validated["provider_type"]
         role_map = {
             "DOCTOR": UserRole.DOCTOR,
@@ -92,13 +176,14 @@ class SelfRegisterProviderSerializer(serializers.Serializer):
         role = role_map.get(pt, UserRole.DOCTOR)
 
         user = User.objects.create_user(
-            email,
+            email=email,
             password=validated["password"],
             first_name=validated["first_name"],
             last_name=validated["last_name"],
             role=role,
         )
 
+        # Create profile
         prof = ProviderProfile.objects.create(
             user=user,
             provider_type=pt,
@@ -106,22 +191,37 @@ class SelfRegisterProviderSerializer(serializers.Serializer):
             license_number=validated["license_number"],
             license_expiry=validated.get("license_expiry"),
             years_experience=validated.get("years_experience") or 0,
-            bio=validated.get("bio",""),
-            phone=validated.get("phone",""),
-            country=validated.get("country",""),
-            state=validated.get("state",""),
-            lga=validated.get("lga",""),
-            address=validated.get("address",""),
+            bio=validated.get("bio", ""),
+            phone=validated.get("phone", ""),
+            country=validated.get("country", "nigeria"),
+            state=validated.get("state", ""),
+            lga=validated.get("lga", ""),
+            address=validated.get("address", ""),
             consultation_fee=validated.get("consultation_fee") or 0,
             verification_status=VerificationStatus.PENDING,
         )
-        # specialties
-        for n in validated.get("specialties", []):
-            s, _ = Specialty.objects.get_or_create(name=n.strip())
-            prof.specialties.add(s)
-        return prof
 
-class ProviderDocumentSerializer(serializers.ModelSerializer):
-    class Meta:
-        model = ProviderDocument
-        fields = ["id","kind","file","uploaded_at"]
+        # Specialties
+        for n in validated.get("specialties", []):
+            name = (n or "").strip()
+            if not name:
+                continue
+            s, _ = Specialty.objects.get_or_create(name=name)
+            prof.specialties.add(s)
+
+        # Documents
+        for doc_data in documents:
+            ProviderDocument.objects.create(
+                profile=prof,
+                kind=doc_data["kind"],
+                file=doc_data["file"],
+            )
+
+        # Return tokens payload for immediate sign-in
+        refresh = RefreshToken.for_user(user)
+        return {
+            "user_id": user.id,
+            "profile_id": prof.id,
+            "access": str(refresh.access_token),
+            "refresh": str(refresh),
+        }

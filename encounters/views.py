@@ -4,6 +4,7 @@ from rest_framework import viewsets, mixins, status
 from rest_framework.decorators import action
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
+from rest_framework_simplejwt.authentication import JWTAuthentication
 
 from .models import Encounter, EncounterAmendment
 from .serializers import EncounterSerializer, EncounterListSerializer, AmendmentSerializer
@@ -17,6 +18,7 @@ class EncounterViewSet(viewsets.GenericViewSet,
                        mixins.UpdateModelMixin,
                        mixins.ListModelMixin):
     queryset = Encounter.objects.select_related("patient", "facility", "created_by").all()
+    authentication_classes = [JWTAuthentication]
     permission_classes = [IsAuthenticated]
 
     def get_serializer_class(self):

@@ -28,6 +28,11 @@ class FacilityExtraDocumentSerializer(serializers.ModelSerializer):
         model = FacilityExtraDocument
         fields = ["id","title","file","uploaded_at"]
 
+class FacilityExtraDocumentInlineSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = FacilityExtraDocument 
+        fields = ["title", "file"]
+
 class FacilityCreateSerializer(serializers.ModelSerializer):
     specialties = serializers.ListField(
         child=serializers.CharField(max_length=120), write_only=True, required=False
@@ -120,7 +125,15 @@ class FacilityAdminSignupSerializer(serializers.Serializer):
     nhis_approved = serializers.BooleanField(required=False)
     nhis_number = serializers.CharField(required=False, allow_blank=True, max_length=120)
 
-    # optional single specialty id or list of names
+    # Document fields
+    nhis_certificate = serializers.FileField(required=False, allow_null=True)
+    md_practice_license = serializers.FileField(required=False, allow_null=True)
+    state_registration_cert = serializers.FileField(required=False, allow_null=True)
+
+    # Extra documents
+    extra_documents = FacilityExtraDocumentInlineSerializer(many=True, required=False)
+
+    # Keep existing specialty fields
     specialty = serializers.PrimaryKeyRelatedField(queryset=Specialty.objects.all(), required=False, allow_null=True)
     specialties = serializers.ListField(
         child=serializers.CharField(max_length=120), write_only=True, required=False
@@ -141,26 +154,20 @@ class FacilityAdminSignupSerializer(serializers.Serializer):
 
     @transaction.atomic
     def create(self, validated_data):
-        User = get_user_model()
-
-        # normalize and extract admin fields
+        # Extract nested data
+        extra_docs = validated_data.pop("extra_documents", [])
         admin_email = validated_data.pop("admin_email").strip().lower()
         admin_password = validated_data.pop("admin_password")
         admin_first_name = validated_data.pop("admin_first_name", "").strip()
         admin_last_name = validated_data.pop("admin_last_name", "").strip()
         admin_phone = validated_data.pop("admin_phone", "").strip()
-
         specialty_pk = validated_data.pop("specialty", None)
         specialties_names = validated_data.pop("specialties", None)
 
-        # fail fast if email already taken
-        if User.objects.filter(email__iexact=admin_email).exists():
-            raise serializers.ValidationError({"admin_email": "Email is already registered."})
-
-        # create facility
+        # Create facility with document fields
         facility = Facility.objects.create(**validated_data)
 
-        # specialties handling
+        # Handle specialties (keep existing logic)
         if specialty_pk:
             facility.specialties.add(specialty_pk)
         if specialties_names:
@@ -168,7 +175,16 @@ class FacilityAdminSignupSerializer(serializers.Serializer):
                 sp, _ = Specialty.objects.get_or_create(name=name.strip())
                 facility.specialties.add(sp)
 
-        # Create user using email as the USERNAME_FIELD (pass email as first positional arg)
+        # Create extra documents
+        for doc in extra_docs:
+            FacilityExtraDocument.objects.create(
+                facility=facility,
+                title=doc["title"],
+                file=doc["file"]
+            )
+
+        # Create admin user (keep existing logic)
+        User = get_user_model()
         user = User.objects.create_user(
             admin_email,
             password=admin_password,
@@ -183,7 +199,7 @@ class FacilityAdminSignupSerializer(serializers.Serializer):
             user.phone = admin_phone
             user.save()
 
-        # tokens
+        # Generate tokens (keep existing logic)
         refresh = RefreshToken.for_user(user)
         return {
             "facility": {"id": str(getattr(facility, "id", "")), "name": facility.name},

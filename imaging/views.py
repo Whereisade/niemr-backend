@@ -5,6 +5,7 @@ from rest_framework import viewsets, mixins, status
 from rest_framework.decorators import action
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
+from rest_framework_simplejwt.authentication import JWTAuthentication
 
 from .models import ImagingProcedure, ImagingRequest, ImagingReport, ImagingAsset
 from .serializers import (
@@ -20,6 +21,7 @@ from notifications.services.notify import notify_user
 class ProcedureViewSet(viewsets.GenericViewSet, mixins.ListModelMixin, mixins.CreateModelMixin):
     queryset = ImagingProcedure.objects.filter(is_active=True).order_by("name")
     serializer_class = ImagingProcedureSerializer
+    authentication_classes = [JWTAuthentication]
     permission_classes = [IsAuthenticated]
 
     def create(self, request, *args, **kwargs):
@@ -58,6 +60,7 @@ class ImagingRequestViewSet(viewsets.GenericViewSet,
                             mixins.RetrieveModelMixin,
                             mixins.ListModelMixin):
     queryset = ImagingRequest.objects.select_related("patient","facility","requested_by","procedure").prefetch_related("report","report__assets")
+    authentication_classes = [JWTAuthentication]
     permission_classes = [IsAuthenticated]
 
     def get_serializer_class(self):

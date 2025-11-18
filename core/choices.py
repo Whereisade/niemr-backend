@@ -1,0 +1,46 @@
+# core/choices.py
+COUNTRY_CHOICES = [
+    ("nigeria", "Nigeria"),
+    
+]
+
+# Use short codes as keys to keep values concise in DB/API
+NIGERIA_STATES_BY_CODE = {
+    "abia": "Abia",
+    "adamawa": "Adamawa",
+    "akwa_ibom": "Akwa Ibom",
+    "anambra": "Anambra",
+    "bauchi": "Bauchi",
+    "bayelsa": "Bayelsa",
+    "benue": "Benue",
+    "borno": "Borno",
+    "cross_river": "Cross River",
+    "delta": "Delta",
+    "ebonyi": "Ebonyi",
+    "edo": "Edo",
+    "ekiti": "Ekiti",
+    "enugu": "Enugu",
+    "gombe": "Gombe",
+    "imo": "Imo",
+    "jigawa": "Jigawa",
+    "kaduna": "Kaduna",
+    "kano": "Kano",
+    "katsina": "Katsina",
+    "kebbi": "Kebbi",
+    "kogi": "Kogi",
+    "kwara": "Kwara",
+    "lagos": "Lagos",
+    "nasarawa": "Nasarawa",
+    "niger": "Niger",
+    "ogun": "Ogun",
+    "ondo": "Ondo",
+    "osun": "Osun",
+    "oyo": "Oyo",
+    "plateau": "Plateau",
+    "rivers": "Rivers",
+    "sokoto": "Sokoto",
+    "taraba": "Taraba",
+    "yobe": "Yobe",
+    "zamfara": "Zamfara",
+    "fct": "FCT",
+}
