@@ -4,6 +4,7 @@ from rest_framework import viewsets, mixins, status
 from rest_framework.decorators import action
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
+from rest_framework_simplejwt.authentication import JWTAuthentication
 
 from patients.models import Patient
 from .models import File, AttachmentLink
@@ -15,6 +16,7 @@ class FileViewSet(viewsets.GenericViewSet,
                   mixins.RetrieveModelMixin,
                   mixins.ListModelMixin):
     queryset = File.objects.select_related("patient","facility","uploaded_by").all()
+    authentication_classes = [JWTAuthentication]
     permission_classes = [IsAuthenticated]
 
     def get_serializer_class(self):
