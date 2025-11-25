@@ -4,6 +4,7 @@ from rest_framework import viewsets, mixins, status
 from rest_framework.decorators import action, api_view, permission_classes
 from rest_framework.permissions import IsAuthenticated, AllowAny
 from rest_framework.response import Response
+from rest_framework_simplejwt.authentication import JWTAuthentication
 
 from .models import Patient, PatientDocument, HMO
 from .serializers import (
@@ -20,6 +21,7 @@ class PatientViewSet(viewsets.GenericViewSet,
                      mixins.UpdateModelMixin,
                      mixins.ListModelMixin):
     queryset = Patient.objects.select_related("user","facility","hmo").all().order_by("-created_at")
+    authentication_classes = [JWTAuthentication]
     permission_classes = [IsAuthenticated]
 
     def get_serializer_class(self):
@@ -100,6 +102,7 @@ class DependentViewSet(viewsets.ModelViewSet):
       DELETE /api/patients/dependents/{id}/
     """
     queryset = Patient.objects.select_related("parent_patient").all()
+    authentication_classes = [JWTAuthentication]
     permission_classes = [IsAuthenticated, IsStaffOrGuardianForDependent]
 
     def get_serializer_class(self):

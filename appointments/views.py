@@ -59,41 +59,38 @@ class AppointmentViewSet(viewsets.GenericViewSet,
 
         return q.order_by("start_at", "id")
 
-    # PATCHED: auto-attach patient when role == PATIENT
+    # Create: staff can create for any patient in facility;
+    # patient can only create for *self*
     def create(self, request, *args, **kwargs):
         user = request.user
+        data = request.data.copy()
 
         if user.role == "PATIENT":
-            # Find the linked Patient record
+            # Attach to this user's patient profile automatically
             patient = getattr(user, "patient", None)
             if not patient:
                 return Response(
                     {"detail": "No patient profile linked to this user."},
                     status=status.HTTP_400_BAD_REQUEST,
                 )
-
-            # Force appointment.patient = logged-in patient.id
-            data = request.data.copy()
+            # Force patient field to their own id
             data["patient"] = patient.id
-
-            serializer = self.get_serializer(data=data)
-            serializer.is_valid(raise_exception=True)
-            self.perform_create(serializer)
-
-            resp = Response(
-                serializer.data,
-                status=status.HTTP_201_CREATED,
-                headers=self.get_success_headers(serializer.data),
-            )
-
         else:
-            # staff creation must respect IsStaff
+            # Staff (PROVIDER, ADMIN, etc.) must pass permission checks
             self.permission_classes = [IsAuthenticated, IsStaff]
             self.check_permissions(request)
 
-            resp = super().create(request, *args, **kwargs)
+        # Use standard serializer path (so facility, overlaps etc are handled)
+        serializer = self.get_serializer(data=data)
+        serializer.is_valid(raise_exception=True)
+        self.perform_create(serializer)
+        resp = Response(
+            serializer.data,
+            status=status.HTTP_201_CREATED,
+            headers=self.get_success_headers(serializer.data),
+        )
 
-        # send confirmation email (non-blocking)
+        # send confirmation email (best effort)
         try:
             appt = Appointment.objects.get(id=resp.data["id"])
             send_confirmation(appt)

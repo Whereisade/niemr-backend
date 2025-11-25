@@ -5,6 +5,7 @@ from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
 from rest_framework.decorators import action
 from rest_framework.permissions import IsAuthenticated, AllowAny
 from rest_framework.response import Response
+from rest_framework_simplejwt.authentication import JWTAuthentication
 
 from accounts.models import User
 from accounts.enums import UserRole
@@ -23,6 +24,7 @@ class FacilityViewSet(viewsets.GenericViewSet,
                       mixins.UpdateModelMixin,
                       mixins.ListModelMixin):
     queryset = Facility.objects.all().order_by("-created_at")
+    authentication_classes = [JWTAuthentication]
     permission_classes = [IsAuthenticated]
 
     def get_serializer_class(self):
@@ -133,6 +135,7 @@ class FacilityViewSet(viewsets.GenericViewSet,
 # --- NIEMR: Public endpoint to create Facility + Super Admin and return tokens ---
 class FacilityAdminRegisterView(APIView):
     permission_classes = [AllowAny]
+    authentication_classes = [JWTAuthentication]
     parser_classes = [MultiPartParser, FormParser, JSONParser]
 
     def post(self, request, *args, **kwargs):
