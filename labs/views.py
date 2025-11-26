@@ -18,6 +18,7 @@ from .permissions import IsStaff, CanViewLabOrder
 from .enums import OrderStatus, Priority
 from .services.notify import notify_result_ready
 
+
 class LabTestViewSet(viewsets.GenericViewSet, mixins.ListModelMixin, mixins.CreateModelMixin):
     queryset = LabTest.objects.filter(is_active=True).order_by("name")
     serializer_class = LabTestSerializer
@@ -37,7 +38,7 @@ class LabTestViewSet(viewsets.GenericViewSet, mixins.ListModelMixin, mixins.Crea
         """
         f = request.FILES.get("file")
         if not f:
-            return Response({"detail":"file is required"}, status=400)
+            return Response({"detail": "file is required"}, status=400)
         buf = io.StringIO(f.read().decode("utf-8"))
         reader = csv.DictReader(buf)
         created, updated = 0, 0
@@ -58,13 +59,20 @@ class LabTestViewSet(viewsets.GenericViewSet, mixins.ListModelMixin, mixins.Crea
             updated += int(not is_created)
         return Response({"created": created, "updated": updated})
 
-class LabOrderViewSet(viewsets.GenericViewSet,
-                      mixins.CreateModelMixin,
-                      mixins.RetrieveModelMixin,
-                      mixins.ListModelMixin):
-    queryset = LabOrder.objects.select_related("patient","facility","ordered_by").prefetch_related("items","items__test")
+
+class LabOrderViewSet(
+    mixins.CreateModelMixin,
+    mixins.RetrieveModelMixin,
+    mixins.ListModelMixin,
+    viewsets.GenericViewSet,
+):
+    queryset = LabOrder.objects.select_related("patient", "facility", "ordered_by").prefetch_related(
+        "items", "items__test"
+    )
     authentication_classes = [JWTAuthentication]
     permission_classes = [IsAuthenticated]
+    # Only allow GET + POST (no PUT/PATCH/DELETE)
+    http_method_names = ["get", "post", "head", "options"]
 
     def get_serializer_class(self):
         if self.action in ("create",):
@@ -93,10 +101,14 @@ class LabOrderViewSet(viewsets.GenericViewSet,
 
         s = self.request.query_params.get("s")
         if s:
-            q = q.filter(Q(note__icontains=s) | Q(items__test__name__icontains=s) | Q(items__test__code__icontains=s)).distinct()
+            q = q.filter(
+                Q(note__icontains=s)
+                | Q(items__test__name__icontains=s)
+                | Q(items__test__code__icontains=s)
+            ).distinct()
 
         start = self.request.query_params.get("start")
-        end   = self.request.query_params.get("end")
+        end = self.request.query_params.get("end")
         if start:
             q = q.filter(ordered_at__gte=parse_datetime(start) or start)
         if end:
@@ -141,11 +153,11 @@ class LabOrderViewSet(viewsets.GenericViewSet,
         order = self.get_object()
         item_id = request.data.get("item_id")
         if not item_id:
-            return Response({"detail":"item_id is required"}, status=400)
+            return Response({"detail": "item_id is required"}, status=400)
         try:
             item = order.items.get(id=item_id)
         except LabOrderItem.DoesNotExist:
-            return Response({"detail":"Item not in this order"}, status=404)
+            return Response({"detail": "Item not in this order"}, status=404)
         s = ResultEntrySerializer(data=request.data)
         s.is_valid(raise_exception=True)
         item = s.save(item=item, user=request.user)

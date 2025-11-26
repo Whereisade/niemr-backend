@@ -4,17 +4,30 @@ from .models import LabTest, LabOrder, LabOrderItem
 from .enums import OrderStatus
 from django.utils import timezone
 
+
 class LabTestSerializer(serializers.ModelSerializer):
     class Meta:
         model = LabTest
-        fields = ["id","code","name","unit","ref_low","ref_high","price","is_active"]
+        fields = ["id", "code", "name", "unit", "ref_low", "ref_high", "price", "is_active"]
+
 
 class LabOrderItemWriteSerializer(serializers.ModelSerializer):
     test_code = serializers.CharField(write_only=True)
 
     class Meta:
         model = LabOrderItem
-        fields = ["id","test_code","sample_collected_at","result_value","result_text","result_unit","ref_low","ref_high","flag","completed_at"]
+        fields = [
+            "id",
+            "test_code",
+            "sample_collected_at",
+            "result_value",
+            "result_text",
+            "result_unit",
+            "ref_low",
+            "ref_high",
+            "flag",
+            "completed_at",
+        ]
 
     def validate(self, attrs):
         # map test_code -> test
@@ -26,18 +39,41 @@ class LabOrderItemWriteSerializer(serializers.ModelSerializer):
         attrs["test"] = test
         return attrs
 
+
 class LabOrderItemReadSerializer(serializers.ModelSerializer):
     test = LabTestSerializer()
+
     class Meta:
         model = LabOrderItem
-        fields = ["id","test","sample_collected_at","result_value","result_text","result_unit","ref_low","ref_high","flag","completed_at","completed_by"]
+        fields = [
+            "id",
+            "test",
+            "sample_collected_at",
+            "result_value",
+            "result_text",
+            "result_unit",
+            "ref_low",
+            "ref_high",
+            "flag",
+            "completed_at",
+            "completed_by",
+        ]
+
 
 class LabOrderCreateSerializer(serializers.ModelSerializer):
     items = LabOrderItemWriteSerializer(many=True)
 
     class Meta:
         model = LabOrder
-        fields = ["id","patient","priority","note","encounter_id","external_lab_name","items"]
+        fields = [
+            "id",
+            "patient",
+            "priority",
+            "note",
+            "encounter_id",
+            "external_lab_name",
+            "items",
+        ]
 
     @transaction.atomic
     def create(self, validated):
@@ -48,32 +84,62 @@ class LabOrderCreateSerializer(serializers.ModelSerializer):
             facility=user.facility if user.facility_id else validated["patient"].facility,
             ordered_by=user,
             priority=validated.get("priority"),
-            note=validated.get("note",""),
+            note=validated.get("note", ""),
             encounter_id=validated.get("encounter_id"),
-            external_lab_name=validated.get("external_lab_name",""),
+            external_lab_name=validated.get("external_lab_name", ""),
         )
         for item in validated["items"]:
             LabOrderItem.objects.create(order=order, **item)
         return order
 
+
 class LabOrderReadSerializer(serializers.ModelSerializer):
     items = LabOrderItemReadSerializer(many=True)
+    # 👇 NEW: patient_name for display in lists
+    patient_name = serializers.SerializerMethodField(read_only=True)
+
     class Meta:
         model = LabOrder
-        fields = ["id","patient","facility","ordered_by","priority","status","ordered_at","note","encounter_id","external_lab_name","items"]
+        fields = [
+            "id",
+            "patient",
+            "patient_name",   # 👈 added
+            "facility",
+            "ordered_by",
+            "priority",
+            "status",
+            "ordered_at",
+            "note",
+            "encounter_id",
+            "external_lab_name",
+            "items",
+        ]
+
+    def get_patient_name(self, obj):
+        """
+        Return 'First Last' for the patient if available,
+        otherwise fall back to Patient.__str__().
+        """
+        if not obj.patient_id:
+            return None
+        first = getattr(obj.patient, "first_name", "") or ""
+        last = getattr(obj.patient, "last_name", "") or ""
+        name = (first + " " + last).strip()
+        return name or str(obj.patient)
+
 
 class ResultEntrySerializer(serializers.Serializer):
     """
     Update result for one item.
     """
     result_value = serializers.DecimalField(max_digits=14, decimal_places=4, required=False, allow_null=True)
-    result_text  = serializers.CharField(required=False, allow_blank=True)
+    result_text = serializers.CharField(required=False, allow_blank=True)
     ref_low = serializers.DecimalField(max_digits=10, decimal_places=3, required=False, allow_null=True)
     ref_high = serializers.DecimalField(max_digits=10, decimal_places=3, required=False, allow_null=True)
 
     def save(self, *, item: LabOrderItem, user):
         changed = False
-        for f in ("result_value","result_text","ref_low","ref_high"):
+        for f in ("result_value", "result_text", "ref_low", "ref_high"):
             if f in self.validated_data:
                 setattr(item, f, self.validated_data[f])
                 changed = True
