@@ -7,15 +7,18 @@ from rest_framework import viewsets, mixins
 from rest_framework.permissions import IsAuthenticated
 from .models import Outbox, Template, EmailStatus
 from .serializers import OutboxSerializer, TemplateSerializer
+from rest_framework_simplejwt.authentication import JWTAuthentication
 
 class OutboxViewSet(viewsets.GenericViewSet, mixins.ListModelMixin, mixins.RetrieveModelMixin):
     queryset = Outbox.objects.all().order_by("-created_at")
     serializer_class = OutboxSerializer
+    authentication_classes = [JWTAuthentication]
     permission_classes = [IsAuthenticated]
 
 class TemplateViewSet(viewsets.GenericViewSet, mixins.ListModelMixin, mixins.CreateModelMixin, mixins.UpdateModelMixin):
     queryset = Template.objects.all().order_by("code")
     serializer_class = TemplateSerializer
+    authentication_classes = [JWTAuthentication]
     permission_classes = [IsAuthenticated]
 
 @csrf_exempt

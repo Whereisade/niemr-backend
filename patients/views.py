@@ -96,66 +96,183 @@ def self_register(request):
 
 class DependentViewSet(viewsets.ModelViewSet):
     """
-    CRUD for individual dependents:
-      GET    /api/patients/dependents/{id}/
-      PATCH  /api/patients/dependents/{id}/
-      DELETE /api/patients/dependents/{id}/
+    CRUD for dependents.
+
+    Collection endpoints (scoped by role):
+
+      - GET  /api/patients/dependents/
+          * Patient users (guardians): only their own dependents.
+          * Staff/clinical/admin: dependents within their facility.
+
+      - POST /api/patients/dependents/
+          * Patient users: create a dependent for themselves (as parent_patient).
+          * Staff/clinical/admin: must send parent_patient_id in the payload.
+
+    Item endpoints:
+
+      - GET    /api/patients/dependents/{id}/
+      - PATCH  /api/patients/dependents/{id}/
+      - DELETE /api/patients/dependents/{id}/
     """
-    queryset = Patient.objects.select_related("parent_patient").all()
+
+    queryset = Patient.objects.select_related("parent_patient").filter(
+        parent_patient__isnull=False
+    )
     authentication_classes = [JWTAuthentication]
     permission_classes = [IsAuthenticated, IsStaffOrGuardianForDependent]
 
     def get_serializer_class(self):
-        if self.request.method in ("PATCH", "PUT"):
+        # Use the create serializer when creating a new dependent
+        if self.action == "create":
+            return DependentCreateSerializer
+
+        # Use the update serializer for partial/full updates
+        if self.action in ("update", "partial_update"):
             return DependentUpdateSerializer
+
+        # Default for list/retrieve is the detail serializer
         return DependentDetailSerializer
 
     def get_queryset(self):
-        qs = super().get_queryset().filter(parent_patient__isnull=False)
+        qs = self.queryset
         user = self.request.user
-        
-        # Staff users should only see dependents from their facility
-        if getattr(user, "is_staff", False) or getattr(user, "is_clinician", False) or getattr(user, "is_admin", False):
+
+        # Staff / clinical / admin users:
+        if (
+            getattr(user, "is_staff", False)
+            or getattr(user, "is_clinician", False)
+            or getattr(user, "is_admin", False)
+        ):
+            # If user is tied to a facility, scope to that facility
             if getattr(user, "facility_id", None):
                 return qs.filter(parent_patient__facility_id=user.facility_id)
             return qs
 
-        # Guardian (patient user) 
+        # Guardian (patient user): only dependents where they are the parent_patient
         patient_profile = getattr(user, "patient_profile", None)
         if patient_profile:
-            return qs.filter(parent_parent_id=patient_profile.id)
+            # NOTE: this fixes the bug: parent_parent_id -> parent_patient_id
+            return qs.filter(parent_patient_id=patient_profile.id)
 
         # No access otherwise
         return qs.none()
 
+    def create(self, request, *args, **kwargs):
+        """
+        Create a new dependent.
 
-def add_dependents_actions_to_patient_viewset(PatientViewSet):
-    @action(detail=True, methods=["get", "post"], url_path="dependents", permission_classes=[IsStaffOrSelfPatient])
-    def dependents(self, request, pk=None):
-        parent_patient = get_object_or_404(Patient, pk=pk)
+        - For patient guardians:
+            POST /api/patients/dependents/
+            payload: { first_name, last_name, dob?, gender? }
 
-        if request.method.lower() == "get":
-            qs = Patient.objects.filter(parent_patient=parent_patient)
-            serializer = DependentDetailSerializer(qs, many=True)
-            return Response(serializer.data)
+        - For staff/clinical/admin:
+            POST /api/patients/dependents/
+            payload: { parent_patient_id, first_name, last_name, dob?, gender? }
+        """
+        user = request.user
 
-        # POST create
-        serializer = DependentCreateSerializer(data=request.data)
-        serializer.is_valid(raise_exception=True)
+        # Determine parent_patient based on role
+        parent_patient = None
 
+        # Staff / clinical / admin: expect explicit parent_patient_id
+        if (
+            getattr(user, "is_staff", False)
+            or getattr(user, "is_clinician", False)
+            or getattr(user, "is_admin", False)
+        ):
+            parent_id = request.data.get("parent_patient_id")
+            if not parent_id:
+                return Response(
+                    {
+                        "parent_patient_id": [
+                            "This field is required for staff-created dependents."
+                        ]
+                    },
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            parent_patient = get_object_or_404(Patient, pk=parent_id)
+
+        else:
+            # Patient / guardian path – attach to their own patient profile
+            patient_profile = getattr(user, "patient_profile", None)
+            if not patient_profile:
+                return Response(
+                    {
+                        "detail": "You do not have a patient profile to attach dependents to."
+                    },
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            parent_patient = patient_profile
+
+        # Validate basic dependent fields
+        create_serializer = DependentCreateSerializer(data=request.data)
+        create_serializer.is_valid(raise_exception=True)
+
+        # Create the dependent Patient instance
         dependent = Patient(
-            **serializer.validated_data,
+            **create_serializer.validated_data,
             parent_patient=parent_patient,
         )
-        # enforce model validation (clean) before save
+        # Enforce model validation (clean) before save
         dependent.full_clean()
         dependent.save()
 
-        out = DependentDetailSerializer(dependent)
-        return Response(out.data, status=status.HTTP_201_CREATED)
-
-    setattr(PatientViewSet, "dependents", dependents)
-    return PatientViewSet
+        # Return detail representation
+        detail = DependentDetailSerializer(
+            dependent, context={"request": request}
+        )
+        headers = self.get_success_headers(detail.data)
+        return Response(detail.data, status=status.HTTP_201_CREATED, headers=headers)
 
 # patch the existing PatientViewSet to add nested dependents action
+def add_dependents_actions_to_patient_viewset(viewset_cls):
+    """
+    Dynamically attach nested dependents actions to PatientViewSet:
+
+      - GET  /api/patients/{pk}/dependents/
+      - POST /api/patients/{pk}/dependents/
+
+    This is mainly for facility / staff flows where you want to see or add
+    dependents for a specific patient from the patient detail context.
+    """
+
+    @action(detail=True, methods=["get"], url_path="dependents")
+    def dependents(self, request, pk=None):
+        # List dependents whose parent_patient is this patient
+        qs = (
+            Patient.objects.select_related("parent_patient")
+            .filter(parent_patient_id=pk)
+            .order_by("-id")
+        )
+        serializer = DependentDetailSerializer(
+            qs, many=True, context={"request": request}
+        )
+        return Response(serializer.data)
+
+    @dependents.mapping.post
+    def add_dependent(self, request, pk=None):
+        # Create a new dependent for this patient (used mainly by staff)
+        parent_patient = get_object_or_404(Patient, pk=pk)
+
+        create_serializer = DependentCreateSerializer(data=request.data)
+        create_serializer.is_valid(raise_exception=True)
+
+        dependent = Patient(
+            **create_serializer.validated_data,
+            parent_patient=parent_patient,
+        )
+        dependent.full_clean()
+        dependent.save()
+
+        detail = DependentDetailSerializer(
+            dependent, context={"request": request}
+        )
+        return Response(detail.data, status=status.HTTP_201_CREATED)
+
+    # Attach the actions to the given viewset class
+    setattr(viewset_cls, "dependents", dependents)
+    setattr(viewset_cls, "add_dependent", add_dependent)
+
+    return viewset_cls
+
 PatientViewSet = add_dependents_actions_to_patient_viewset(PatientViewSet)

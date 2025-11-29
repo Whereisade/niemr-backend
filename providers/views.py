@@ -5,6 +5,7 @@ from rest_framework.decorators import action, api_view, permission_classes, pars
 from rest_framework.permissions import IsAuthenticated, AllowAny
 from rest_framework.response import Response
 from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
+from rest_framework_simplejwt.authentication import JWTAuthentication
 
 from .models import ProviderProfile, ProviderDocument
 from .serializers import (
@@ -18,6 +19,7 @@ class ProviderViewSet(viewsets.GenericViewSet,
                       mixins.UpdateModelMixin,
                       mixins.ListModelMixin):
     queryset = ProviderProfile.objects.select_related("user").prefetch_related("specialties").all()
+    authentication_classes = [JWTAuthentication]
     permission_classes = [IsAuthenticated]
 
     def get_serializer_class(self):

@@ -3,6 +3,7 @@ from django.db.models import Q
 from rest_framework import viewsets, mixins
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
+from rest_framework_simplejwt.authentication import JWTAuthentication
 
 from .models import AuditLog
 from .serializers import AuditLogSerializer
@@ -10,6 +11,7 @@ from .permissions import IsAdmin
 
 class AuditLogViewSet(viewsets.GenericViewSet, mixins.ListModelMixin, mixins.RetrieveModelMixin):
     serializer_class = AuditLogSerializer
+    authentication_classes = [JWTAuthentication]
     permission_classes = [IsAuthenticated, IsAdmin]
 
     def get_queryset(self):
