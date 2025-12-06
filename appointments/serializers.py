@@ -1,8 +1,10 @@
 from datetime import timedelta
 from django.db.models import Q
 from rest_framework import serializers
+
 from .models import Appointment
 from .enums import ApptStatus
+from facilities.models import Facility   # ✅ IMPORT Facility
 
 
 class AppointmentSerializer(serializers.ModelSerializer):
@@ -15,10 +17,10 @@ class AppointmentSerializer(serializers.ModelSerializer):
         fields = [
             "id",
             "patient",
-            "patient_name",   
+            "patient_name",
             "facility",
             "provider",
-            "provider_name",  
+            "provider_name",
             "created_by",
             "appt_type",
             "status",
@@ -34,8 +36,9 @@ class AppointmentSerializer(serializers.ModelSerializer):
             "created_at",
             "updated_at",
         ]
+        # ❗️ facility MUST NOT be read-only here, so we can use
+        # the facility selected in the booking form.
         read_only_fields = [
-            "facility",
             "created_by",
             "status",
             "last_notified_at",
@@ -71,11 +74,48 @@ class AppointmentSerializer(serializers.ModelSerializer):
         return getattr(obj.provider, "email", None) or str(obj.provider)
 
     def validate(self, attrs):
-        # infer facility from request user or patient
+        """
+        Infer facility from:
+        - the logged-in user's facility (staff),
+        - or the submitted facility id (patients / super-admin),
+        - or the patient's facility as a fallback.
+        """
         request = self.context["request"]
         user = request.user
         patient = attrs.get("patient")
-        facility = user.facility or getattr(patient, "facility", None)
+
+        # 1) Start from the staff user's facility (most restrictive & safe)
+        facility = getattr(user, "facility", None)
+
+        # 2) If user has no facility (PATIENT or SUPER_ADMIN),
+        #    try to get it from the payload.
+        if facility is None:
+            # attrs["facility"] will be a Facility instance (if present)
+            facility_val = attrs.get("facility", None)
+
+            if isinstance(facility_val, Facility):
+                facility = facility_val
+            else:
+                # fallback to raw id from attrs or initial_data
+                facility_id = facility_val or self.initial_data.get("facility")
+                if facility_id not in (None, "", "null"):
+                    try:
+                        facility = Facility.objects.get(id=facility_id)
+                    except (ValueError, TypeError, Facility.DoesNotExist):
+                        raise serializers.ValidationError("Invalid facility id.")
+
+        # 3) Fallback to the patient's facility if still None
+        if facility is None and patient is not None:
+            facility = getattr(patient, "facility", None)
+
+        # 4) For updates, fall back to the existing instance's facility
+        if facility is None and getattr(self, "instance", None) is not None:
+            facility = getattr(self.instance, "facility", None)
+
+        # 5) Final safety check
+        if facility is None:
+            raise serializers.ValidationError("Facility is required for appointments.")
+
         start_at = attrs.get("start_at")
         end_at = attrs.get("end_at")
 
@@ -103,17 +143,23 @@ class AppointmentSerializer(serializers.ModelSerializer):
 
         return attrs
 
-    def create(self, validated):
+    def create(self, validated_data):
         user = self.context["request"].user
+
+        # 🔧 Avoid passing 'facility' twice (explicit + inside validated_data)
+        validated_data.pop("facility", None)
+
         appt = Appointment.objects.create(
-            facility=self._facility,
+            facility=self._facility,          # from validate()
             created_by=user,
             status=ApptStatus.SCHEDULED,
-            **validated,
+            **validated_data,
         )
         return appt
 
 
 class AppointmentUpdateSerializer(AppointmentSerializer):
     class Meta(AppointmentSerializer.Meta):
+        # On update we DON'T allow changing facility (safer),
+        # but we do allow it on create via AppointmentSerializer.
         read_only_fields = ["facility", "created_by", "created_at", "updated_at"]
