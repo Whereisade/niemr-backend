@@ -1,5 +1,6 @@
 from django.db import transaction
 from rest_framework import serializers
+
 from .models import ImagingProcedure, ImagingRequest, ImagingReport, ImagingAsset
 from .enums import RequestStatus
 
@@ -124,23 +125,65 @@ class ImagingReportSerializer(serializers.ModelSerializer):
 
 
 class ImagingRequestReadSerializer(serializers.ModelSerializer):
-    procedure = ImagingProcedureSerializer()
-    report = ImagingReportSerializer(read_only=True)
+    """
+    Read-only serializer for imaging requests used on list/detail endpoints.
+
+    Adds:
+      - patient_name: "First Last" from the patient profile
+      - procedure_name: human-friendly name from ImagingProcedure
+      - procedure_code: code from ImagingProcedure
+      - created_at: alias for requested_at (for frontend compatibility)
+    """
+
+    patient_name = serializers.SerializerMethodField(read_only=True)
+    procedure_name = serializers.SerializerMethodField(read_only=True)
+    procedure_code = serializers.SerializerMethodField(read_only=True)
+    # Alias: expose created_at but actually use requested_at underneath
+    created_at = serializers.DateTimeField(
+        source="requested_at", read_only=True
+    )
 
     class Meta:
         model = ImagingRequest
         fields = [
             "id",
             "patient",
-            "facility",
-            "requested_by",
+            "patient_name",
             "procedure",
+            "procedure_name",
+            "procedure_code",
             "priority",
             "status",
             "indication",
-            "requested_at",
-            "scheduled_for",
             "encounter_id",
             "external_center_name",
-            "report",
+            "scheduled_for",
+            "requested_at",
+            "created_at",
         ]
+
+    def get_patient_name(self, obj):
+        if not obj.patient_id:
+            return None
+        first = getattr(obj.patient, "first_name", "") or ""
+        last = getattr(obj.patient, "last_name", "") or ""
+        name = (first + " " + last).strip()
+        # Fallback to string representation if names are empty
+        return name or str(obj.patient)
+
+    def get_procedure_name(self, obj):
+        proc = getattr(obj, "procedure", None)
+        if not proc:
+            return None
+        # Prefer explicit name, then code, then string repr
+        name = getattr(proc, "name", "") or ""
+        if name:
+            return name
+        code = getattr(proc, "code", "") or ""
+        return code or str(proc)
+
+    def get_procedure_code(self, obj):
+        proc = getattr(obj, "procedure", None)
+        if not proc:
+            return None
+        return getattr(proc, "code", None)

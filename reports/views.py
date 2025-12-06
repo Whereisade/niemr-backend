@@ -1,83 +1,91 @@
-from django.conf import settings
+# reports/views.py
+from django.utils import timezone
 from django.http import HttpResponse
-from rest_framework.decorators import api_view, permission_classes
+
+from rest_framework.views import APIView
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework import status
 
-from .serializers import GenerateRequestSerializer
-from .models import ReportJob, ReportType
-from .services.pdf import render_html, try_render_pdf
-from .services.context import encounter_context, lab_context, imaging_context, billing_context
-from .services.save_as_attachment import save_pdf_as_attachment
+from .serializers import GenerateReportSerializer
+from .utils import (
+    get_report_object,
+    render_report_html,
+    build_pdf,
+    save_report_attachment,
+)
 
-@api_view(["POST"])
-@permission_classes([IsAuthenticated])
-def generate(request):
+
+class GenerateReportView(APIView):
     """
-    POST /api/reports/generate
+    POST /api/reports/generate/
+
+    Body:
     {
-      "report_type":"IMAGING",
-      "ref_id": 55,
+      "report_type": "ENCOUNTER" | "LAB" | "IMAGING" | "BILLING",
+      "ref_id": 42,
       "as_pdf": true,
-      "save_as_attachment": true,
-      "start":"2025-10-01T00:00:00Z", "end":"2025-10-31T23:59:59Z"  # (billing only)
+      "save_as_attachment": true
     }
     """
-    s = GenerateRequestSerializer(data=request.data)
-    s.is_valid(raise_exception=True)
-    data = s.validated_data
-    rtype = data["report_type"]
-    ref_id = data["ref_id"]
-    as_pdf = data["as_pdf"]
+    permission_classes = [IsAuthenticated]
 
-    # build context + template
-    if rtype == ReportType.ENCOUNTER:
-        ctx = encounter_context(ref_id)
-        tpl = "reports/encounter.html"
-        filename = f"encounter-{ref_id}.pdf"
-        patient = ctx["patient"]; facility = ctx["facility"]
-    elif rtype == ReportType.LAB:
-        ctx = lab_context(ref_id)
-        tpl = "reports/lab.html"
-        filename = f"lab-{ref_id}.pdf"
-        patient = ctx["patient"]; facility = ctx["facility"]
-    elif rtype == ReportType.IMAGING:
-        ctx = imaging_context(ref_id)
-        tpl = "reports/imaging.html"
-        filename = f"imaging-{ref_id}.pdf"
-        patient = ctx["patient"]; facility = ctx["facility"]
-    elif rtype == ReportType.BILLING:
-        ctx = billing_context(ref_id, start=data.get("start"), end=data.get("end"))
-        tpl = "reports/billing.html"
-        filename = f"billing-{ref_id}.pdf"
-        patient = ctx["patient"]; facility = ctx["facility"]
-    else:
-        return Response({"detail":"Unknown report_type"}, status=400)
+    def post(self, request, *args, **kwargs):
+        serializer = GenerateReportSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
 
-    ctx["title"] = filename.replace(".pdf","").replace("-"," ").title()
-    html = render_html(tpl, ctx)
+        report_type = data["report_type"]
+        ref_id = data["ref_id"]
+        as_pdf = data["as_pdf"]
+        save_as_attachment_flag = data["save_as_attachment"]
 
-    # try PDF
-    resp = None
-    if as_pdf:
-        resp = try_render_pdf(html, filename=filename)
+        obj, cfg = get_report_object(report_type, ref_id)
+        html = render_report_html(report_type, obj, cfg)
 
-    # Persist a job record
-    job = ReportJob.objects.create(
-        report_type=rtype, ref_id=ref_id, created_by=request.user, format="PDF" if as_pdf else "HTML"
-    )
+        # Build filename like encounter-42-20251205-120000.pdf
+        timestamp = timezone.now().strftime("%Y%m%d-%H%M%S")
+        base_name = f"{report_type.lower()}-{ref_id}-{timestamp}"
 
-    # save into attachments if requested and we have a PDF
-    if data.get("save_as_attachment") and resp and resp.content:
-        file_obj = save_pdf_as_attachment(
-            filename=filename, pdf_bytes=resp.content, user=request.user, patient=patient, facility=facility, tag="Report"
+        if as_pdf:
+            pdf_bytes = build_pdf(html)
+            filename = f"{base_name}.pdf"
+
+            # Optional: save as attachment
+            attachment = None
+            if save_as_attachment_flag:
+                attachment = save_report_attachment(
+                    obj=obj,
+                    pdf_bytes=pdf_bytes,
+                    filename=filename,
+                    tag=cfg.get("tag", "REPORT"),
+                    user=request.user,
+                )
+
+            # Respond with the PDF directly
+            resp = HttpResponse(pdf_bytes, content_type="application/pdf")
+            resp["Content-Disposition"] = f'attachment; filename="{filename}"'
+
+            # You could also include some headers with attachment id if you like
+            if attachment is not None:
+                resp["X-Attachment-Id"] = str(attachment.pk)
+
+            return resp
+
+        # as_pdf = False → just return HTML (and optionally save nothing)
+        filename = f"{base_name}.html"
+
+        if save_as_attachment_flag:
+            # If you really want HTML saved too, you can adapt save_report_attachment
+            # to accept html_bytes instead. For now we just skip saving here.
+            pass
+
+        return Response(
+            {
+                "report_type": report_type,
+                "ref_id": ref_id,
+                "html": html,
+                "filename": filename,
+            },
+            status=status.HTTP_200_OK,
         )
-        job.saved_as_attachment_id = file_obj.id
-        job.save(update_fields=["saved_as_attachment_id"])
-
-    # Return response
-    if resp:  # PDF
-        return resp
-    # HTML fallback
-    return HttpResponse(html, content_type="text/html")

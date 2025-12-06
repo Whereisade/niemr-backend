@@ -4,6 +4,7 @@ from accounts.models import User
 from accounts.enums import UserRole
 from .models import Patient, PatientDocument, HMO
 from .enums import BloodGroup, Genotype, InsuranceStatus
+from rest_framework import serializers as rf_serializers
 
 class HMOSerializer(serializers.ModelSerializer):
     class Meta:
@@ -90,39 +91,124 @@ class PatientDocumentSerializer(serializers.ModelSerializer):
 
 # --- Dependent serializers added below ---
 
-from rest_framework import serializers as rf_serializers  # keep namespace clear if needed
+ # keep namespace clear if needed
 # using the existing Patient model fields: dob and gender
 BASIC_DEPENDENT_FIELDS = (
     "id", "first_name", "last_name", "dob", "gender",
-    "parent_patient",  # read-only on list/detail; set on create by the view
+    "parent_patient", "relationship_to_guardian", "phone",  # read-only on list/detail; set on create by the view
 )
 
 class DependentCreateSerializer(serializers.ModelSerializer):
     """
-    Create a dependent (child) for a parent patient.
-    parent_patient must be assigned by the view (not via client payload).
-    Dependents should not be created with a linked user account.
+    Serializer used when creating a dependent under a parent patient.
+
+    Incoming payload (from frontend) can use:
+      - first_name
+      - last_name
+      - dob
+      - gender
+      - relationship  (e.g. "Son", "Daughter")
+      - phone
+
+    Internally we:
+      - store `relationship` into `relationship_to_guardian`
+      - set `parent_patient` from the view (perform_create / nested action)
+      - optionally set `guardian_user` from request.user
     """
+
+    # Expose a simple "relationship" field to the client
+    relationship = serializers.CharField(
+        max_length=32,
+        required=False,
+        allow_blank=True,
+        help_text="Relationship of the dependent to the guardian (e.g. Son, Daughter)",
+    )
+
     class Meta:
         model = Patient
-        fields = ("first_name", "last_name", "dob", "gender")
-        # parent_patient set in view; user remains null for dependents
+        # NOTE: No `relationship_to_guardian` here; we map manually.
+        fields = [
+            "first_name",
+            "last_name",
+            "dob",
+            "gender",
+            "relationship",
+            "phone",
+        ]
 
     def validate(self, attrs):
-        # Prevent clients from attempting to attach a user via payload
+        """
+        Keep the existing guard: block attempts to attach a User directly.
+        """
         if self.initial_data.get("user") or self.initial_data.get("user_id"):
-            raise rf_serializers.ValidationError("Dependents cannot be created with a linked user.")
+            raise rf_serializers.ValidationError(
+                "Dependents cannot be created with a linked user."
+            )
         return attrs
 
+    def create(self, validated_data):
+        """
+        Map `relationship` → `relationship_to_guardian`,
+        and let the view inject `parent_patient`, `guardian_user`, `facility`
+        via the `.save()` call.
+        """
+        relationship = validated_data.pop("relationship", "").strip()
+        if relationship:
+            validated_data["relationship_to_guardian"] = relationship
 
-class DependentDetailSerializer(serializers.ModelSerializer):
+        # parent_patient / guardian_user / facility come from serializer.save(...)
+        return Patient.objects.create(**validated_data)
+
+
+class DependentSerializer(serializers.ModelSerializer):
+    """
+    Read serializer for dependent records.
+    Exposes `relationship` as a friendly alias of `relationship_to_guardian`.
+    """
+
+    relationship = serializers.CharField(
+        source="relationship_to_guardian",
+        read_only=True,
+    )
+
     class Meta:
         model = Patient
-        fields = BASIC_DEPENDENT_FIELDS
-        read_only_fields = ("parent_patient",)
+        fields = [
+            "id",
+            "first_name",
+            "last_name",
+            "dob",
+            "gender",
+            "relationship",
+            "phone",
+        ]
 
 
 class DependentUpdateSerializer(serializers.ModelSerializer):
+    """
+    Update serializer so clients can PATCH relationship as well.
+    """
+
+    relationship = serializers.CharField(
+        max_length=32,
+        required=False,
+        allow_blank=True,
+        help_text="Relationship of the dependent to the guardian (e.g. Son, Daughter)",
+    )
+
     class Meta:
         model = Patient
-        fields = ("first_name", "last_name", "dob", "gender")
+        fields = [
+            "first_name",
+            "last_name",
+            "dob",
+            "gender",
+            "relationship",
+            "phone",
+        ]
+
+    def update(self, instance, validated_data):
+        relationship = validated_data.pop("relationship", None)
+        if relationship is not None:
+            instance.relationship_to_guardian = (relationship or "").strip()
+        return super().update(instance, validated_data)

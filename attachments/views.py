@@ -1,3 +1,4 @@
+from django.contrib.contenttypes.models import ContentType
 from django.shortcuts import get_object_or_404
 from django.utils.encoding import smart_str
 from rest_framework import viewsets, mixins, status
@@ -12,10 +13,90 @@ from .serializers import FileSerializer, UploadSerializer, LinkSerializer
 from .permissions import CanViewFile, IsStaff
 from .enums import Visibility
 
-class FileViewSet(viewsets.GenericViewSet,
-                  mixins.RetrieveModelMixin,
-                  mixins.ListModelMixin):
-    queryset = File.objects.select_related("patient","facility","uploaded_by").all()
+
+# Map generic ref types from the frontend to concrete app/model pairs.
+REF_TYPE_MAP = {
+    # Encounters
+    "ENCOUNTER": ("encounters", "encounter"),
+
+    # Labs
+    "LAB": ("labs", "laborder"),
+    "LAB_ORDER": ("labs", "laborder"),
+
+    # Imaging
+    "IMAGING": ("imaging", "imagingrequest"),
+    "IMAGING_REQUEST": ("imaging", "imagingrequest"),
+
+    # Pharmacy
+    "PRESCRIPTION": ("pharmacy", "prescription"),
+}
+
+
+def _normalize_ref_type(raw):
+    """
+    Normalise various frontend ref types (e.g. 'lab_order', 'LAB', 'imaging')
+    into the canonical keys used in REF_TYPE_MAP.
+    """
+    if not raw:
+        return None
+    t = str(raw).strip().upper()
+
+    # Friendly aliases
+    if t in {"LAB_ORDER", "LABORDER"}:
+        return "LAB_ORDER"
+    if t in {"LAB"}:
+        return "LAB"
+    if t in {"IMAGING_REQUEST", "IMAGINGREQUEST"}:
+        return "IMAGING_REQUEST"
+    if t in {"IMAGING"}:
+        return "IMAGING"
+    if t in {"ENCOUNTER", "ENCOUNTERS", "VISIT"}:
+        return "ENCOUNTER"
+    if t in {"PRESCRIPTION", "RX"}:
+        return "PRESCRIPTION"
+
+    return t
+
+
+def _resolve_content_type_and_id(ref_type, ref_id):
+    """
+    Turn ref_type + ref_id into (ContentType, object_id), or (None, None)
+    if we can't resolve it.
+    """
+    ref_type = _normalize_ref_type(ref_type)
+    if not (ref_type and ref_id):
+        return None, None
+
+    mapping = REF_TYPE_MAP.get(ref_type)
+    if mapping:
+        app_label, model = mapping
+    else:
+        # Allow sending "app_label.model" explicitly as ref_type if you ever need it.
+        lower = str(ref_type).lower()
+        if "." in lower:
+            app_label, model = lower.split(".", 1)
+        else:
+            return None, None
+
+    try:
+        ct = ContentType.objects.get(app_label=app_label, model=model)
+    except ContentType.DoesNotExist:
+        return None, None
+
+    try:
+        obj_id = int(ref_id)
+    except (TypeError, ValueError):
+        return None, None
+
+    return ct, obj_id
+
+
+class FileViewSet(
+    viewsets.GenericViewSet,
+    mixins.RetrieveModelMixin,
+    mixins.ListModelMixin,
+):
+    queryset = File.objects.select_related("patient", "facility", "uploaded_by").all()
     authentication_classes = [JWTAuthentication]
     permission_classes = [IsAuthenticated]
 
@@ -26,20 +107,47 @@ class FileViewSet(viewsets.GenericViewSet,
         u = self.request.user
         q = self.queryset
 
-        # Patients see only their own files
-        if u.role == "PATIENT":
+        # Scope by user
+        if getattr(u, "role", None) == "PATIENT":
             q = q.filter(patient__user_id=u.id)
-        elif u.facility_id:
-            # Staff see their facility files
+        elif getattr(u, "facility_id", None):
             q = q.filter(facility_id=u.facility_id)
 
-        # filters
-        patient = self.request.query_params.get("patient")
-        tag = self.request.query_params.get("tag")
-        vis = self.request.query_params.get("visibility")
-        if patient: q = q.filter(patient_id=patient)
-        if tag: q = q.filter(tag__iexact=tag)
-        if vis: q = q.filter(visibility=vis)
+        params = self.request.query_params
+
+        # Simple filters
+        patient = params.get("patient")
+        tag = params.get("tag")
+        vis = params.get("visibility")
+
+        if patient:
+            q = q.filter(patient_id=patient)
+        if tag:
+            q = q.filter(tag__iexact=tag)
+        if vis:
+            q = q.filter(visibility=vis)
+
+        # 🔗 Object-scoped filters (labs, imaging, encounters, etc.)
+        ref_type = params.get("ref_type") or params.get("owner_type")
+        ref_id = params.get("ref_id") or params.get("owner_id")
+
+        # Compatibility parameters used in some frontend code
+        lab_order = params.get("lab_order")
+        imaging_request = params.get("imaging_request")
+
+        if not (ref_type and ref_id) and lab_order:
+            ref_type, ref_id = "LAB_ORDER", lab_order
+        if not (ref_type and ref_id) and imaging_request:
+            ref_type, ref_id = "IMAGING_REQUEST", imaging_request
+
+        if ref_type and ref_id:
+            ct, obj_id = _resolve_content_type_and_id(ref_type, ref_id)
+            if ct and obj_id:
+                # Use the reverse relation: File -> AttachmentLink (related_name="links")
+                q = q.filter(
+                    links__content_type=ct,
+                    links__object_id=obj_id,
+                ).distinct()
 
         return q
 
@@ -57,10 +165,19 @@ class FileViewSet(viewsets.GenericViewSet,
         - patient: <id> (optional; associates file for patient and auto-infers facility)
         - visibility: PRIVATE/PATIENT/INTERNAL
         - tag: optional
+        - description: optional
+
+        Optional linking fields (any of these, used by the frontend):
+        - ref_type + ref_id            (e.g. ENCOUNTER, LAB, IMAGING, PRESCRIPTION)
+        - owner_type + owner_id        (e.g. "lab_order", "imaging_request")
+        - lab_order                    (numeric id)
+        - imaging_request              (numeric id)
         """
         s = UploadSerializer(data=request.data)
         s.is_valid(raise_exception=True)
         data = s.validated_data
+
+        # Associate with patient/facility if provided
         patient = None
         if data.get("patient"):
             patient = get_object_or_404(Patient, id=data["patient"])
@@ -70,12 +187,41 @@ class FileViewSet(viewsets.GenericViewSet,
             original_name=data["file"].name,
             mime_type=getattr(data["file"], "content_type", ""),
             uploaded_by=request.user,
-            facility=request.user.facility or (patient.facility if patient else None),
+            facility=(
+                getattr(request.user, "facility", None)
+                or (patient.facility if patient else None)
+            ),
             patient=patient,
             visibility=data.get("visibility"),
-            tag=data.get("tag",""),
+            tag=data.get("tag", ""),
+            description=data.get("description", ""),
         )
-        return Response(FileSerializer(f).data, status=201)
+
+        # 🔗 Optional: link this file to a specific object
+        raw = request.data  # QueryDict from DRF
+
+        ref_type = (
+            raw.get("ref_type")
+            or raw.get("owner_type")
+            or ("LAB_ORDER" if raw.get("lab_order") else None)
+            or ("IMAGING_REQUEST" if raw.get("imaging_request") else None)
+        )
+        ref_id = (
+            raw.get("ref_id")
+            or raw.get("owner_id")
+            or raw.get("lab_order")
+            or raw.get("imaging_request")
+        )
+
+        ct, obj_id = _resolve_content_type_and_id(ref_type, ref_id)
+        if ct and obj_id:
+            AttachmentLink.objects.get_or_create(
+                file=f,
+                content_type=ct,
+                object_id=obj_id,
+            )
+
+        return Response(FileSerializer(f).data, status=status.HTTP_201_CREATED)
 
     @action(detail=False, methods=["post"], permission_classes=[IsAuthenticated, IsStaff])
     def link(self, request):
@@ -99,13 +245,21 @@ class FileViewSet(viewsets.GenericViewSet,
         f = self.get_object()
         u = request.user
         # authz
-        if u.role == "PATIENT":
+        if getattr(u, "role", None) == "PATIENT":
             if not (f.patient and f.patient.user_id == u.id):
-                return Response({"detail":"Not allowed"}, status=403)
-        elif u.facility_id != f.facility_id and u.role not in ("SUPER_ADMIN","ADMIN"):
-            return Response({"detail":"Not allowed"}, status=403)
-        if f.visibility == "INTERNAL" and u.role not in ("SUPER_ADMIN","ADMIN"):
-            return Response({"detail":"Admins only for INTERNAL files"}, status=403)
+                return Response({"detail": "Not allowed"}, status=403)
+        elif u.facility_id != f.facility_id and u.role not in (
+            "SUPER_ADMIN",
+            "ADMIN",
+        ):
+            return Response({"detail": "Not allowed"}, status=403)
+        if f.visibility == "INTERNAL" and u.role not in (
+            "SUPER_ADMIN",
+            "ADMIN",
+        ):
+            return Response(
+                {"detail": "Admins only for INTERNAL files"}, status=403
+            )
 
         f.file.delete(save=False)  # remove binary
         f.delete()

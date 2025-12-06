@@ -1,6 +1,8 @@
+# reports/urls.py
 from django.urls import path
-from .views import generate
+
+from .views import GenerateReportView
 
 urlpatterns = [
-  path("generate", generate),
+    path("generate/", GenerateReportView.as_view(), name="reports-generate"),
 ]

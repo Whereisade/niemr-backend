@@ -17,7 +17,7 @@ class HMO(models.Model):
 
 class Patient(models.Model):
     # ownership / scoping
-    user = models.OneToOneField(settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL)
+    user = models.OneToOneField(settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL, related_name="patient_profile",)
     facility = models.ForeignKey(Facility, null=True, blank=True, on_delete=models.SET_NULL, related_name="patients")
     guardian_user = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL, related_name="guardian_dependents")  # parent/guardian
     # self-referential parent (a Patient can be a dependent of another Patient)
@@ -28,6 +28,12 @@ class Patient(models.Model):
         related_name="dependents",
         on_delete=models.PROTECT,  # require reassignment/removal before deleting guardian
         help_text="If set, this Patient is a dependent of `parent_patient`."
+    )
+
+    relationship_to_guardian = models.CharField(
+        max_length=64,
+        blank=True,
+        help_text="Relationship of this dependent to their parent/guardian, e.g. Son, Daughter, Spouse.",
     )
 
     # core demographics

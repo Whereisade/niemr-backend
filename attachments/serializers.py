@@ -5,15 +5,27 @@ from .enums import Visibility
 
 MAX_SIZE_BYTES = 20 * 1024 * 1024  # 20MB default cap; adjust per your infra
 
+
 class FileSerializer(serializers.ModelSerializer):
     url = serializers.SerializerMethodField()
+
     class Meta:
         model = File
         fields = [
-            "id","original_name","mime_type","size_bytes","sha256",
-            "facility","patient","visibility","tag","created_at","url"
+            "id",
+            "original_name",
+            "mime_type",
+            "size_bytes",
+            "sha256",
+            "facility",
+            "patient",
+            "visibility",
+            "tag",
+            "description",  # NEW
+            "created_at",
+            "url",
         ]
-        read_only_fields = ["size_bytes","sha256","created_at"]
+        read_only_fields = ["size_bytes", "sha256", "created_at"]
 
     def get_url(self, obj):
         # Direct MEDIA URL; consider signed URLs if using S3 later
@@ -22,16 +34,29 @@ class FileSerializer(serializers.ModelSerializer):
         except Exception:
             return None
 
+
 class UploadSerializer(serializers.Serializer):
     file = serializers.FileField()
     patient = serializers.IntegerField(required=False)  # Patient.id
-    visibility = serializers.ChoiceField(choices=Visibility.choices, default=Visibility.PRIVATE)
+
+    # NEW: allow linking directly from frontend
+    lab_order = serializers.IntegerField(required=False)
+    imaging_request = serializers.IntegerField(required=False)
+
+    visibility = serializers.ChoiceField(
+        choices=Visibility.choices,
+        default=Visibility.PRIVATE,
+    )
     tag = serializers.CharField(required=False, allow_blank=True)
+
+    # NEW: simple free-text description
+    description = serializers.CharField(required=False, allow_blank=True)
 
     def validate_file(self, f):
         if f.size > MAX_SIZE_BYTES:
             raise serializers.ValidationError("File too large (>20MB).")
         return f
+
 
 class LinkSerializer(serializers.Serializer):
     file_id = serializers.IntegerField()
@@ -41,8 +66,12 @@ class LinkSerializer(serializers.Serializer):
 
     def save(self):
         file_id = self.validated_data["file_id"]
-        ct = ContentType.objects.get(app_label=self.validated_data["app_label"],
-                                     model=self.validated_data["model"])
+        ct = ContentType.objects.get(
+            app_label=self.validated_data["app_label"],
+            model=self.validated_data["model"],
+        )
         return AttachmentLink.objects.get_or_create(
-            file_id=file_id, content_type=ct, object_id=self.validated_data["object_id"]
+            file_id=file_id,
+            content_type=ct,
+            object_id=self.validated_data["object_id"],
         )[0]

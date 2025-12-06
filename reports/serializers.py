@@ -1,12 +1,11 @@
+# reports/serializers.py
 from rest_framework import serializers
-from .models import ReportJob, ReportType
 
-class GenerateRequestSerializer(serializers.Serializer):
-    report_type = serializers.ChoiceField(choices=ReportType.choices)
+
+class GenerateReportSerializer(serializers.Serializer):
+    REPORT_TYPES = ("ENCOUNTER", "LAB", "IMAGING", "BILLING")
+
+    report_type = serializers.ChoiceField(choices=REPORT_TYPES)
     ref_id = serializers.IntegerField()
     as_pdf = serializers.BooleanField(required=False, default=True)
     save_as_attachment = serializers.BooleanField(required=False, default=False)
-
-    # Only for billing
-    start = serializers.DateTimeField(required=False, allow_null=True)
-    end = serializers.DateTimeField(required=False, allow_null=True)

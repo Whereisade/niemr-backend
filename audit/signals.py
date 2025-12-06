@@ -17,19 +17,30 @@ from .local import get_request
 
 AUDIT_APPS = None  # set to a list like ["patients","vitals",...] to restrict; None = all apps
 
+
 class SafeJSONEncoder(DjangoJSONEncoder):
     def default(self, o):
         # FieldFile -> stored name or None
         if isinstance(o, FieldFile):
             return o.name or None
+
         # sets -> lists
         if isinstance(o, set):
             return list(o)
+
+        # Any Django model instance -> primary key (or string fallback)
+        if isinstance(o, Model):
+            # We already store content_type + object_id separately,
+            # so just reduce model instances to their primary key.
+            return o.pk or str(o)
+
         return super().default(o)
+
 
 def json_ready(payload: dict):
     # Use SafeJSONEncoder so files and sets don’t crash dumps()
     return json.loads(json.dumps(payload, cls=SafeJSONEncoder))
+
 
 def _ctx():
     req = get_request()
@@ -41,14 +52,17 @@ def _ctx():
         "ua": getattr(req, "META", {}).get("HTTP_USER_AGENT") if req else None,
     }
 
+
 def _should_audit(instance: Model) -> bool:
     if AUDIT_APPS is None:
         return True
     return instance._meta.app_label in AUDIT_APPS
 
+
 def _during_migration() -> bool:
     # Don’t emit audit logs while running migrations
     return any(cmd in sys.argv for cmd in ("migrate", "makemigrations"))
+
 
 def _contenttypes_ready() -> bool:
     # Be defensive: contenttypes table might not exist yet
@@ -58,6 +72,7 @@ def _contenttypes_ready() -> bool:
         return True
     except Exception:
         return False
+
 
 def _skip_sender(sender) -> bool:
     # Avoid logging our own AuditLog saves and a few framework tables
@@ -70,6 +85,7 @@ def _skip_sender(sender) -> bool:
         "auth.permission",
         "auth.group",
     }
+
 
 def safe_model_dict(instance) -> dict:
     """Return a dict of concrete field values for an instance.
@@ -101,6 +117,7 @@ def safe_model_dict(instance) -> dict:
             data[f.name] = val
     return data
 
+
 @receiver(pre_save)
 def audit_pre_save(sender, instance, **kwargs):
     if _during_migration() or _skip_sender(sender) or not _contenttypes_ready():
@@ -113,6 +130,7 @@ def audit_pre_save(sender, instance, **kwargs):
     except sender.DoesNotExist:
         return
     instance.__audit_before__ = safe_model_dict(old)
+
 
 @receiver(post_save)
 def audit_post_save(sender, instance, created, **kwargs):
@@ -144,6 +162,7 @@ def audit_post_save(sender, instance, created, **kwargs):
                 changes=changes_payload,
             )
 
+
 @receiver(pre_delete)
 def audit_pre_delete(sender, instance, **kwargs):
     if _during_migration() or _skip_sender(sender) or not _contenttypes_ready():
@@ -161,6 +180,7 @@ def audit_pre_delete(sender, instance, **kwargs):
         changes=before_payload,
     )
 
+
 @receiver(m2m_changed)
 def audit_m2m(sender, instance, action, reverse, model, pk_set, **kwargs):
     if _during_migration() or _skip_sender(instance.__class__) or not _contenttypes_ready():
@@ -169,11 +189,14 @@ def audit_m2m(sender, instance, action, reverse, model, pk_set, **kwargs):
         pass
     if not _should_audit(instance):
         return
-    if action not in ("post_add","post_remove","post_clear"):
+    if action not in ("post_add", "post_remove", "post_clear"):
         return
     ct = ContentType.objects.get_for_model(instance.__class__)
     ctx = _ctx()
-    m2m_payload = json_ready({"related_model": model._meta.label_lower, "pks": list(pk_set) if pk_set else []})
+    m2m_payload = json_ready({
+        "related_model": model._meta.label_lower,
+        "pks": list(pk_set) if pk_set else [],
+    })
     AuditLog.objects.create(
         actor=ctx["user"], actor_email=ctx["email"],
         ip_address=ctx["ip"], user_agent=ctx["ua"],
