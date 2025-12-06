@@ -33,7 +33,14 @@ class AppointmentViewSet(viewsets.GenericViewSet,
         u = self.request.user
 
         if u.role == "PATIENT":
-            q = q.filter(patient__user_id=u.id)
+            base_patient = getattr(u, "patient_profile", None)
+            if base_patient:
+                q = q.filter(
+                    Q(patient=base_patient) |
+                    Q(patient__parent_patient=base_patient)
+                )
+            else:
+                q = q.none()
         elif u.facility_id:
             q = q.filter(facility_id=u.facility_id)
 
@@ -66,15 +73,45 @@ class AppointmentViewSet(viewsets.GenericViewSet,
         data = request.data.copy()
 
         if user.role == "PATIENT":
-            # Attach to this user's patient profile automatically
-            patient = getattr(user, "patient", None)
-            if not patient:
+            # This is the "main" patient attached to the logged-in user
+            base_patient = getattr(user, "patient_profile", None)
+            if not base_patient:
                 return Response(
                     {"detail": "No patient profile linked to this user."},
                     status=status.HTTP_400_BAD_REQUEST,
                 )
-            # Force patient field to their own id
-            data["patient"] = patient.id
+
+            # Optional patient ID coming from the frontend (for dependents)
+            raw_patient_id = data.get("patient")
+            target_patient_id = None
+            if raw_patient_id not in (None, "", "null"):
+                try:
+                    target_patient_id = int(raw_patient_id)
+                except (TypeError, ValueError):
+                    return Response(
+                        {"detail": "Invalid patient id."},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+
+            if target_patient_id is None or target_patient_id == base_patient.id:
+                # No explicit patient, or same as self → book for self
+                data["patient"] = base_patient.id
+            else:
+                # A patient id was provided – it must be one of this patient's dependents
+                allowed_ids = set(
+                    base_patient.dependents.values_list("id", flat=True)
+                )
+                if target_patient_id not in allowed_ids:
+                    return Response(
+                        {
+                            "detail": (
+                                "You can only book appointments for yourself "
+                                "or your registered dependents."
+                            )
+                        },
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+                data["patient"] = target_patient_id
         else:
             # Staff (PROVIDER, ADMIN, etc.) must pass permission checks
             self.permission_classes = [IsAuthenticated, IsStaff]
