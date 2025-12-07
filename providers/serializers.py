@@ -2,14 +2,15 @@
 from django.db import transaction
 from django.contrib.auth import get_user_model
 from django.contrib.auth.password_validation import validate_password
-
+from accounts.enums import UserRole
 from rest_framework import serializers
 from rest_framework_simplejwt.tokens import RefreshToken
-
+from accounts.models import User
 from accounts.enums import UserRole
 from facilities.models import Specialty
-from .models import ProviderProfile, ProviderDocument
+from .models import ProviderProfile, ProviderDocument, ProviderFacilityApplication
 from .enums import ProviderType, Council, VerificationStatus
+from facilities.models import Specialty, Facility
 
 # -------------------------
 # Country/State Choices
@@ -225,3 +226,99 @@ class SelfRegisterProviderSerializer(serializers.Serializer):
             "access": str(refresh.access_token),
             "refresh": str(refresh),
         }
+
+class ProviderFacilityApplicationSerializer(serializers.ModelSerializer):
+    provider_name = serializers.SerializerMethodField()
+    facility_name = serializers.CharField(source="facility.name", read_only=True)
+
+    class Meta:
+        model = ProviderFacilityApplication
+        fields = [
+            "id",
+            "provider",
+            "provider_name",
+            "facility",
+            "facility_name",
+            "status",
+            "message",
+            "created_at",
+            "decided_at",
+        ]
+        read_only_fields = (
+            "provider",
+            "status",
+            "created_at",
+            "decided_at",
+        )
+
+    def get_provider_name(self, obj):
+        user = getattr(obj.provider, "user", None)
+        if not user:
+            return None
+        return user.get_full_name() or user.email
+
+
+class ProviderApplyToFacilitySerializer(serializers.Serializer):
+    facility_id = serializers.IntegerField()
+    message = serializers.CharField(
+        required=False,
+        allow_blank=True,
+        allow_null=True,
+    )
+
+    def validate_facility_id(self, value):
+        """
+        Ensure the facility exists and stash it in the serializer context.
+        """
+        try:
+            facility = Facility.objects.get(id=value)
+        except Facility.DoesNotExist:
+            raise serializers.ValidationError("Facility not found.")
+
+        self.context["facility"] = facility
+        return value
+
+    def create(self, validated_data):
+        """
+        Create or update an application for the current provider to a facility.
+        """
+        request = self.context["request"]
+        user = request.user
+        facility = self.context.get("facility")
+
+        # ---- Role guard (mirrors the view logic) ----
+        provider_role_values = {
+            UserRole.DOCTOR,
+            UserRole.NURSE,
+            UserRole.LAB,
+            UserRole.PHARMACY,
+        }
+
+        if user.role not in provider_role_values:
+            # This is extra safety; the main guard is in the view.
+            raise serializers.ValidationError(
+                "Only provider accounts can apply to facilities."
+            )
+
+        # ---- Get provider profile for this account ----
+        try:
+            provider = user.provider_profile
+        except ProviderProfile.DoesNotExist:
+            raise serializers.ValidationError(
+                "You do not have a provider profile yet."
+            )
+
+        # ---- Create or update the application ----
+        application, _ = ProviderFacilityApplication.objects.update_or_create(
+            provider=provider,
+            facility=facility,
+            defaults={
+                "message": validated_data.get("message", "") or "",
+                "status": ProviderFacilityApplication.Status.PENDING,
+                "decided_by": None,
+                "decided_at": None,
+            },
+        )
+
+        return application
+

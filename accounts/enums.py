@@ -9,3 +9,8 @@ class UserRole(models.TextChoices):
     PHARMACY    = "PHARMACY", "Pharmacy"
     FRONTDESK   = "FRONTDESK", "Front Desk"
     PATIENT     = "PATIENT", "Patient"
+
+    @classmethod
+    def provider_roles(cls):
+        return {cls.DOCTOR, cls.NURSE, cls.LAB, cls.PHARMACY}
+

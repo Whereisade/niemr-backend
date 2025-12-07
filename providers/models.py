@@ -2,7 +2,9 @@ from django.conf import settings
 from django.core.validators import RegexValidator, MinValueValidator
 from django.db import models
 from django.utils import timezone
+from django.utils.translation import gettext_lazy as _
 
+from facilities.models import Specialty, Facility
 from facilities.models import Specialty  # reuse seeded specialties
 from .enums import ProviderType, Council, VerificationStatus
 
@@ -74,3 +76,48 @@ class ProviderDocument(models.Model):
     kind = models.CharField(max_length=64, blank=True)  # e.g., "LICENSE","ID","CERT"
     file = models.FileField(upload_to="provider_docs/")
     uploaded_at = models.DateTimeField(auto_now_add=True)
+
+class ProviderFacilityApplication(models.Model):
+    """
+    A provider's request to join a Facility.
+
+    Created by PROVIDER accounts, reviewed by Facility admins.
+    """
+
+    class Status(models.TextChoices):
+        PENDING = "PENDING", _("Pending")
+        APPROVED = "APPROVED", _("Approved")
+        REJECTED = "REJECTED", _("Rejected")
+
+    provider = models.ForeignKey(
+        "providers.ProviderProfile",
+        on_delete=models.CASCADE,
+        related_name="facility_applications",
+    )
+    facility = models.ForeignKey(
+        "facilities.Facility",
+        on_delete=models.CASCADE,
+        related_name="provider_applications",
+    )
+    status = models.CharField(
+        max_length=16,
+        choices=Status.choices,
+        default=Status.PENDING,
+    )
+    message = models.TextField(blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    decided_at = models.DateTimeField(null=True, blank=True)
+    decided_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        null=True,
+        blank=True,
+        related_name="provider_facility_decisions",
+        on_delete=models.SET_NULL,
+    )
+
+    class Meta:
+        unique_together = ("provider", "facility")
+        ordering = ("-created_at",)
+
+    def __str__(self) -> str:
+        return f"{self.provider} → {self.facility} ({self.status})"
