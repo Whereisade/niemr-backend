@@ -6,6 +6,8 @@ from .models import Patient, PatientDocument, HMO
 from .enums import BloodGroup, Genotype, InsuranceStatus
 from rest_framework import serializers as rf_serializers
 
+
+
 class HMOSerializer(serializers.ModelSerializer):
     class Meta:
         model = HMO
@@ -85,9 +87,38 @@ class SelfRegisterSerializer(serializers.Serializer):
         return patient
 
 class PatientDocumentSerializer(serializers.ModelSerializer):
+    uploaded_by_name = serializers.SerializerMethodField(read_only=True)
+
     class Meta:
         model = PatientDocument
-        fields = ["id","doc_type","file","uploaded_at"]
+        fields = [
+            "id",
+            "patient",
+            "title",
+            "document_type",
+            "file",
+            "notes",
+            "uploaded_by",
+            "uploaded_by_name",
+            "uploaded_by_role",
+            "created_at",
+        ]
+        read_only_fields = [
+            "id",
+            "patient",
+            "uploaded_by",
+            "uploaded_by_role",
+            "uploaded_by_name",
+            "created_at",
+        ]
+
+    def get_uploaded_by_name(self, obj):
+        user = obj.uploaded_by
+        if not user:
+            return None
+        if hasattr(user, "get_full_name"):
+            return user.get_full_name() or user.email
+        return str(user)
 
 # --- Dependent serializers added below ---
 

@@ -1,6 +1,6 @@
 from django.db.models import Q
 from django.shortcuts import get_object_or_404
-from rest_framework import viewsets, mixins, status
+from rest_framework import viewsets, mixins, status, permissions
 from rest_framework.decorators import action, api_view, permission_classes
 from rest_framework.permissions import IsAuthenticated, AllowAny
 from rest_framework.response import Response
@@ -62,7 +62,20 @@ class PatientViewSet(viewsets.GenericViewSet,
         patient = self.get_object()
         s = PatientDocumentSerializer(data=request.data)
         s.is_valid(raise_exception=True)
-        obj = s.save(patient=patient, uploaded_by_user=request.user)
+
+        user = request.user
+        role_value = getattr(user, "role", None)
+        uploaded_by_role = (
+            str(role_value).upper()
+            if role_value and str(role_value).upper() in PatientDocument.UploadedBy.values
+            else PatientDocument.UploadedBy.SYSTEM
+        )
+
+        obj = s.save(
+            patient=patient,
+            uploaded_by=user,
+            uploaded_by_role=uploaded_by_role,
+        )
         return Response(PatientDocumentSerializer(obj).data, status=201)
 
     @action(detail=False, methods=["get"], permission_classes=[IsAuthenticated])
@@ -254,3 +267,73 @@ def add_dependents_actions_to_patient_viewset(viewset_cls):
     return viewset_cls
 
 PatientViewSet = add_dependents_actions_to_patient_viewset(PatientViewSet)
+
+class PatientDocumentViewSet(viewsets.ModelViewSet):
+    """
+    Patient-attached documents (lab results, imaging, prescriptions, etc.).
+
+    - PATIENT role:
+        * GET /api/patients/documents/ → own documents
+        * POST /api/patients/documents/ → upload to own record
+        * DELETE /api/patients/documents/{id}/ → delete own doc (optional)
+    - Staff (DOCTOR/NURSE/etc):
+        * GET /api/patients/documents/?patient=<patient_id>
+          → all docs for that patient, regardless of facility
+    """
+
+    serializer_class = PatientDocumentSerializer
+    authentication_classes = [JWTAuthentication]
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get_queryset(self):
+        user = self.request.user
+        qs = PatientDocument.objects.select_related("patient", "uploaded_by")
+
+        # Patient login → only own documents
+        if getattr(user, "role", None) == UserRole.PATIENT:
+            patient = getattr(user, "patient_profile", None)  # <-- use patient_profile
+            if patient is None:
+                return qs.none()
+            return qs.filter(patient=patient)
+
+        # Staff → must explicitly ask for a patient
+        patient_id = self.request.query_params.get("patient")
+        if patient_id:
+            return qs.filter(patient_id=patient_id)
+
+        # No patient filter → don't leak anything
+        return qs.none()
+
+    def perform_create(self, serializer):
+        user = self.request.user
+
+        # PATIENT uploads to their own record
+        if getattr(user, "role", None) == UserRole.PATIENT:
+            patient = getattr(user, "patient_profile", None)  # <-- use patient_profile
+            if patient is None:
+                raise ValidationError({"detail": "No patient profile linked to this user."})
+
+            serializer.save(
+                patient=patient,
+                uploaded_by=user,
+                uploaded_by_role=PatientDocument.UploadedBy.PATIENT,
+            )
+            return
+
+        # Staff upload (not your priority right now, but wired for later)
+        patient_id = self.request.data.get("patient")
+        if not patient_id:
+            raise ValidationError(
+                {"patient": "This field is required when staff upload on behalf of a patient."}
+            )
+
+        serializer.save(
+            uploaded_by=user,
+            uploaded_by_role=self._guess_uploaded_by_role(user),
+        )
+
+    def _guess_uploaded_by_role(self, user):
+        role = (getattr(user, "role", "") or "").upper()
+        if role in PatientDocument.UploadedBy.values:
+            return role
+        return PatientDocument.UploadedBy.SYSTEM

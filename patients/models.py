@@ -1,5 +1,6 @@
 from decimal import Decimal, ROUND_HALF_UP
 from django.conf import settings
+import uuid
 from django.core.validators import RegexValidator, MinValueValidator
 from django.db import models
 from django.core.exceptions import ValidationError
@@ -14,6 +15,10 @@ phone_validator = RegexValidator(
 class HMO(models.Model):
     name = models.CharField(max_length=160, unique=True)
     def __str__(self): return self.name
+
+def patient_document_upload_path(instance, filename):
+    # e.g. patient_documents/<patient_id>/<uuid>_<filename>
+    return f"patient_documents/{instance.patient_id}/{uuid.uuid4()}_{filename}"
 
 class Patient(models.Model):
     # ownership / scoping
@@ -125,8 +130,60 @@ class Patient(models.Model):
         return f"{self.last_name}, {self.first_name}"
     
 class PatientDocument(models.Model):
-    patient = models.ForeignKey(Patient, on_delete=models.CASCADE, related_name="documents")
-    doc_type = models.CharField(max_length=64, blank=True)  # e.g., Blood test/Xray/Ultrasound/Discharge/Referral/Lab/CT
-    file = models.FileField(upload_to="patient_docs/")
-    uploaded_by_user = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL)
-    uploaded_at = models.DateTimeField(auto_now_add=True)
+    class DocumentType(models.TextChoices):
+        BLOOD_TEST = "BLOOD_TEST", "Blood test"
+        XRAY = "XRAY", "X-ray"
+        ULTRASOUND = "ULTRASOUND", "Ultrasound"
+        DISCHARGE_SUMMARY = "DISCHARGE_SUMMARY", "Discharge summary"
+        REFERRAL_NOTE = "REFERRAL_NOTE", "Referral note"
+        LAB_RESULT = "LAB_RESULT", "Lab result"
+        CT_SCAN = "CT_SCAN", "CT scan"
+        OTHER = "OTHER", "Other"
+
+    class UploadedBy(models.TextChoices):
+        PATIENT = "PATIENT", "Uploaded by patient"
+        DOCTOR = "DOCTOR", "Uploaded by doctor"
+        NURSE = "NURSE", "Uploaded by nurse"
+        ADMIN = "ADMIN", "Uploaded by admin"
+        SYSTEM = "SYSTEM", "System"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+
+    # **Key point**: documents are attached to the patient record
+    patient = models.ForeignKey(
+        "patients.Patient",
+        on_delete=models.CASCADE,
+        related_name="documents",
+    )
+
+    uploaded_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="patient_documents",
+    )
+
+    uploaded_by_role = models.CharField(
+        max_length=20,
+        choices=UploadedBy.choices,
+        default=UploadedBy.PATIENT,  # docs tagged “Uploaded by Patient” by default
+    )
+
+    title = models.CharField(max_length=255, blank=True)
+    document_type = models.CharField(
+        max_length=32,
+        choices=DocumentType.choices,
+        default=DocumentType.OTHER,
+    )
+    file = models.FileField(upload_to=patient_document_upload_path)
+    notes = models.TextField(blank=True)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ("-created_at",)
+
+    def __str__(self):
+        base = self.title or self.get_document_type_display()
+        return f"{self.patient_id} - {base}"
