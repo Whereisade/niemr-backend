@@ -3,6 +3,7 @@ from django.db import models
 from django.utils import timezone
 from facilities.models import Facility
 from .enums import Channel, Topic
+from patients.models import Patient
 
 class Preference(models.Model):
     """
@@ -47,3 +48,26 @@ class Notification(models.Model):
             self.is_read = True
             self.read_at = timezone.now()
             self.save(update_fields=["is_read","read_at"])
+
+class Reminder(models.Model):
+    class ReminderType(models.TextChoices):
+        VITALS = "VITALS", "Vitals"
+        MEDICATION = "MEDICATION", "Medication"
+        LAB = "LAB", "Lab Test"
+        APPOINTMENT = "APPOINTMENT", "Appointment"
+        OTHER = "OTHER", "Other"
+
+    patient = models.ForeignKey(Patient, on_delete=models.CASCADE, related_name="reminders")
+    nurse = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True)
+    reminder_type = models.CharField(
+        max_length=32, choices=ReminderType.choices, default=ReminderType.OTHER
+    )
+    message = models.TextField()
+    reminder_time = models.DateTimeField()
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self):
+        return f"Reminder for {self.patient.full_name} - {self.reminder_type}"
+
+    class Meta:
+        ordering = ['reminder_time']

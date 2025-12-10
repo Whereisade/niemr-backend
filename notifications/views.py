@@ -4,7 +4,8 @@ from rest_framework.decorators import action
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework_simplejwt.authentication import JWTAuthentication
-
+from .models import Reminder
+from .serializers import ReminderSerializer
 from .models import Notification, Preference
 from .serializers import NotificationSerializer, PreferenceSerializer
 
@@ -55,3 +56,14 @@ class PreferenceViewSet(viewsets.GenericViewSet,
 
     def perform_create(self, serializer):
         serializer.save(user=self.request.user)
+
+
+class ReminderViewSet(viewsets.ModelViewSet):
+    queryset = Reminder.objects.all()
+    serializer_class = ReminderSerializer
+    authentication_classes = [JWTAuthentication]
+    permission_classes = [IsAuthenticated]
+
+    def perform_create(self, serializer):
+        # Automatically associate the logged-in nurse with the reminder
+        serializer.save(nurse=self.request.user)
