@@ -105,7 +105,7 @@ class PatientDocumentSerializer(serializers.ModelSerializer):
         ]
         read_only_fields = [
             "id",
-            "patient",
+            "patient",  
             "uploaded_by",
             "uploaded_by_role",
             "uploaded_by_name",

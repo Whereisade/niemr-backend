@@ -127,6 +127,19 @@ class AppointmentViewSet(viewsets.GenericViewSet,
             headers=self.get_success_headers(serializer.data),
         )
 
+        # 🔧 NEW: Automatically link patient to facility if not already linked
+        try:
+            appt = Appointment.objects.select_related("patient", "facility").get(id=resp.data["id"])
+            patient = appt.patient
+            
+            # If patient has no facility or a different facility, update it
+            if appt.facility_id and (not patient.facility_id or patient.facility_id != appt.facility_id):
+                patient.facility = appt.facility
+                patient.save(update_fields=["facility"])
+        except Exception:
+            # Don't fail the appointment creation if this update fails
+            pass
+
         # send confirmation email (best effort)
         try:
             appt = Appointment.objects.get(id=resp.data["id"])

@@ -291,7 +291,7 @@ class PatientDocumentViewSet(viewsets.ModelViewSet):
 
         # Patient login → only own documents
         if getattr(user, "role", None) == UserRole.PATIENT:
-            patient = getattr(user, "patient_profile", None)  # <-- use patient_profile
+            patient = getattr(user, "patient_profile", None)
             if patient is None:
                 return qs.none()
             return qs.filter(patient=patient)
@@ -304,32 +304,63 @@ class PatientDocumentViewSet(viewsets.ModelViewSet):
         # No patient filter → don't leak anything
         return qs.none()
 
-    def perform_create(self, serializer):
-        user = self.request.user
-
-        # PATIENT uploads to their own record
+    def create(self, request, *args, **kwargs):
+        """
+        Override create to handle patient assignment before validation.
+        """
+        user = request.user
+        
+        # Determine which patient this document belongs to
+        patient = None
+        
         if getattr(user, "role", None) == UserRole.PATIENT:
-            patient = getattr(user, "patient_profile", None)  # <-- use patient_profile
+            # Patient uploads to their own record
+            patient = getattr(user, "patient_profile", None)
             if patient is None:
-                raise ValidationError({"detail": "No patient profile linked to this user."})
-
-            serializer.save(
-                patient=patient,
-                uploaded_by=user,
-                uploaded_by_role=PatientDocument.UploadedBy.PATIENT,
-            )
-            return
-
-        # Staff upload (not your priority right now, but wired for later)
-        patient_id = self.request.data.get("patient")
-        if not patient_id:
-            raise ValidationError(
-                {"patient": "This field is required when staff upload on behalf of a patient."}
-            )
-
-        serializer.save(
+                return Response(
+                    {"detail": "No patient profile linked to this user."},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+        else:
+            # Staff upload - get patient from request
+            patient_id = request.data.get("patient")
+            if not patient_id:
+                return Response(
+                    {"patient": "This field is required when staff upload on behalf of a patient."},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+            
+            try:
+                patient = Patient.objects.get(id=patient_id)
+            except Patient.DoesNotExist:
+                return Response(
+                    {"patient": "Patient not found."},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+        
+        # Now validate and create the document
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        
+        # Determine uploaded_by_role
+        role_value = getattr(user, "role", None)
+        if getattr(user, "role", None) == UserRole.PATIENT:
+            uploaded_by_role = PatientDocument.UploadedBy.PATIENT
+        else:
+            uploaded_by_role = self._guess_uploaded_by_role(user)
+        
+        # Save with patient
+        document = serializer.save(
+            patient=patient,
             uploaded_by=user,
-            uploaded_by_role=self._guess_uploaded_by_role(user),
+            uploaded_by_role=uploaded_by_role,
+        )
+        
+        headers = self.get_success_headers(serializer.data)
+        return Response(
+            serializer.data,
+            status=status.HTTP_201_CREATED,
+            headers=headers
         )
 
     def _guess_uploaded_by_role(self, user):
