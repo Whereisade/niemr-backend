@@ -2,7 +2,13 @@
 from django.db.models import Q
 from django.utils.dateparse import parse_datetime
 from rest_framework import viewsets, mixins, status, permissions, filters
-from rest_framework.decorators import action, api_view, permission_classes, authentication_classes, parser_classes
+from rest_framework.decorators import (
+    action,
+    api_view,
+    permission_classes,
+    authentication_classes,
+    parser_classes,
+)
 from rest_framework.permissions import IsAuthenticated, AllowAny
 from rest_framework.response import Response
 from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
@@ -16,18 +22,27 @@ from accounts.permissions import IsAdmin
 from django.shortcuts import get_object_or_404
 from .models import ProviderProfile, ProviderDocument, ProviderFacilityApplication
 from .serializers import (
-    ProviderProfileSerializer, SelfRegisterProviderSerializer, ProviderDocumentSerializer, ProviderFacilityApplicationSerializer,
-    ProviderApplyToFacilitySerializer
+    ProviderProfileSerializer,
+    SelfRegisterProviderSerializer,
+    ProviderDocumentSerializer,
+    ProviderFacilityApplicationSerializer,
+    ProviderApplyToFacilitySerializer,
 )
 from .permissions import IsSelfProvider, IsAdmin
 from .enums import VerificationStatus
 
 
-class ProviderViewSet(viewsets.GenericViewSet,
-                      mixins.RetrieveModelMixin,
-                      mixins.UpdateModelMixin,
-                      mixins.ListModelMixin):
-    queryset = ProviderProfile.objects.select_related("user").prefetch_related("specialties").all()
+class ProviderViewSet(
+    viewsets.GenericViewSet,
+    mixins.RetrieveModelMixin,
+    mixins.UpdateModelMixin,
+    mixins.ListModelMixin,
+):
+    queryset = (
+        ProviderProfile.objects.select_related("user")
+        .prefetch_related("specialties")
+        .all()
+    )
     authentication_classes = [JWTAuthentication]
     permission_classes = [IsAuthenticated]
 
@@ -41,16 +56,32 @@ class ProviderViewSet(viewsets.GenericViewSet,
         # Admins: can see all. Others: can see only approved providers + self (if any)
         if not IsAdmin().has_permission(self.request, self):
             q = q.filter(
-                Q(verification_status=VerificationStatus.APPROVED) |
-                Q(user_id=u.id)
+                Q(verification_status=VerificationStatus.APPROVED)
+                | Q(user_id=u.id)
             )
 
-        # 🔹 NEW: optional facility scoping
+        # 🔹 Facility scoping
+        # ?facility=current → providers in the current user's facility
+        # ?facility=none    → independent providers (no facility assigned)
+        # ?facility=<id>    → providers for a specific facility id
         facility_param = self.request.query_params.get("facility")
-        if facility_param == "current" and getattr(u, "facility_id", None):
-            q = q.filter(user__facility_id=u.facility_id)
+        if facility_param:
+            if facility_param == "current":
+                if getattr(u, "facility_id", None):
+                    q = q.filter(user__facility_id=u.facility_id)
+                else:
+                    q = q.none()
+            elif facility_param == "none":
+                q = q.filter(user__facility__isnull=True)
+            else:
+                try:
+                    facility_id = int(facility_param)
+                except (TypeError, ValueError):
+                    q = q.none()
+                else:
+                    q = q.filter(user__facility_id=facility_id)
 
-        # filters
+        # other filters
         state = self.request.query_params.get("state")
         specialty = self.request.query_params.get("specialty")  # name
         ptype = self.request.query_params.get("type")
@@ -67,46 +98,73 @@ class ProviderViewSet(viewsets.GenericViewSet,
             q = q.filter(verification_status=status_)
         if s:
             q = q.filter(
-                Q(user__first_name__icontains=s) |
-                Q(user__last_name__icontains=s) |
-                Q(bio__icontains=s)
+                Q(user__first_name__icontains=s)
+                | Q(user__last_name__icontains=s)
+                | Q(bio__icontains=s)
             )
+
         return q.distinct().order_by("-created_at", "-id")
 
     def retrieve(self, request, *args, **kwargs):
         obj = self.get_object()
         # Anyone can view APPROVED profiles; owners can view; admins can view
         if obj.verification_status != VerificationStatus.APPROVED:
-            if not (request.user.id == obj.user_id or IsAdmin().has_permission(request, self)):
+            if not (
+                request.user.id == obj.user_id
+                or IsAdmin().has_permission(request, self)
+            ):
                 return Response({"detail": "Not allowed"}, status=403)
         return Response(ProviderProfileSerializer(obj).data)
 
     def update(self, request, *args, **kwargs):
         obj = self.get_object()
         # only owner or admin can update
-        if not (request.user.id == obj.user_id or IsAdmin().has_permission(request, self)):
+        if not (
+            request.user.id == obj.user_id
+            or IsAdmin().has_permission(request, self)
+        ):
             return Response({"detail": "Not allowed"}, status=403)
         return super().update(request, *args, **kwargs)
 
     # Admin actions
-    @action(detail=True, methods=["post"], permission_classes=[IsAuthenticated, IsAdmin])
+    @action(
+        detail=True,
+        methods=["post"],
+        permission_classes=[IsAuthenticated, IsAdmin],
+    )
     def approve(self, request, pk=None):
         prof = self.get_object()
         prof.approve(request.user)
-        return Response({"status": prof.verification_status, "verified_at": prof.verified_at})
+        return Response(
+            {
+                "status": prof.verification_status,
+                "verified_at": prof.verified_at,
+            }
+        )
 
-    @action(detail=True, methods=["post"], permission_classes=[IsAuthenticated, IsAdmin])
+    @action(
+        detail=True,
+        methods=["post"],
+        permission_classes=[IsAuthenticated, IsAdmin],
+    )
     def reject(self, request, pk=None):
         prof = self.get_object()
         reason = request.data.get("reason", "")
         prof.reject(request.user, reason)
-        return Response({"status": prof.verification_status, "rejection_reason": prof.rejection_reason})
+        return Response(
+            {
+                "status": prof.verification_status,
+                "rejection_reason": prof.rejection_reason,
+            }
+        )
 
     # Owner uploads docs
     @action(detail=True, methods=["post"])
     def upload(self, request, pk=None):
         prof = self.get_object()
-        if request.user.id != prof.user_id and not IsAdmin().has_permission(request, self):
+        if request.user.id != prof.user_id and not IsAdmin().has_permission(
+            request, self
+        ):
             return Response({"detail": "Not allowed"}, status=403)
         s = ProviderDocumentSerializer(data=request.data)
         s.is_valid(raise_exception=True)
@@ -134,8 +192,7 @@ def self_register(request):
         verification_status = result.get("verification_status")
         if provider_id and verification_status is None:
             verification_status = (
-                ProviderProfile.objects
-                .only("verification_status")
+                ProviderProfile.objects.only("verification_status")
                 .get(id=provider_id)
                 .verification_status
             )
@@ -154,7 +211,10 @@ def self_register(request):
 
     # Handle ProviderProfile instance return
     return Response(
-        {"provider_id": result.id, "verification_status": result.verification_status},
+        {
+            "provider_id": result.id,
+            "verification_status": result.verification_status,
+        },
         status=201,
     )
 
@@ -192,7 +252,7 @@ def apply_to_facility(request):
     application = serializer.save()  # or pass account if your serializer expects it
 
     return Response(
-        ProviderApplyToFacilitySerializer(application).data,
+        ProviderFacilityApplicationSerializer(application).data,
         status=status.HTTP_201_CREATED,
     )
 
@@ -239,14 +299,16 @@ def facility_provider_applications(request):
         )
 
     status_param = request.query_params.get("status")
-    qs = ProviderFacilityApplication.objects.filter(facility=facility).select_related(
-        "facility", "provider__user"
-    )
+    qs = ProviderFacilityApplication.objects.filter(
+        facility=facility
+    ).select_related("facility", "provider__user")
 
     if status_param:
         qs = qs.filter(status=status_param.upper())
 
-    serializer = ProviderFacilityApplicationSerializer(qs.order_by("-created_at"), many=True)
+    serializer = ProviderFacilityApplicationSerializer(
+        qs.order_by("-created_at"), many=True
+    )
     return Response(serializer.data, status=status.HTTP_200_OK)
 
 
@@ -268,7 +330,9 @@ def facility_provider_application_decide(request, pk, decision):
         )
 
     application = get_object_or_404(
-        ProviderFacilityApplication.objects.select_related("provider__user", "facility"),
+        ProviderFacilityApplication.objects.select_related(
+            "provider__user", "facility"
+        ),
         pk=pk,
         facility=facility,
     )
@@ -306,5 +370,6 @@ def facility_provider_application_decide(request, pk, decision):
 
     serializer = ProviderFacilityApplicationSerializer(application)
     return Response(serializer.data, status=status.HTTP_200_OK)
+
 
 
