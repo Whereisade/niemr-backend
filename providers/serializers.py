@@ -42,11 +42,22 @@ class ProviderProfileSerializer(serializers.ModelSerializer):
     General ProviderProfile serializer used by internal/admin endpoints.
     Supports writing specialties via a plain string list and reads them back with `specialties_read`.
     """
+
+    # 🔹 NEW: user-facing read-only fields for the frontend table
+    first_name = serializers.CharField(source="user.first_name", read_only=True)
+    last_name = serializers.CharField(source="user.last_name", read_only=True)
+    email = serializers.EmailField(source="user.email", read_only=True)
+    role = serializers.SerializerMethodField(read_only=True)
+    facility_name = serializers.CharField(
+        source="user.facility.name",
+        read_only=True,
+    )
+
     # Write specialties as a simple list of strings; store as M2M to Specialty
     specialties = serializers.ListField(
         child=serializers.CharField(max_length=120),
         write_only=True,
-        required=False
+        required=False,
     )
     specialties_read = serializers.SerializerMethodField(read_only=True)
 
@@ -58,7 +69,12 @@ class ProviderProfileSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = ProviderProfile
+        # `__all__` includes the new fields above as standard DRF behaviour
         fields = "__all__"
+
+    def get_role(self, obj):
+        # Map provider_type to something the UI can show as "Role"
+        return obj.provider_type
 
     def get_specialties_read(self, obj):
         return [s.name for s in obj.specialties.all()]
@@ -227,6 +243,7 @@ class SelfRegisterProviderSerializer(serializers.Serializer):
             "refresh": str(refresh),
         }
 
+
 class ProviderFacilityApplicationSerializer(serializers.ModelSerializer):
     provider_name = serializers.SerializerMethodField()
     facility_name = serializers.CharField(source="facility.name", read_only=True)
@@ -321,4 +338,5 @@ class ProviderApplyToFacilitySerializer(serializers.Serializer):
         )
 
         return application
+
 
