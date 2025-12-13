@@ -9,38 +9,55 @@ from rest_framework_simplejwt.authentication import JWTAuthentication
 
 from .models import Drug, StockItem, StockTxn, Prescription
 from .serializers import (
-    DrugSerializer, StockItemSerializer, StockTxnSerializer,
-    PrescriptionCreateSerializer, PrescriptionReadSerializer, DispenseSerializer
+    DrugSerializer,
+    StockItemSerializer,
+    StockTxnSerializer,
+    PrescriptionCreateSerializer,
+    PrescriptionReadSerializer,
+    DispenseSerializer,
 )
-from .permissions import IsStaff, CanViewRx
+from .permissions import IsStaff, CanViewRx, IsPharmacyStaff, CanPrescribe
 from .enums import RxStatus, TxnType
 
+
 # --- Catalog ---
-class DrugViewSet(viewsets.GenericViewSet, mixins.ListModelMixin, mixins.CreateModelMixin):
+class DrugViewSet(
+    viewsets.GenericViewSet,
+    mixins.ListModelMixin,
+    mixins.CreateModelMixin,
+):
     queryset = Drug.objects.filter(is_active=True).order_by("name")
     serializer_class = DrugSerializer
     authentication_classes = [JWTAuthentication]
+    # Any authenticated user (including patients) can list catalog
     permission_classes = [IsAuthenticated]
 
+    # 🔐 creation is pharmacy-only
     def create(self, request, *args, **kwargs):
-        self.permission_classes = [IsAuthenticated, IsStaff]
+        self.permission_classes = [IsAuthenticated, IsPharmacyStaff]
         self.check_permissions(request)
         return super().create(request, *args, **kwargs)
 
-    @action(detail=False, methods=["post"], permission_classes=[IsAuthenticated, IsStaff])
+    # 🔐 CSV import is also pharmacy-only
+    @action(
+        detail=False,
+        methods=["post"],
+        permission_classes=[IsAuthenticated, IsPharmacyStaff],
+    )
     def import_csv(self, request):
         """
         CSV columns: code,name,strength,form,route,qty_per_unit,unit_price
         """
         f = request.FILES.get("file")
         if not f:
-            return Response({"detail":"file is required"}, status=400)
+            return Response({"detail": "file is required"}, status=400)
         buf = io.StringIO(f.read().decode("utf-8"))
         reader = csv.DictReader(buf)
         created, updated = 0, 0
         for row in reader:
             code = (row.get("code") or "").strip()
-            if not code: continue
+            if not code:
+                continue
             defaults = {
                 "name": (row.get("name") or "").strip(),
                 "strength": (row.get("strength") or "").strip(),
@@ -50,21 +67,33 @@ class DrugViewSet(viewsets.GenericViewSet, mixins.ListModelMixin, mixins.CreateM
                 "unit_price": (row.get("unit_price") or 0),
                 "is_active": True,
             }
-            _, is_created = Drug.objects.update_or_create(code=code, defaults=defaults)
-            created += int(is_created); updated += int(not is_created)
+            _, is_created = Drug.objects.update_or_create(
+                code=code, defaults=defaults
+            )
+            created += int(is_created)
+            updated += int(not is_created)
         return Response({"created": created, "updated": updated})
+
 
 # --- Stock ---
 class StockViewSet(viewsets.GenericViewSet, mixins.ListModelMixin):
-    permission_classes = [IsAuthenticated, IsStaff]
+    # 🔐 only pharmacy roles see stock & transactions
+    permission_classes = [IsAuthenticated, IsPharmacyStaff]
 
     def get_queryset(self):
-        return StockItem.objects.select_related("drug","facility").filter(facility=self.request.user.facility)
+        return (
+            StockItem.objects.select_related("drug", "facility")
+            .filter(facility=self.request.user.facility)
+        )
 
     def get_serializer_class(self):
         return StockItemSerializer
 
-    @action(detail=False, methods=["post"])
+    @action(
+        detail=False,
+        methods=["post"],
+        permission_classes=[IsAuthenticated, IsPharmacyStaff],
+    )
     def adjust(self, request):
         """
         Adjust or add stock for a drug at the current facility.
@@ -74,27 +103,54 @@ class StockViewSet(viewsets.GenericViewSet, mixins.ListModelMixin):
         drug_id = request.data.get("drug_id")
         qty = int(request.data.get("qty", 0))
         if not drug_id or qty == 0:
-            return Response({"detail":"drug_id and non-zero qty required"}, status=400)
-        stock, _ = StockItem.objects.get_or_create(facility=u.facility, drug_id=drug_id, defaults={"current_qty": 0})
+            return Response(
+                {"detail": "drug_id and non-zero qty required"}, status=400
+            )
+        stock, _ = StockItem.objects.get_or_create(
+            facility=u.facility,
+            drug_id=drug_id,
+            defaults={"current_qty": 0},
+        )
         stock.current_qty = max(stock.current_qty + qty, 0)
         stock.save(update_fields=["current_qty"])
         StockTxn.objects.create(
-            facility=u.facility, drug_id=drug_id,
+            facility=u.facility,
+            drug_id=drug_id,
             txn_type=TxnType.IN if qty > 0 else TxnType.ADJUST,
-            qty=qty, note=request.data.get("note",""),
-            created_by=u
+            qty=qty,
+            note=request.data.get("note", ""),
+            created_by=u,
         )
         return Response(StockItemSerializer(stock).data, status=201)
 
-    @action(detail=False, methods=["get"])
+    @action(
+        detail=False,
+        methods=["get"],
+        permission_classes=[IsAuthenticated, IsPharmacyStaff],
+    )
     def txns(self, request):
-        qs = StockTxn.objects.filter(facility=request.user.facility).select_related("drug","created_by").order_by("-created_at")
+        qs = (
+            StockTxn.objects.filter(facility=request.user.facility)
+            .select_related("drug", "created_by")
+            .order_by("-created_at")
+        )
         return Response(StockTxnSerializer(qs, many=True).data)
 
+
 # --- Prescriptions ---
-class PrescriptionViewSet(viewsets.GenericViewSet, mixins.CreateModelMixin, mixins.RetrieveModelMixin, mixins.ListModelMixin):
-    queryset = Prescription.objects.select_related("patient","facility","prescribed_by").prefetch_related("items","items__drug")
+class PrescriptionViewSet(
+    viewsets.GenericViewSet,
+    mixins.CreateModelMixin,
+    mixins.RetrieveModelMixin,
+    mixins.ListModelMixin,
+):
+    queryset = (
+        Prescription.objects.select_related(
+            "patient", "facility", "prescribed_by"
+        ).prefetch_related("items", "items__drug")
+    )
     authentication_classes = [JWTAuthentication]
+    # Default: any authenticated user; scoping happens in get_queryset / object perms
     permission_classes = [IsAuthenticated]
 
     def get_serializer_class(self):
@@ -120,28 +176,40 @@ class PrescriptionViewSet(viewsets.GenericViewSet, mixins.CreateModelMixin, mixi
 
         s = self.request.query_params.get("s")
         if s:
-            q = q.filter(Q(note__icontains=s) | Q(items__drug__name__icontains=s) | Q(items__drug__code__icontains=s)).distinct()
+            q = q.filter(
+                Q(note__icontains=s)
+                | Q(items__drug__name__icontains=s)
+                | Q(items__drug__code__icontains=s)
+            ).distinct()
 
         start = self.request.query_params.get("start")
-        end   = self.request.query_params.get("end")
-        if start: q = q.filter(created_at__gte=parse_datetime(start) or start)
-        if end:   q = q.filter(created_at__lte=parse_datetime(end) or end)
+        end = self.request.query_params.get("end")
+        if start:
+            q = q.filter(created_at__gte=parse_datetime(start) or start)
+        if end:
+            q = q.filter(created_at__lte=parse_datetime(end) or end)
 
         return q
 
-    # create: staff only
+    # 🔐 create: prescribers only (DOCTOR, NURSE by default)
     def create(self, request, *args, **kwargs):
-        self.permission_classes = [IsAuthenticated, IsStaff]
+        self.permission_classes = [IsAuthenticated, CanPrescribe]
         self.check_permissions(request)
         return super().create(request, *args, **kwargs)
 
+    # 🔐 retrieve: enforce CanViewRx for object-level access
     def retrieve(self, request, *args, **kwargs):
         obj = self.get_object()
         self.permission_classes = [IsAuthenticated, CanViewRx]
         self.check_object_permissions(request, obj)
         return Response(PrescriptionReadSerializer(obj).data)
 
-    @action(detail=True, methods=["post"], permission_classes=[IsAuthenticated, IsStaff])
+    # 🔐 dispense: pharmacy staff only (Pharmacy + Admins)
+    @action(
+        detail=True,
+        methods=["post"],
+        permission_classes=[IsAuthenticated, IsPharmacyStaff],
+    )
     def dispense(self, request, pk=None):
         """
         Dispense a quantity of one item in the prescription.
@@ -155,4 +223,4 @@ class PrescriptionViewSet(viewsets.GenericViewSet, mixins.CreateModelMixin, mixi
 
     @action(detail=False, methods=["get"], permission_classes=[IsAuthenticated])
     def statuses(self, request):
-        return Response([c for c,_ in RxStatus.choices])
+        return Response([c for c, _ in RxStatus.choices])
