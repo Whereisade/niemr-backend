@@ -12,15 +12,21 @@ from notifications.services.notify import notify_user
 from .models import LabTest, LabOrder, LabOrderItem
 from .serializers import (
     LabTestSerializer,
-    LabOrderCreateSerializer, LabOrderReadSerializer,
-    LabOrderItemReadSerializer, ResultEntrySerializer
+    LabOrderCreateSerializer,
+    LabOrderReadSerializer,
+    LabOrderItemReadSerializer,
+    ResultEntrySerializer,
 )
-from .permissions import IsStaff, CanViewLabOrder
+from .permissions import IsStaff, CanViewLabOrder, IsLabOrAdmin
 from .enums import OrderStatus, Priority
 from .services.notify import notify_result_ready
 
 
-class LabTestViewSet(viewsets.GenericViewSet, mixins.ListModelMixin, mixins.CreateModelMixin):
+class LabTestViewSet(
+    viewsets.GenericViewSet,
+    mixins.ListModelMixin,
+    mixins.CreateModelMixin,
+):
     queryset = LabTest.objects.filter(is_active=True).order_by("name")
     serializer_class = LabTestSerializer
     authentication_classes = [JWTAuthentication]
@@ -32,7 +38,11 @@ class LabTestViewSet(viewsets.GenericViewSet, mixins.ListModelMixin, mixins.Crea
         self.check_permissions(request)
         return super().create(request, *args, **kwargs)
 
-    @action(detail=False, methods=["post"], permission_classes=[IsAuthenticated, IsStaff])
+    @action(
+        detail=False,
+        methods=["post"],
+        permission_classes=[IsAuthenticated, IsStaff],
+    )
     def import_csv(self, request):
         """
         CSV columns: code,name,unit,ref_low,ref_high,price
@@ -55,7 +65,9 @@ class LabTestViewSet(viewsets.GenericViewSet, mixins.ListModelMixin, mixins.Crea
                 "price": (row.get("price") or 0),
                 "is_active": True,
             }
-            obj, is_created = LabTest.objects.update_or_create(code=code, defaults=defaults)
+            obj, is_created = LabTest.objects.update_or_create(
+                code=code, defaults=defaults
+            )
             created += int(is_created)
             updated += int(not is_created)
         return Response({"created": created, "updated": updated})
@@ -67,9 +79,9 @@ class LabOrderViewSet(
     mixins.ListModelMixin,
     viewsets.GenericViewSet,
 ):
-    queryset = LabOrder.objects.select_related("patient", "facility", "ordered_by").prefetch_related(
-        "items", "items__test"
-    )
+    queryset = LabOrder.objects.select_related(
+        "patient", "facility", "ordered_by"
+    ).prefetch_related("items", "items__test")
     authentication_classes = [JWTAuthentication]
     permission_classes = [IsAuthenticated]
     # Only allow GET + POST (no PUT/PATCH/DELETE)
@@ -102,11 +114,13 @@ class LabOrderViewSet(
 
         s = self.request.query_params.get("s")
         if s:
-            q = q.filter(
-                Q(note__icontains=s)
-                | Q(items__test__name__icontains=s)
-                | Q(items__test__code__icontains=s)
-            ).distinct()
+            q = (
+                q.filter(
+                    Q(note__icontains=s)
+                    | Q(items__test__name__icontains=s)
+                    | Q(items__test__code__icontains=s)
+                ).distinct()
+            )
 
         start = self.request.query_params.get("start")
         end = self.request.query_params.get("end")
@@ -129,24 +143,40 @@ class LabOrderViewSet(
         self.check_object_permissions(request, obj)
         return Response(LabOrderReadSerializer(obj).data)
 
-    @action(detail=True, methods=["post"], permission_classes=[IsAuthenticated, IsStaff])
+    @action(
+        detail=True,
+        methods=["post"],
+        permission_classes=[IsAuthenticated, IsLabOrAdmin],
+    )
     def collect(self, request, pk=None):
         """
-        Mark sample collected for all items or selected item_ids=[...]
+        Mark sample collection for this order (or specific items).
+        Sets status to IN_PROGRESS when at least one item is collected.
         """
         order = self.get_object()
-        item_ids = request.data.get("item_ids")
-        qs = order.items.all() if not item_ids else order.items.filter(id__in=item_ids)
-        n = 0
-        for it in qs:
-            it.sample_collected_at = it.sample_collected_at or timezone.now()
-            it.save(update_fields=["sample_collected_at"])
-            n += 1
-        order.status = OrderStatus.IN_PROGRESS
-        order.save(update_fields=["status"])
-        return Response({"updated": n})
 
-    @action(detail=True, methods=["post"], permission_classes=[IsAuthenticated, IsStaff])
+        item_ids = request.data.get("item_ids")
+        qs = order.items.all()
+        if item_ids:
+            qs = qs.filter(id__in=item_ids)
+
+        now = timezone.now()
+        updated = qs.update(sample_collected_at=now)
+
+        if updated:
+            order.status = OrderStatus.IN_PROGRESS
+            order.save(update_fields=["status", "updated_at"])
+
+        return Response(
+            {"detail": f"{updated} items marked as collected."},
+            status=status.HTTP_200_OK,
+        )
+
+    @action(
+        detail=True,
+        methods=["post"],
+        permission_classes=[IsAuthenticated, IsLabOrAdmin],
+    )
     def result(self, request, pk=None):
         """
         Enter result for a single item: payload requires item_id and fields from ResultEntrySerializer
@@ -179,6 +209,34 @@ class LabOrderViewSet(
                 )
 
         return Response(LabOrderItemReadSerializer(item).data)
+
+    @action(
+        detail=True,
+        methods=["post"],
+        permission_classes=[IsAuthenticated, IsStaff],
+    )
+    def cancel(self, request, pk=None):
+        """
+        Cancel this lab order.
+
+        - Typically allowed while status is PENDING or IN_PROGRESS.
+        - Ordering provider or facility admin can invoke this.
+        """
+        order = self.get_object()
+
+        if order.status in {OrderStatus.COMPLETED, OrderStatus.CANCELLED}:
+            return Response(
+                {"detail": "Cannot cancel a completed or already cancelled order."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        order.status = OrderStatus.CANCELLED
+        order.save(update_fields=["status", "updated_at"])
+
+        return Response(
+            {"detail": "Order cancelled.", "status": order.status},
+            status=status.HTTP_200_OK,
+        )
 
     @action(detail=False, methods=["get"], permission_classes=[IsAuthenticated])
     def statuses(self, request):

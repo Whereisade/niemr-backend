@@ -45,11 +45,31 @@ class CanViewLabOrder(BasePermission):
 
         # Patients: user is the same as the LabOrder.patient.user
         patient = getattr(obj, "patient", None)
-        if patient is not None and getattr(patient, "user_id", None) == getattr(user, "id", None):
+        if patient is not None and getattr(patient, "user_id", None) == getattr(
+            user, "id", None
+        ):
             return True
 
         # Staff tied to a facility: can see orders for that facility
-        if facility_id and getattr(obj, "facility_id", None) == facility_id and role in STAFF_ROLES:
+        if (
+            facility_id
+            and getattr(obj, "facility_id", None) == facility_id
+            and role in STAFF_ROLES
+        ):
             return True
 
         return False
+
+
+class IsLabOrAdmin(BasePermission):
+    """
+    Only Lab Scientists + Admin/Super Admin can perform lab *work*
+    (collect samples, enter results).
+    """
+
+    def has_permission(self, request, view):
+        user = getattr(request, "user", None)
+        if not user or not user.is_authenticated:
+            return False
+        role = (getattr(user, "role", "") or "").upper()
+        return role in {"LAB", "ADMIN", "SUPER_ADMIN"}
