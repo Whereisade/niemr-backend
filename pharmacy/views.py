@@ -78,6 +78,7 @@ class DrugViewSet(
 # --- Stock ---
 class StockViewSet(viewsets.GenericViewSet, mixins.ListModelMixin):
     # 🔐 only pharmacy roles see stock & transactions
+    authentication_classes = [JWTAuthentication]
     permission_classes = [IsAuthenticated, IsPharmacyStaff]
 
     def get_queryset(self):
