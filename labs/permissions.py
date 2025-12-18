@@ -1,6 +1,8 @@
 from rest_framework.permissions import BasePermission
 
-# Simple string-based roles; we normalize user.role to uppercase when checking.
+from accounts.enums import UserRole
+
+# Staff roles in this system
 STAFF_ROLES = {
     "SUPER_ADMIN",
     "ADMIN",
@@ -13,9 +15,7 @@ STAFF_ROLES = {
 
 
 class IsStaff(BasePermission):
-    """
-    Generic staff permission for lab actions like create/collect/result.
-    """
+    """Generic staff permission for lab actions like create/cancel."""
 
     def has_permission(self, request, view):
         user = getattr(request, "user", None)
@@ -28,11 +28,11 @@ class IsStaff(BasePermission):
 
 class CanViewLabOrder(BasePermission):
     """
-    Object-level permission for viewing a single LabOrder.
-
-    - Patients: can view their own orders.
-    - Staff (DOCTOR/NURSE/LAB/PHARMACY/FRONTDESK/ADMIN/SUPER_ADMIN)
-      can view orders in their facility.
+    - Patients: own orders
+    - Facility staff: orders in same facility
+    - Independent staff: orders they created
+    - Independent labs: orders assigned to them (outsourced_to)
+    - Admin/Super Admin: all
     """
 
     def has_object_permission(self, request, view, obj):
@@ -43,19 +43,20 @@ class CanViewLabOrder(BasePermission):
         role = (getattr(user, "role", "") or "").upper()
         facility_id = getattr(user, "facility_id", None)
 
-        # Patients: user is the same as the LabOrder.patient.user
-        patient = getattr(obj, "patient", None)
-        if patient is not None and getattr(patient, "user_id", None) == getattr(
-            user, "id", None
-        ):
+        if role in {UserRole.ADMIN, UserRole.SUPER_ADMIN}:
             return True
 
-        # Staff tied to a facility: can see orders for that facility
-        if (
-            facility_id
-            and getattr(obj, "facility_id", None) == facility_id
-            and role in STAFF_ROLES
-        ):
+        patient = getattr(obj, "patient", None)
+        if patient is not None and getattr(patient, "user_id", None) == getattr(user, "id", None):
+            return True
+
+        if facility_id and getattr(obj, "facility_id", None) == facility_id and role in STAFF_ROLES:
+            return True
+
+        if role == UserRole.LAB and not facility_id and getattr(obj, "outsourced_to_id", None) == getattr(user, "id", None):
+            return True
+
+        if role in STAFF_ROLES and not facility_id and getattr(obj, "ordered_by_id", None) == getattr(user, "id", None):
             return True
 
         return False
@@ -63,8 +64,8 @@ class CanViewLabOrder(BasePermission):
 
 class IsLabOrAdmin(BasePermission):
     """
-    Only Lab Scientists + Admin/Super Admin can perform lab *work*
-    (collect samples, enter results).
+    LAB/ADMIN/SUPER_ADMIN can do lab work.
+    For outsourced orders, ONLY the assigned independent lab can work it.
     """
 
     def has_permission(self, request, view):
@@ -72,4 +73,21 @@ class IsLabOrAdmin(BasePermission):
         if not user or not user.is_authenticated:
             return False
         role = (getattr(user, "role", "") or "").upper()
-        return role in {"LAB", "ADMIN", "SUPER_ADMIN"}
+        return role in {UserRole.LAB, UserRole.ADMIN, UserRole.SUPER_ADMIN}
+
+    def has_object_permission(self, request, view, obj):
+        user = getattr(request, "user", None)
+        if not user or not user.is_authenticated:
+            return False
+
+        role = (getattr(user, "role", "") or "").upper()
+        if role in {UserRole.ADMIN, UserRole.SUPER_ADMIN}:
+            return True
+
+        if role != UserRole.LAB:
+            return False
+
+        if getattr(obj, "outsourced_to_id", None):
+            return getattr(obj, "outsourced_to_id", None) == getattr(user, "id", None)
+
+        return bool(getattr(user, "facility_id", None) and getattr(obj, "facility_id", None) == user.facility_id)

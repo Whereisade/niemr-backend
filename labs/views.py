@@ -1,62 +1,65 @@
-import csv, io
-from django.utils.dateparse import parse_datetime
-from django.utils import timezone
+import csv
+import io
+
 from django.db.models import Q
-from rest_framework import viewsets, mixins, status
+from django.utils import timezone
+from django.utils.dateparse import parse_datetime
+from rest_framework import mixins, status, viewsets
 from rest_framework.decorators import action
-from rest_framework.permissions import IsAuthenticated, AllowAny
+from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework_simplejwt.authentication import JWTAuthentication
+
+from accounts.enums import UserRole
 from notifications.services.notify import notify_user
 
+from .enums import OrderStatus
 from .models import LabTest, LabOrder, LabOrderItem
+from .permissions import CanViewLabOrder, IsLabOrAdmin, IsStaff
 from .serializers import (
-    LabTestSerializer,
     LabOrderCreateSerializer,
-    LabOrderReadSerializer,
     LabOrderItemReadSerializer,
+    LabOrderReadSerializer,
+    LabTestSerializer,
     ResultEntrySerializer,
 )
-from .permissions import IsStaff, CanViewLabOrder, IsLabOrAdmin
-from .enums import OrderStatus, Priority
 from .services.notify import notify_result_ready
 
 
-class LabTestViewSet(
-    viewsets.GenericViewSet,
-    mixins.ListModelMixin,
-    mixins.CreateModelMixin,
-):
+class LabTestViewSet(viewsets.GenericViewSet, mixins.ListModelMixin, mixins.CreateModelMixin):
     queryset = LabTest.objects.filter(is_active=True).order_by("name")
     serializer_class = LabTestSerializer
     authentication_classes = [JWTAuthentication]
     permission_classes = [IsAuthenticated]
 
+    def get_queryset(self):
+        q = self.queryset
+        s = self.request.query_params.get("s")
+        if s:
+            q = q.filter(Q(name__icontains=s) | Q(code__icontains=s))
+        return q
+
     def create(self, request, *args, **kwargs):
-        # staff only
         self.permission_classes = [IsAuthenticated, IsStaff]
         self.check_permissions(request)
         return super().create(request, *args, **kwargs)
 
-    @action(
-        detail=False,
-        methods=["post"],
-        permission_classes=[IsAuthenticated, IsStaff],
-    )
+    @action(detail=False, methods=["post"], permission_classes=[IsAuthenticated, IsStaff])
     def import_csv(self, request):
-        """
-        CSV columns: code,name,unit,ref_low,ref_high,price
-        """
+        """CSV columns: code,name,unit,ref_low,ref_high,price"""
         f = request.FILES.get("file")
         if not f:
             return Response({"detail": "file is required"}, status=400)
+
         buf = io.StringIO(f.read().decode("utf-8"))
         reader = csv.DictReader(buf)
         created, updated = 0, 0
+
         for row in reader:
             code = (row.get("code") or "").strip()
             if not code:
                 continue
+
             defaults = {
                 "name": (row.get("name") or "").strip(),
                 "unit": (row.get("unit") or "").strip(),
@@ -65,26 +68,27 @@ class LabTestViewSet(
                 "price": (row.get("price") or 0),
                 "is_active": True,
             }
-            obj, is_created = LabTest.objects.update_or_create(
-                code=code, defaults=defaults
-            )
+
+            obj, is_created = LabTest.objects.update_or_create(code=code, defaults=defaults)
             created += int(is_created)
             updated += int(not is_created)
+
         return Response({"created": created, "updated": updated})
 
 
 class LabOrderViewSet(
+    viewsets.GenericViewSet,
     mixins.CreateModelMixin,
     mixins.RetrieveModelMixin,
     mixins.ListModelMixin,
-    viewsets.GenericViewSet,
 ):
-    queryset = LabOrder.objects.select_related(
-        "patient", "facility", "ordered_by"
-    ).prefetch_related("items", "items__test")
+    queryset = (
+        LabOrder.objects.select_related("patient", "facility", "ordered_by", "outsourced_to")
+        .prefetch_related("items", "items__test")
+        .all()
+    )
     authentication_classes = [JWTAuthentication]
     permission_classes = [IsAuthenticated]
-    # Only allow GET + POST (no PUT/PATCH/DELETE)
     http_method_names = ["get", "post", "head", "options"]
 
     def get_serializer_class(self):
@@ -95,15 +99,20 @@ class LabOrderViewSet(
     def get_queryset(self):
         q = self.queryset
         u = self.request.user
+        role = (getattr(u, "role", "") or "").upper()
 
-        # patients: only own orders
-        if u.role == "PATIENT":
+        if role == UserRole.PATIENT:
             q = q.filter(patient__user_id=u.id)
-        elif u.facility_id:
-            # staff by facility
+        elif getattr(u, "facility_id", None):
             q = q.filter(facility_id=u.facility_id)
+        else:
+            if role in {UserRole.ADMIN, UserRole.SUPER_ADMIN}:
+                pass
+            elif role == UserRole.LAB:
+                q = q.filter(outsourced_to_id=u.id)
+            else:
+                q = q.filter(ordered_by_id=u.id)
 
-        # filters
         patient_id = self.request.query_params.get("patient")
         if patient_id:
             q = q.filter(patient_id=patient_id)
@@ -112,6 +121,10 @@ class LabOrderViewSet(
         if status_:
             q = q.filter(status=status_)
 
+        encounter_id = self.request.query_params.get("encounter")
+        if encounter_id:
+            q = q.filter(encounter_id=encounter_id)
+
         s = self.request.query_params.get("s")
         if s:
             q = (
@@ -119,7 +132,9 @@ class LabOrderViewSet(
                     Q(note__icontains=s)
                     | Q(items__test__name__icontains=s)
                     | Q(items__test__code__icontains=s)
-                ).distinct()
+                    | Q(items__requested_name__icontains=s)
+                )
+                .distinct()
             )
 
         start = self.request.query_params.get("start")
@@ -131,7 +146,6 @@ class LabOrderViewSet(
 
         return q
 
-    # create: staff only
     def create(self, request, *args, **kwargs):
         self.permission_classes = [IsAuthenticated, IsStaff]
         self.check_permissions(request)
@@ -143,16 +157,8 @@ class LabOrderViewSet(
         self.check_object_permissions(request, obj)
         return Response(LabOrderReadSerializer(obj).data)
 
-    @action(
-        detail=True,
-        methods=["post"],
-        permission_classes=[IsAuthenticated, IsLabOrAdmin],
-    )
+    @action(detail=True, methods=["post"], permission_classes=[IsAuthenticated, IsLabOrAdmin])
     def collect(self, request, pk=None):
-        """
-        Mark sample collection for this order (or specific items).
-        Sets status to IN_PROGRESS when at least one item is collected.
-        """
         order = self.get_object()
 
         item_ids = request.data.get("item_ids")
@@ -163,42 +169,34 @@ class LabOrderViewSet(
         now = timezone.now()
         updated = qs.update(sample_collected_at=now)
 
-        if updated:
+        if updated and order.status == OrderStatus.PENDING:
             order.status = OrderStatus.IN_PROGRESS
             order.save(update_fields=["status", "updated_at"])
 
-        return Response(
-            {"detail": f"{updated} items marked as collected."},
-            status=status.HTTP_200_OK,
-        )
+        return Response({"detail": f"{updated} items marked as collected."}, status=status.HTTP_200_OK)
 
-    @action(
-        detail=True,
-        methods=["post"],
-        permission_classes=[IsAuthenticated, IsLabOrAdmin],
-    )
+    @action(detail=True, methods=["post"], permission_classes=[IsAuthenticated, IsLabOrAdmin])
     def result(self, request, pk=None):
-        """
-        Enter result for a single item: payload requires item_id and fields from ResultEntrySerializer
-        """
         order = self.get_object()
+
         item_id = request.data.get("item_id")
         if not item_id:
             return Response({"detail": "item_id is required"}, status=400)
+
         try:
             item = order.items.get(id=item_id)
         except LabOrderItem.DoesNotExist:
             return Response({"detail": "Item not in this order"}, status=404)
+
         s = ResultEntrySerializer(data=request.data)
         s.is_valid(raise_exception=True)
         item = s.save(item=item, user=request.user)
 
-        # if order completed, optionally notify patient by email (non-blocking)
         if order.status == OrderStatus.COMPLETED:
-            if order.patient and order.patient.email:
+            if order.patient and getattr(order.patient, "email", None):
                 notify_result_ready(order.patient.email, order.id)
 
-            if order.patient and order.patient.user_id:
+            if order.patient and getattr(order.patient, "user_id", None):
                 notify_user(
                     user=order.patient.user,
                     topic="LAB_RESULT_READY",
@@ -210,18 +208,8 @@ class LabOrderViewSet(
 
         return Response(LabOrderItemReadSerializer(item).data)
 
-    @action(
-        detail=True,
-        methods=["post"],
-        permission_classes=[IsAuthenticated, IsStaff],
-    )
+    @action(detail=True, methods=["post"], permission_classes=[IsAuthenticated, IsStaff])
     def cancel(self, request, pk=None):
-        """
-        Cancel this lab order.
-
-        - Typically allowed while status is PENDING or IN_PROGRESS.
-        - Ordering provider or facility admin can invoke this.
-        """
         order = self.get_object()
 
         if order.status in {OrderStatus.COMPLETED, OrderStatus.CANCELLED}:
@@ -230,13 +218,24 @@ class LabOrderViewSet(
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
+        u = request.user
+        role = (getattr(u, "role", "") or "").upper()
+
+        allowed = False
+        if role in {UserRole.ADMIN, UserRole.SUPER_ADMIN}:
+            allowed = True
+        elif getattr(u, "facility_id", None) and order.facility_id == u.facility_id:
+            allowed = True
+        elif order.ordered_by_id == u.id:
+            allowed = True
+
+        if not allowed:
+            return Response({"detail": "Not allowed to cancel this order."}, status=status.HTTP_403_FORBIDDEN)
+
         order.status = OrderStatus.CANCELLED
         order.save(update_fields=["status", "updated_at"])
 
-        return Response(
-            {"detail": "Order cancelled.", "status": order.status},
-            status=status.HTTP_200_OK,
-        )
+        return Response({"detail": "Order cancelled.", "status": order.status}, status=status.HTTP_200_OK)
 
     @action(detail=False, methods=["get"], permission_classes=[IsAuthenticated])
     def statuses(self, request):

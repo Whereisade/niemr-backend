@@ -3,9 +3,11 @@ from django.conf import settings
 from django.core.validators import MinValueValidator
 from django.db import models, transaction
 from django.utils import timezone
+
 from facilities.models import Facility
 from patients.models import Patient
 from .enums import RxStatus, TxnType
+
 
 class Drug(models.Model):
     """
@@ -20,7 +22,9 @@ class Drug(models.Model):
     unit_price = models.DecimalField(max_digits=12, decimal_places=2, default=0, validators=[MinValueValidator(0)])
     is_active = models.BooleanField(default=True)
 
-    def __str__(self): return f"{self.code} - {self.name} {self.strength} {self.form}"
+    def __str__(self):
+        return f"{self.code} - {self.name} {self.strength} {self.form}".strip()
+
 
 class StockItem(models.Model):
     """
@@ -31,7 +35,8 @@ class StockItem(models.Model):
     current_qty = models.PositiveIntegerField(default=0)  # base unit (e.g., tablets)
 
     class Meta:
-        unique_together = ("facility","drug")
+        unique_together = ("facility", "drug")
+
 
 class StockTxn(models.Model):
     facility = models.ForeignKey(Facility, on_delete=models.CASCADE)
@@ -42,26 +47,49 @@ class StockTxn(models.Model):
     created_by = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, on_delete=models.SET_NULL)
     created_at = models.DateTimeField(auto_now_add=True)
 
+
 class Prescription(models.Model):
     patient = models.ForeignKey(Patient, on_delete=models.CASCADE, related_name="prescriptions")
     facility = models.ForeignKey(Facility, null=True, blank=True, on_delete=models.SET_NULL, related_name="prescriptions")
-    prescribed_by = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, on_delete=models.SET_NULL, related_name="prescribed_by")
+    prescribed_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, null=True, on_delete=models.SET_NULL, related_name="prescribed_by"
+    )
+
     encounter_id = models.PositiveIntegerField(null=True, blank=True)  # optional link to Encounters
     status = models.CharField(max_length=24, choices=RxStatus.choices, default=RxStatus.PRESCRIBED)
     note = models.TextField(blank=True)
+
+    # ✅ Outsourcing: assign to one independent pharmacy user (facility=None)
+    outsourced_to = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="prescriptions_assigned",
+    )
+
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
         indexes = [
-            models.Index(fields=["patient","created_at"]),
-            models.Index(fields=["facility","created_at"]),
+            models.Index(fields=["patient", "created_at"]),
+            models.Index(fields=["facility", "created_at"]),
+            models.Index(fields=["outsourced_to", "created_at"]),
             models.Index(fields=["status"]),
         ]
-        ordering = ["-created_at","-id"]
+        ordering = ["-created_at", "-id"]
+
+    def __str__(self):
+        return f"Rx#{self.id} P:{self.patient_id}"
+
 
 class PrescriptionItem(models.Model):
     prescription = models.ForeignKey(Prescription, on_delete=models.CASCADE, related_name="items")
-    drug = models.ForeignKey(Drug, on_delete=models.PROTECT)
+
+    # ✅ catalog drug OR free-text entry
+    drug = models.ForeignKey(Drug, null=True, blank=True, on_delete=models.PROTECT)
+    drug_name = models.CharField(max_length=255, blank=True)  # free-text if not in catalog
+
     dose = models.CharField(max_length=64)              # e.g., "500 mg", "10 mL"
     frequency = models.CharField(max_length=64)         # e.g., "bd", "tds", "q8h"
     duration_days = models.PositiveIntegerField(default=1)
@@ -71,6 +99,13 @@ class PrescriptionItem(models.Model):
 
     def remaining(self) -> int:
         return max(self.qty_prescribed - self.qty_dispensed, 0)
+
+    @property
+    def display_name(self) -> str:
+        if self.drug_id:
+            return self.drug.name
+        return (self.drug_name or "").strip() or "(Free-text medication)"
+
 
 class DispenseEvent(models.Model):
     """

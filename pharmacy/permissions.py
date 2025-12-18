@@ -11,6 +11,9 @@ STAFF = {
     UserRole.FRONTDESK,
 }
 
+PHARMACY_ROLES = {UserRole.SUPER_ADMIN, UserRole.ADMIN, UserRole.PHARMACY}
+PRESCRIBER_ROLES = {UserRole.DOCTOR, UserRole.NURSE}
+
 
 class IsStaff(BasePermission):
     def has_permission(self, request, view):
@@ -20,41 +23,42 @@ class IsStaff(BasePermission):
 
 class CanViewRx(BasePermission):
     """
-    Patient: own prescriptions. Staff: by facility.
+    Patient: own prescriptions.
+    Facility staff: prescriptions within facility.
+    Independent prescriber: prescriptions they created.
+    Independent pharmacy: prescriptions assigned to them (outsourced_to).
+    Admin/Super Admin: all.
     """
-
     def has_object_permission(self, request, view, obj):
         u = request.user
         if not u or not u.is_authenticated:
             return False
+
+        role = (getattr(u, "role", "") or "").upper()
+
+        if role in {UserRole.ADMIN, UserRole.SUPER_ADMIN}:
+            return True
+
+        # patient owns
         if obj.patient.user_id == getattr(u, "id", None):
             return True
+
+        # facility staff scope
         if u.facility_id and obj.facility_id == u.facility_id and u.role in STAFF:
             return True
+
+        # independent pharmacy: assigned only
+        if u.role == UserRole.PHARMACY and not u.facility_id and obj.outsourced_to_id == u.id:
+            return True
+
+        # independent staff: only what they prescribed
+        if u.role in STAFF and not u.facility_id and obj.prescribed_by_id == u.id:
+            return True
+
         return False
 
 
-# 🔹 NEW: pharmacy-focused & prescriber-focused permissions
-
-PHARMACY_ROLES = {
-    UserRole.SUPER_ADMIN,
-    UserRole.ADMIN,
-    UserRole.PHARMACY,
-}
-
-PRESCRIBER_ROLES = {
-    UserRole.DOCTOR,
-    UserRole.NURSE,
-    # If you later introduce other clinical prescriber roles as UserRole values,
-    # add them here.
-}
-
-
 class IsPharmacyStaff(BasePermission):
-    """
-    Only pharmacy-facing staff (Pharmacy + Admins).
-    """
-
     message = "Only pharmacy staff can perform this action."
 
     def has_permission(self, request, view):
@@ -63,14 +67,8 @@ class IsPharmacyStaff(BasePermission):
 
 
 class CanPrescribe(BasePermission):
-    """
-    Clinical prescribers allowed to CREATE prescriptions.
-    """
-
     message = "You are not allowed to create prescriptions."
 
     def has_permission(self, request, view):
         u = request.user
-        if not u or not u.is_authenticated:
-            return False
-        return u.role in PRESCRIBER_ROLES
+        return bool(u and u.is_authenticated and u.role in PRESCRIBER_ROLES)

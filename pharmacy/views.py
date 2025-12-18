@@ -7,6 +7,7 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework_simplejwt.authentication import JWTAuthentication
 
+from accounts.enums import UserRole
 from .models import Drug, StockItem, StockTxn, Prescription
 from .serializers import (
     DrugSerializer,
@@ -29,21 +30,21 @@ class DrugViewSet(
     queryset = Drug.objects.filter(is_active=True).order_by("name")
     serializer_class = DrugSerializer
     authentication_classes = [JWTAuthentication]
-    # Any authenticated user (including patients) can list catalog
     permission_classes = [IsAuthenticated]
 
-    # 🔐 creation is pharmacy-only
+    def get_queryset(self):
+        q = self.queryset
+        s = self.request.query_params.get("s")
+        if s:
+            q = q.filter(Q(name__icontains=s) | Q(code__icontains=s))
+        return q
+
     def create(self, request, *args, **kwargs):
         self.permission_classes = [IsAuthenticated, IsPharmacyStaff]
         self.check_permissions(request)
         return super().create(request, *args, **kwargs)
 
-    # 🔐 CSV import is also pharmacy-only
-    @action(
-        detail=False,
-        methods=["post"],
-        permission_classes=[IsAuthenticated, IsPharmacyStaff],
-    )
+    @action(detail=False, methods=["post"], permission_classes=[IsAuthenticated, IsPharmacyStaff])
     def import_csv(self, request):
         """
         CSV columns: code,name,strength,form,route,qty_per_unit,unit_price
@@ -67,9 +68,7 @@ class DrugViewSet(
                 "unit_price": (row.get("unit_price") or 0),
                 "is_active": True,
             }
-            _, is_created = Drug.objects.update_or_create(
-                code=code, defaults=defaults
-            )
+            _, is_created = Drug.objects.update_or_create(code=code, defaults=defaults)
             created += int(is_created)
             updated += int(not is_created)
         return Response({"created": created, "updated": updated})
@@ -77,11 +76,14 @@ class DrugViewSet(
 
 # --- Stock ---
 class StockViewSet(viewsets.GenericViewSet, mixins.ListModelMixin):
-    # 🔐 only pharmacy roles see stock & transactions
     authentication_classes = [JWTAuthentication]
     permission_classes = [IsAuthenticated, IsPharmacyStaff]
 
     def get_queryset(self):
+        # independent pharmacies do not manage facility stock here
+        if not getattr(self.request.user, "facility_id", None):
+            return StockItem.objects.none()
+
         return (
             StockItem.objects.select_related("drug", "facility")
             .filter(facility=self.request.user.facility)
@@ -90,23 +92,17 @@ class StockViewSet(viewsets.GenericViewSet, mixins.ListModelMixin):
     def get_serializer_class(self):
         return StockItemSerializer
 
-    @action(
-        detail=False,
-        methods=["post"],
-        permission_classes=[IsAuthenticated, IsPharmacyStaff],
-    )
+    @action(detail=False, methods=["post"], permission_classes=[IsAuthenticated, IsPharmacyStaff])
     def adjust(self, request):
-        """
-        Adjust or add stock for a drug at the current facility.
-        payload: { "drug_id": ID, "qty": 100, "note": "Opening balance" } (qty may be +/-)
-        """
+        if not request.user.facility_id:
+            return Response({"detail": "Stock adjustments require a facility pharmacy user."}, status=403)
+
         u = request.user
         drug_id = request.data.get("drug_id")
         qty = int(request.data.get("qty", 0))
         if not drug_id or qty == 0:
-            return Response(
-                {"detail": "drug_id and non-zero qty required"}, status=400
-            )
+            return Response({"detail": "drug_id and non-zero qty required"}, status=400)
+
         stock, _ = StockItem.objects.get_or_create(
             facility=u.facility,
             drug_id=drug_id,
@@ -114,6 +110,7 @@ class StockViewSet(viewsets.GenericViewSet, mixins.ListModelMixin):
         )
         stock.current_qty = max(stock.current_qty + qty, 0)
         stock.save(update_fields=["current_qty"])
+
         StockTxn.objects.create(
             facility=u.facility,
             drug_id=drug_id,
@@ -124,12 +121,11 @@ class StockViewSet(viewsets.GenericViewSet, mixins.ListModelMixin):
         )
         return Response(StockItemSerializer(stock).data, status=201)
 
-    @action(
-        detail=False,
-        methods=["get"],
-        permission_classes=[IsAuthenticated, IsPharmacyStaff],
-    )
+    @action(detail=False, methods=["get"], permission_classes=[IsAuthenticated, IsPharmacyStaff])
     def txns(self, request):
+        if not request.user.facility_id:
+            return Response([], status=200)
+
         qs = (
             StockTxn.objects.filter(facility=request.user.facility)
             .select_related("drug", "created_by")
@@ -146,12 +142,10 @@ class PrescriptionViewSet(
     mixins.ListModelMixin,
 ):
     queryset = (
-        Prescription.objects.select_related(
-            "patient", "facility", "prescribed_by"
-        ).prefetch_related("items", "items__drug")
+        Prescription.objects.select_related("patient", "facility", "prescribed_by", "outsourced_to")
+        .prefetch_related("items", "items__drug")
     )
     authentication_classes = [JWTAuthentication]
-    # Default: any authenticated user; scoping happens in get_queryset / object perms
     permission_classes = [IsAuthenticated]
 
     def get_serializer_class(self):
@@ -162,10 +156,20 @@ class PrescriptionViewSet(
     def get_queryset(self):
         q = self.queryset
         u = self.request.user
-        if u.role == "PATIENT":
+        role = (getattr(u, "role", "") or "").upper()
+
+        if role == UserRole.PATIENT:
             q = q.filter(patient__user_id=u.id)
-        elif u.facility_id:
+        elif getattr(u, "facility_id", None):
             q = q.filter(facility_id=u.facility_id)
+        else:
+            # independent (no facility)
+            if role in {UserRole.ADMIN, UserRole.SUPER_ADMIN}:
+                pass
+            elif role == UserRole.PHARMACY:
+                q = q.filter(outsourced_to_id=u.id)
+            else:
+                q = q.filter(prescribed_by_id=u.id)
 
         patient_id = self.request.query_params.get("patient")
         if patient_id:
@@ -175,12 +179,17 @@ class PrescriptionViewSet(
         if status_:
             q = q.filter(status=status_)
 
+        encounter_id = self.request.query_params.get("encounter")
+        if encounter_id:
+            q = q.filter(encounter_id=encounter_id)
+
         s = self.request.query_params.get("s")
         if s:
             q = q.filter(
                 Q(note__icontains=s)
                 | Q(items__drug__name__icontains=s)
                 | Q(items__drug__code__icontains=s)
+                | Q(items__drug_name__icontains=s)
             ).distinct()
 
         start = self.request.query_params.get("start")
@@ -192,34 +201,39 @@ class PrescriptionViewSet(
 
         return q
 
-    # 🔐 create: prescribers only (DOCTOR, NURSE by default)
     def create(self, request, *args, **kwargs):
         self.permission_classes = [IsAuthenticated, CanPrescribe]
         self.check_permissions(request)
         return super().create(request, *args, **kwargs)
 
-    # 🔐 retrieve: enforce CanViewRx for object-level access
     def retrieve(self, request, *args, **kwargs):
         obj = self.get_object()
         self.permission_classes = [IsAuthenticated, CanViewRx]
         self.check_object_permissions(request, obj)
         return Response(PrescriptionReadSerializer(obj).data)
 
-    # 🔐 dispense: pharmacy staff only (Pharmacy + Admins)
-    @action(
-        detail=True,
-        methods=["post"],
-        permission_classes=[IsAuthenticated, IsPharmacyStaff],
-    )
+    @action(detail=True, methods=["post"], permission_classes=[IsAuthenticated, IsPharmacyStaff])
     def dispense(self, request, pk=None):
-        """
-        Dispense a quantity of one item in the prescription.
-        { "item_id": <id>, "qty": 10, "note": "Issued 10 tabs" }
-        """
         rx = self.get_object()
+        u = request.user
+        role = (getattr(u, "role", "") or "").upper()
+
+        # If outsourced, ONLY assigned pharmacy (or admins) can dispense
+        if rx.outsourced_to_id:
+            if role not in {UserRole.ADMIN, UserRole.SUPER_ADMIN} and u.id != rx.outsourced_to_id:
+                return Response({"detail": "This prescription is outsourced to another pharmacy."}, status=403)
+
+        # If not outsourced, facility pharmacy must match facility (admins can bypass)
+        if not rx.outsourced_to_id and role not in {UserRole.ADMIN, UserRole.SUPER_ADMIN}:
+            if u.facility_id and rx.facility_id != u.facility_id:
+                return Response({"detail": "Prescription is not in your facility."}, status=403)
+            if not u.facility_id:
+                return Response({"detail": "Independent pharmacies can only dispense outsourced prescriptions."}, status=403)
+
         s = DispenseSerializer(data=request.data)
         s.is_valid(raise_exception=True)
-        item = s.save(rx=rx, user=request.user)
+        s.save(rx=rx, user=request.user)
+        rx.refresh_from_db()
         return Response(PrescriptionReadSerializer(rx).data)
 
     @action(detail=False, methods=["get"], permission_classes=[IsAuthenticated])

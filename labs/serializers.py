@@ -1,8 +1,15 @@
+from django.contrib.auth import get_user_model
 from django.db import transaction
-from rest_framework import serializers
-from .models import LabTest, LabOrder, LabOrderItem
-from .enums import OrderStatus
 from django.utils import timezone
+from rest_framework import serializers
+
+from accounts.enums import UserRole
+
+from .enums import OrderStatus
+from .models import LabTest, LabOrder, LabOrderItem
+
+
+User = get_user_model()
 
 
 class LabTestSerializer(serializers.ModelSerializer):
@@ -12,13 +19,21 @@ class LabTestSerializer(serializers.ModelSerializer):
 
 
 class LabOrderItemWriteSerializer(serializers.ModelSerializer):
-    test_code = serializers.CharField(write_only=True)
+    """
+    Supports either:
+    - catalog test selection via test_code
+    - manual typed test via requested_name
+    """
+
+    test_code = serializers.CharField(write_only=True, required=False, allow_blank=True)
+    requested_name = serializers.CharField(required=False, allow_blank=True)
 
     class Meta:
         model = LabOrderItem
         fields = [
             "id",
             "test_code",
+            "requested_name",
             "sample_collected_at",
             "result_value",
             "result_text",
@@ -28,26 +43,42 @@ class LabOrderItemWriteSerializer(serializers.ModelSerializer):
             "flag",
             "completed_at",
         ]
+        read_only_fields = ["flag", "completed_at"]
 
     def validate(self, attrs):
-        # map test_code -> test
-        code = attrs.pop("test_code")
-        try:
-            test = LabTest.objects.get(code=code, is_active=True)
-        except LabTest.DoesNotExist:
-            raise serializers.ValidationError(f"Unknown or inactive test_code: {code}")
-        attrs["test"] = test
+        code = (attrs.pop("test_code", "") or "").strip()
+        name = (attrs.get("requested_name", "") or "").strip()
+
+        if code:
+            try:
+                test = LabTest.objects.get(code=code, is_active=True)
+            except LabTest.DoesNotExist:
+                raise serializers.ValidationError({"test_code": f"Unknown or inactive test_code: {code}"})
+            attrs["test"] = test
+            attrs["requested_name"] = ""
+            return attrs
+
+        if not name:
+            raise serializers.ValidationError(
+                {"detail": "Provide either test_code (catalog) or requested_name (manual)."}
+            )
+
+        attrs["test"] = None
+        attrs["requested_name"] = name
         return attrs
 
 
 class LabOrderItemReadSerializer(serializers.ModelSerializer):
-    test = LabTestSerializer()
+    test = LabTestSerializer(allow_null=True)
+    display_name = serializers.SerializerMethodField(read_only=True)
 
     class Meta:
         model = LabOrderItem
         fields = [
             "id",
             "test",
+            "requested_name",
+            "display_name",
             "sample_collected_at",
             "result_value",
             "result_text",
@@ -59,9 +90,15 @@ class LabOrderItemReadSerializer(serializers.ModelSerializer):
             "completed_by",
         ]
 
+    def get_display_name(self, obj):
+        if getattr(obj, "test_id", None):
+            return obj.test.name
+        return (obj.requested_name or "").strip() or "(Manual test)"
+
 
 class LabOrderCreateSerializer(serializers.ModelSerializer):
     items = LabOrderItemWriteSerializer(many=True)
+    outsourced_to = serializers.IntegerField(required=False, allow_null=True)
 
     class Meta:
         model = LabOrder
@@ -72,38 +109,83 @@ class LabOrderCreateSerializer(serializers.ModelSerializer):
             "note",
             "encounter_id",
             "external_lab_name",
+            "outsourced_to",
             "items",
         ]
+
+    def validate_outsourced_to(self, value):
+        if value in (None, "", 0):
+            return None
+
+        user = User.objects.filter(id=value).first()
+        if not user:
+            raise serializers.ValidationError("Invalid outsourced_to user id")
+
+        role = (getattr(user, "role", "") or "").upper()
+        if role != UserRole.LAB:
+            raise serializers.ValidationError("outsourced_to must be a LAB user")
+
+        # Outsourcing should target independent providers (no facility)
+        if getattr(user, "facility_id", None):
+            raise serializers.ValidationError("outsourced_to must be an independent LAB (facility must be null)")
+
+        return user.id
 
     @transaction.atomic
     def create(self, validated):
         request = self.context["request"]
         user = request.user
+
+        items = validated.pop("items", [])
+        outsourced_to_id = validated.pop("outsourced_to", None)
+
+        patient = validated["patient"]
+        facility = user.facility if getattr(user, "facility_id", None) else getattr(patient, "facility", None)
+
         order = LabOrder.objects.create(
-            patient=validated["patient"],
-            facility=user.facility if user.facility_id else validated["patient"].facility,
+            patient=patient,
+            facility=facility,
             ordered_by=user,
             priority=validated.get("priority"),
             note=validated.get("note", ""),
             encounter_id=validated.get("encounter_id"),
             external_lab_name=validated.get("external_lab_name", ""),
+            outsourced_to_id=outsourced_to_id,
         )
-        for item in validated["items"]:
+
+        for item in items:
             LabOrderItem.objects.create(order=order, **item)
+
+        # Link to encounter (append order.id to encounter.lab_order_ids)
+        if order.encounter_id:
+            try:
+                from encounters.models import Encounter
+
+                enc = Encounter.objects.filter(id=order.encounter_id).first()
+                if enc:
+                    ids = list(enc.lab_order_ids or [])
+                    if order.id not in ids:
+                        ids.append(order.id)
+                        enc.lab_order_ids = ids
+                        enc.save(update_fields=["lab_order_ids", "updated_at"])
+            except Exception:
+                # Keep order creation resilient; encounter linking is best-effort.
+                pass
+
         return order
 
 
 class LabOrderReadSerializer(serializers.ModelSerializer):
     items = LabOrderItemReadSerializer(many=True)
-    # 👇 NEW: patient_name for display in lists
     patient_name = serializers.SerializerMethodField(read_only=True)
+    outsourced_to_name = serializers.SerializerMethodField(read_only=True)
 
     class Meta:
         model = LabOrder
         fields = [
             "id",
             "patient",
-            "patient_name",   # 👈 added
+            "patient_name",
             "facility",
             "ordered_by",
             "priority",
@@ -112,14 +194,12 @@ class LabOrderReadSerializer(serializers.ModelSerializer):
             "note",
             "encounter_id",
             "external_lab_name",
+            "outsourced_to",
+            "outsourced_to_name",
             "items",
         ]
 
     def get_patient_name(self, obj):
-        """
-        Return 'First Last' for the patient if available,
-        otherwise fall back to Patient.__str__().
-        """
         if not obj.patient_id:
             return None
         first = getattr(obj.patient, "first_name", "") or ""
@@ -127,11 +207,17 @@ class LabOrderReadSerializer(serializers.ModelSerializer):
         name = (first + " " + last).strip()
         return name or str(obj.patient)
 
+    def get_outsourced_to_name(self, obj):
+        u = getattr(obj, "outsourced_to", None)
+        if not u:
+            return None
+        full = (u.get_full_name() or "").strip()
+        return full or u.email
+
 
 class ResultEntrySerializer(serializers.Serializer):
-    """
-    Update result for one item.
-    """
+    """Update result for one item."""
+
     result_value = serializers.DecimalField(max_digits=14, decimal_places=4, required=False, allow_null=True)
     result_text = serializers.CharField(required=False, allow_blank=True)
     ref_low = serializers.DecimalField(max_digits=10, decimal_places=3, required=False, allow_null=True)
@@ -143,13 +229,16 @@ class ResultEntrySerializer(serializers.Serializer):
             if f in self.validated_data:
                 setattr(item, f, self.validated_data[f])
                 changed = True
+
         if changed:
             item.completed_at = timezone.now()
             item.completed_by = user
             item.save()
-        # if all items completed, mark order completed
+
         order = item.order
+        # If all items completed, mark order completed
         if order.items.filter(completed_at__isnull=True).count() == 0:
             order.status = OrderStatus.COMPLETED
             order.save(update_fields=["status"])
+
         return item
