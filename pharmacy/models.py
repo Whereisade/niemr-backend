@@ -12,8 +12,13 @@ from .enums import RxStatus, TxnType
 class Drug(models.Model):
     """
     Catalog line item. 'qty_per_unit' allows packs vs unit dose handling.
+    
+    Scoping:
+    - facility: If set, drug belongs to this facility's catalog
+    - created_by: If set (and facility is null), drug belongs to this independent pharmacy user
+    - A drug with both null is a "global" drug (legacy/admin-created)
     """
-    code = models.CharField(max_length=64, unique=True)  # e.g., PARA_500_TAB
+    code = models.CharField(max_length=64)  # e.g., PARA_500_TAB - unique per facility/user
     name = models.CharField(max_length=255)
     strength = models.CharField(max_length=64, blank=True)  # e.g., 500mg
     form = models.CharField(max_length=64, blank=True)      # Tab/Syrup/Injection
@@ -21,6 +26,43 @@ class Drug(models.Model):
     qty_per_unit = models.PositiveIntegerField(default=1)   # tablets per pack, etc.
     unit_price = models.DecimalField(max_digits=12, decimal_places=2, default=0, validators=[MinValueValidator(0)])
     is_active = models.BooleanField(default=True)
+    
+    # Scoping fields
+    facility = models.ForeignKey(
+        Facility,
+        null=True,
+        blank=True,
+        on_delete=models.CASCADE,
+        related_name="drugs",
+        help_text="Facility this drug belongs to (null for independent pharmacies)"
+    )
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="created_drugs",
+        help_text="Creator (used for independent pharmacy scoping when facility is null)"
+    )
+
+    class Meta:
+        # Unique code per facility OR per independent user
+        constraints = [
+            models.UniqueConstraint(
+                fields=["code", "facility"],
+                name="unique_drug_code_per_facility",
+                condition=models.Q(facility__isnull=False),
+            ),
+            models.UniqueConstraint(
+                fields=["code", "created_by"],
+                name="unique_drug_code_per_user",
+                condition=models.Q(facility__isnull=True, created_by__isnull=False),
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["facility", "is_active"]),
+            models.Index(fields=["created_by", "is_active"]),
+        ]
 
     def __str__(self):
         return f"{self.code} - {self.name} {self.strength} {self.form}".strip()

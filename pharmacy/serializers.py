@@ -31,7 +31,47 @@ class DrugSerializer(serializers.ModelSerializer):
             "qty_per_unit",
             "unit_price",
             "is_active",
+            "facility",
+            "created_by",
         ]
+        read_only_fields = ["facility", "created_by"]
+
+    def validate_code(self, value):
+        """
+        Validate that the code is unique within the user's scope (facility or user).
+        """
+        request = self.context.get("request")
+        if not request or not request.user:
+            return value
+        
+        u = request.user
+        code = (value or "").strip().upper()
+        
+        if getattr(u, "facility_id", None):
+            # Facility staff: check uniqueness within facility
+            exists = Drug.objects.filter(
+                code__iexact=code,
+                facility_id=u.facility_id,
+                is_active=True
+            ).exists()
+            if exists:
+                raise serializers.ValidationError(
+                    f"A drug with code '{code}' already exists in your facility catalog."
+                )
+        else:
+            # Independent pharmacy: check uniqueness within user's drugs
+            exists = Drug.objects.filter(
+                code__iexact=code,
+                facility__isnull=True,
+                created_by_id=u.id,
+                is_active=True
+            ).exists()
+            if exists:
+                raise serializers.ValidationError(
+                    f"A drug with code '{code}' already exists in your catalog."
+                )
+        
+        return code
 
 
 # --- Stock ---
@@ -93,10 +133,38 @@ class PrescriptionItemWriteSerializer(serializers.ModelSerializer):
         name = (attrs.get("drug_name", "") or "").strip()
 
         if code:
-            try:
-                drug = Drug.objects.get(code=code, is_active=True)
-            except Drug.DoesNotExist:
+            # Look up drug in the prescriber's facility catalog or their own catalog
+            request = self.context.get("request")
+            u = request.user if request else None
+            
+            drug = None
+            if u and getattr(u, "facility_id", None):
+                # Facility staff: look in facility's catalog
+                drug = Drug.objects.filter(
+                    code__iexact=code,
+                    facility_id=u.facility_id,
+                    is_active=True
+                ).first()
+            elif u:
+                # Independent provider: look in their own catalog
+                drug = Drug.objects.filter(
+                    code__iexact=code,
+                    created_by_id=u.id,
+                    is_active=True
+                ).first()
+            
+            # Fallback to legacy global drugs (facility=None, created_by=None)
+            if not drug:
+                drug = Drug.objects.filter(
+                    code__iexact=code,
+                    facility__isnull=True,
+                    created_by__isnull=True,
+                    is_active=True
+                ).first()
+            
+            if not drug:
                 raise serializers.ValidationError({"drug_code": f"Unknown/inactive drug_code: {code}"})
+            
             attrs["drug"] = drug
             attrs["drug_name"] = ""
             return attrs

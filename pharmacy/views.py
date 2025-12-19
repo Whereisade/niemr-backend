@@ -27,38 +27,85 @@ class DrugViewSet(
     mixins.ListModelMixin,
     mixins.CreateModelMixin,
 ):
-    queryset = Drug.objects.filter(is_active=True).order_by("name")
     serializer_class = DrugSerializer
     authentication_classes = [JWTAuthentication]
     permission_classes = [IsAuthenticated]
 
     def get_queryset(self):
-        q = self.queryset
-        s = self.request.query_params.get("s")
-        if s:
-            q = q.filter(Q(name__icontains=s) | Q(code__icontains=s))
-        return q
+        """
+        Scope drugs by facility or independent pharmacy user:
+        - Facility staff: see drugs belonging to their facility
+        - Independent pharmacy (no facility): see drugs they created
+        - Admins without facility: see all (for admin dashboards)
+        """
+        u = self.request.user
+        role = (getattr(u, "role", "") or "").upper()
+        
+        base_qs = Drug.objects.filter(is_active=True).order_by("name")
+        
+        # Facility staff: see their facility's drugs
+        if getattr(u, "facility_id", None):
+            return base_qs.filter(facility_id=u.facility_id)
+        
+        # Independent pharmacy (no facility): see their own drugs
+        if role == UserRole.PHARMACY:
+            return base_qs.filter(created_by_id=u.id)
+        
+        # Admins/Super Admins without facility: can see all for admin purposes
+        if role in {UserRole.ADMIN, UserRole.SUPER_ADMIN}:
+            return base_qs
+        
+        # Other independent providers: see drugs they created (if any)
+        return base_qs.filter(created_by_id=u.id)
+
+    def get_serializer_context(self):
+        ctx = super().get_serializer_context()
+        ctx["request"] = self.request
+        return ctx
 
     def create(self, request, *args, **kwargs):
         self.permission_classes = [IsAuthenticated, IsPharmacyStaff]
         self.check_permissions(request)
         return super().create(request, *args, **kwargs)
 
+    def perform_create(self, serializer):
+        """
+        Automatically set facility or created_by based on the user:
+        - Facility staff: set facility
+        - Independent pharmacy: set created_by
+        """
+        u = self.request.user
+        
+        if getattr(u, "facility_id", None):
+            # Facility staff: link drug to facility
+            serializer.save(facility_id=u.facility_id, created_by=u)
+        else:
+            # Independent pharmacy: link drug to user only
+            serializer.save(facility=None, created_by=u)
+
     @action(detail=False, methods=["post"], permission_classes=[IsAuthenticated, IsPharmacyStaff])
     def import_csv(self, request):
         """
         CSV columns: code,name,strength,form,route,qty_per_unit,unit_price
+        
+        Drugs are scoped to the user's facility or to the user (for independent pharmacies).
         """
         f = request.FILES.get("file")
         if not f:
             return Response({"detail": "file is required"}, status=400)
+        
+        u = request.user
+        facility_id = getattr(u, "facility_id", None)
+        
         buf = io.StringIO(f.read().decode("utf-8"))
         reader = csv.DictReader(buf)
         created, updated = 0, 0
+        
         for row in reader:
             code = (row.get("code") or "").strip()
             if not code:
                 continue
+            
             defaults = {
                 "name": (row.get("name") or "").strip(),
                 "strength": (row.get("strength") or "").strip(),
@@ -68,9 +115,26 @@ class DrugViewSet(
                 "unit_price": (row.get("unit_price") or 0),
                 "is_active": True,
             }
-            _, is_created = Drug.objects.update_or_create(code=code, defaults=defaults)
+            
+            if facility_id:
+                # Facility staff: scope to facility
+                _, is_created = Drug.objects.update_or_create(
+                    code=code,
+                    facility_id=facility_id,
+                    defaults={**defaults, "created_by": u}
+                )
+            else:
+                # Independent pharmacy: scope to user
+                _, is_created = Drug.objects.update_or_create(
+                    code=code,
+                    facility=None,
+                    created_by=u,
+                    defaults=defaults
+                )
+            
             created += int(is_created)
             updated += int(not is_created)
+        
         return Response({"created": created, "updated": updated})
 
 
