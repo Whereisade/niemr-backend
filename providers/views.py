@@ -27,6 +27,7 @@ from .serializers import (
     ProviderDocumentSerializer,
     ProviderFacilityApplicationSerializer,
     ProviderApplyToFacilitySerializer,
+    FacilityProviderCreateSerializer,
 )
 from .permissions import IsSelfProvider, IsAdmin
 from .enums import VerificationStatus
@@ -219,6 +220,56 @@ def self_register(request):
     )
 
 
+# -------------------------
+# Facility Admin: Create Provider Directly
+# -------------------------
+@api_view(["POST"])
+@authentication_classes([JWTAuthentication])
+@permission_classes([IsAuthenticated, IsAdmin])
+@parser_classes([MultiPartParser, FormParser, JSONParser])
+def facility_create_provider(request):
+    """
+    Facility admin endpoint to create a provider directly linked to this facility.
+    
+    The provider is automatically:
+    - Linked to the admin's facility
+    - Marked as APPROVED (no verification needed)
+    - Assigned the appropriate role based on provider_type
+    
+    POST body:
+    {
+        "email": "doctor@example.com",
+        "password": "securepassword123",
+        "first_name": "John",
+        "last_name": "Doe",
+        "provider_type": "DOCTOR",
+        "license_council": "MDCN",
+        "license_number": "MD12345",
+        "license_expiry": "2025-12-31",  // optional
+        "phone": "+2348012345678",       // optional
+        "specialties": ["Cardiology", "Internal Medicine"],  // optional
+        "years_experience": 5,           // optional
+        "bio": "Experienced cardiologist...",  // optional
+        "consultation_fee": 5000.00      // optional
+    }
+    """
+    # Check that the user is attached to a facility
+    if not getattr(request.user, "facility", None):
+        return Response(
+            {"detail": "You must be attached to a facility to create providers."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    serializer = FacilityProviderCreateSerializer(
+        data=request.data,
+        context={"request": request},
+    )
+    serializer.is_valid(raise_exception=True)
+    result = serializer.save()
+
+    return Response(result, status=status.HTTP_201_CREATED)
+
+
 @api_view(["POST"])
 @authentication_classes([JWTAuthentication])
 @permission_classes([IsAuthenticated])
@@ -370,6 +421,3 @@ def facility_provider_application_decide(request, pk, decision):
 
     serializer = ProviderFacilityApplicationSerializer(application)
     return Response(serializer.data, status=status.HTTP_200_OK)
-
-
-

@@ -2,6 +2,7 @@
 from django.db import transaction
 from django.contrib.auth import get_user_model
 from django.contrib.auth.password_validation import validate_password
+from django.utils import timezone
 from accounts.enums import UserRole
 from rest_framework import serializers
 from rest_framework_simplejwt.tokens import RefreshToken
@@ -244,6 +245,129 @@ class SelfRegisterProviderSerializer(serializers.Serializer):
         }
 
 
+# -------------------------
+# Facility Admin: Create Provider Directly
+# -------------------------
+class FacilityProviderCreateSerializer(serializers.Serializer):
+    """
+    Facility admin endpoint to create a provider directly linked to their facility.
+    Creates User + ProviderProfile in one transaction; provider is auto-approved.
+    """
+
+    # Account fields
+    email = serializers.EmailField()
+    password = serializers.CharField(write_only=True, min_length=8, trim_whitespace=False)
+    first_name = serializers.CharField(max_length=150)
+    last_name = serializers.CharField(max_length=150)
+
+    # Provider type and licensing
+    provider_type = serializers.ChoiceField(choices=ProviderType.choices)
+    specialties = serializers.ListField(
+        child=serializers.CharField(max_length=120),
+        required=False,
+        default=list,
+    )
+    license_council = serializers.ChoiceField(choices=Council.choices)
+    license_number = serializers.CharField(max_length=64)
+    license_expiry = serializers.DateField(required=False, allow_null=True)
+
+    # Contact info
+    phone = serializers.CharField(max_length=20, required=False, allow_blank=True)
+
+    # Other profile fields
+    years_experience = serializers.IntegerField(required=False, min_value=0, default=0)
+    bio = serializers.CharField(required=False, allow_blank=True, default="")
+    consultation_fee = serializers.DecimalField(
+        max_digits=12, decimal_places=2, required=False, default=0
+    )
+
+    def validate_email(self, value):
+        if User.objects.filter(email__iexact=value).exists():
+            raise serializers.ValidationError("A user with this email already exists.")
+        return value.lower().strip()
+
+    def validate_password(self, value):
+        validate_password(value)
+        return value
+
+    @transaction.atomic
+    def create(self, validated_data):
+        request = self.context.get("request")
+        facility = getattr(request.user, "facility", None)
+
+        if not facility:
+            raise serializers.ValidationError(
+                "You must be attached to a facility to create providers."
+            )
+
+        # Map provider_type to UserRole
+        pt = validated_data["provider_type"]
+        role_map = {
+            "DOCTOR": UserRole.DOCTOR,
+            "NURSE": UserRole.NURSE,
+            "PHARMACIST": UserRole.PHARMACY,
+            "LAB_SCIENTIST": UserRole.LAB,
+            "DENTIST": UserRole.DOCTOR,
+            "OPTOMETRIST": UserRole.DOCTOR,
+            "PHYSIOTHERAPIST": UserRole.DOCTOR,
+            "OTHER": UserRole.DOCTOR,
+        }
+        role = role_map.get(pt, UserRole.DOCTOR)
+
+        # Create user linked to facility
+        user = User.objects.create_user(
+            email=validated_data["email"],
+            password=validated_data["password"],
+            first_name=validated_data["first_name"],
+            last_name=validated_data["last_name"],
+            role=role,
+            facility=facility,
+            is_active=True,
+        )
+
+        # Create provider profile (auto-approved since facility admin created it)
+        prof = ProviderProfile.objects.create(
+            user=user,
+            provider_type=pt,
+            license_council=validated_data["license_council"],
+            license_number=validated_data["license_number"],
+            license_expiry=validated_data.get("license_expiry"),
+            years_experience=validated_data.get("years_experience", 0),
+            bio=validated_data.get("bio", ""),
+            phone=validated_data.get("phone", ""),
+            consultation_fee=validated_data.get("consultation_fee", 0),
+            verification_status=VerificationStatus.APPROVED,
+            verified_by=request.user,
+            verified_at=timezone.now(),
+        )
+
+        # Add specialties
+        for name in validated_data.get("specialties", []):
+            name = (name or "").strip()
+            if name:
+                spec, _ = Specialty.objects.get_or_create(name=name)
+                prof.specialties.add(spec)
+
+        return {
+            "user": {
+                "id": user.id,
+                "email": user.email,
+                "first_name": user.first_name,
+                "last_name": user.last_name,
+                "role": user.role,
+            },
+            "provider": {
+                "id": prof.id,
+                "provider_type": prof.provider_type,
+                "verification_status": prof.verification_status,
+            },
+            "facility": {
+                "id": facility.id,
+                "name": facility.name,
+            },
+        }
+
+
 class ProviderFacilityApplicationSerializer(serializers.ModelSerializer):
     provider_name = serializers.SerializerMethodField()
     facility_name = serializers.CharField(source="facility.name", read_only=True)
@@ -338,5 +462,3 @@ class ProviderApplyToFacilitySerializer(serializers.Serializer):
         )
 
         return application
-
-
