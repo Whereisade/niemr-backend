@@ -2,8 +2,8 @@ from django.db import transaction
 from rest_framework import serializers
 from accounts.models import User
 from accounts.enums import UserRole
-from .models import Patient, PatientDocument, HMO
-from .enums import BloodGroup, Genotype, InsuranceStatus
+from .models import Patient, PatientDocument, HMO, Allergy
+from .enums import BloodGroup, Genotype, InsuranceStatus, AllergyType, AllergySeverity
 from rest_framework import serializers as rf_serializers
 
 
@@ -243,3 +243,95 @@ class DependentUpdateSerializer(serializers.ModelSerializer):
         if relationship is not None:
             instance.relationship_to_guardian = (relationship or "").strip()
         return super().update(instance, validated_data)
+
+
+# --- Allergy serializers ---
+
+class AllergySerializer(serializers.ModelSerializer):
+    """
+    Read/write serializer for patient allergies.
+    """
+    recorded_by_name = serializers.SerializerMethodField(read_only=True)
+    patient_name = serializers.SerializerMethodField(read_only=True)
+    
+    class Meta:
+        model = Allergy
+        fields = [
+            "id",
+            "patient",
+            "patient_name",
+            "allergen",
+            "allergy_type",
+            "severity",
+            "reaction",
+            "onset_date",
+            "notes",
+            "is_active",
+            "recorded_by",
+            "recorded_by_name",
+            "created_at",
+            "updated_at",
+        ]
+        read_only_fields = [
+            "id",
+            "patient",
+            "patient_name",
+            "recorded_by",
+            "recorded_by_name",
+            "created_at",
+            "updated_at",
+        ]
+    
+    def get_recorded_by_name(self, obj):
+        user = obj.recorded_by
+        if not user:
+            return None
+        if hasattr(user, "get_full_name"):
+            return user.get_full_name() or user.email
+        return str(user)
+    
+    def get_patient_name(self, obj):
+        if obj.patient:
+            return f"{obj.patient.first_name} {obj.patient.last_name}"
+        return None
+
+
+class AllergyCreateSerializer(serializers.ModelSerializer):
+    """
+    Serializer for creating allergies.
+    Patient is set by the view based on context.
+    """
+    
+    class Meta:
+        model = Allergy
+        fields = [
+            "allergen",
+            "allergy_type",
+            "severity",
+            "reaction",
+            "onset_date",
+            "notes",
+        ]
+    
+    def validate_allergen(self, value):
+        if not value or not value.strip():
+            raise serializers.ValidationError("Allergen is required.")
+        return value.strip()
+
+
+class AllergyUpdateSerializer(serializers.ModelSerializer):
+    """
+    Serializer for updating allergies.
+    """
+    
+    class Meta:
+        model = Allergy
+        fields = [
+            "allergen",
+            "allergy_type",
+            "severity",
+            "reaction",
+            "onset_date",
+            "notes",
+            "is_active",
+        ]

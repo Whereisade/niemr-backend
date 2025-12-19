@@ -31,3 +31,17 @@ class Genotype(models.TextChoices):
 class InsuranceStatus(models.TextChoices):
     SELF_PAY="SELF_PAY","Self pay"
     INSURED="INSURED","Insured"
+
+class AllergyType(models.TextChoices):
+    DRUG = "DRUG", "Drug / Medication"
+    FOOD = "FOOD", "Food"
+    ENVIRONMENTAL = "ENVIRONMENTAL", "Environmental"
+    INSECT = "INSECT", "Insect"
+    LATEX = "LATEX", "Latex"
+    OTHER = "OTHER", "Other"
+
+class AllergySeverity(models.TextChoices):
+    MILD = "MILD", "Mild"
+    MODERATE = "MODERATE", "Moderate"
+    SEVERE = "SEVERE", "Severe"
+    LIFE_THREATENING = "LIFE_THREATENING", "Life-threatening"

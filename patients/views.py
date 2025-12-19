@@ -7,11 +7,12 @@ from rest_framework.response import Response
 from rest_framework_simplejwt.authentication import JWTAuthentication
 from rest_framework.exceptions import ValidationError
 
-from .models import Patient, PatientDocument, HMO
+from .models import Patient, PatientDocument, HMO, Allergy
 from .serializers import (
     PatientSerializer, PatientCreateByStaffSerializer, PatientDocumentSerializer,
     HMOSerializer, SelfRegisterSerializer,
     DependentCreateSerializer, DependentSerializer, DependentUpdateSerializer,
+    AllergySerializer, AllergyCreateSerializer, AllergyUpdateSerializer,
 )
 from .permissions import IsSelfOrFacilityStaff, IsStaff, IsStaffOrGuardianForDependent, IsStaffOrSelfPatient
 from accounts.enums import UserRole
@@ -368,3 +369,163 @@ class PatientDocumentViewSet(viewsets.ModelViewSet):
         if role in PatientDocument.UploadedBy.values:
             return role
         return PatientDocument.UploadedBy.SYSTEM
+
+
+# --- Allergy ViewSet ---
+
+class AllergyViewSet(viewsets.ModelViewSet):
+    """
+    CRUD for patient allergies.
+    
+    Endpoints:
+      - GET    /api/patients/allergies/           → List allergies (patient: own, staff: by patient param)
+      - POST   /api/patients/allergies/           → Create allergy
+      - GET    /api/patients/allergies/{id}/      → Retrieve allergy
+      - PATCH  /api/patients/allergies/{id}/      → Update allergy
+      - DELETE /api/patients/allergies/{id}/      → Delete allergy
+    
+    Query params (for staff):
+      - patient: Filter by patient ID
+      - is_active: Filter by active status (true/false)
+      - allergy_type: Filter by type (DRUG, FOOD, etc.)
+      - severity: Filter by severity (MILD, MODERATE, SEVERE, LIFE_THREATENING)
+    """
+    
+    queryset = Allergy.objects.select_related("patient", "recorded_by").all()
+    authentication_classes = [JWTAuthentication]
+    permission_classes = [permissions.IsAuthenticated]
+    http_method_names = ["get", "post", "patch", "delete", "head", "options"]
+    
+    def get_serializer_class(self):
+        if self.action == "create":
+            return AllergyCreateSerializer
+        if self.action in ("update", "partial_update"):
+            return AllergyUpdateSerializer
+        return AllergySerializer
+    
+    def get_queryset(self):
+        user = self.request.user
+        qs = self.queryset
+        
+        # Patient login → only own allergies
+        if getattr(user, "role", None) == UserRole.PATIENT:
+            patient = getattr(user, "patient_profile", None)
+            if patient is None:
+                return qs.none()
+            return qs.filter(patient=patient).order_by("-created_at")
+        
+        # Staff → filter by patient param or facility scope
+        patient_id = self.request.query_params.get("patient")
+        if patient_id:
+            qs = qs.filter(patient_id=patient_id)
+        elif getattr(user, "facility_id", None):
+            # Scope to facility's patients
+            qs = qs.filter(patient__facility_id=user.facility_id)
+        
+        # Additional filters
+        is_active = self.request.query_params.get("is_active")
+        if is_active is not None:
+            qs = qs.filter(is_active=is_active.lower() == "true")
+        
+        allergy_type = self.request.query_params.get("allergy_type")
+        if allergy_type:
+            qs = qs.filter(allergy_type=allergy_type.upper())
+        
+        severity = self.request.query_params.get("severity")
+        if severity:
+            qs = qs.filter(severity=severity.upper())
+        
+        return qs.order_by("-created_at")
+    
+    def create(self, request, *args, **kwargs):
+        """
+        Create a new allergy record.
+        Patient is determined by:
+          - PATIENT role: own patient profile
+          - Staff: explicit patient ID in request data
+        """
+        user = request.user
+        patient = None
+        
+        if getattr(user, "role", None) == UserRole.PATIENT:
+            # Patient creates for themselves
+            patient = getattr(user, "patient_profile", None)
+            if patient is None:
+                return Response(
+                    {"detail": "No patient profile linked to this user."},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+        else:
+            # Staff creates for a specific patient
+            patient_id = request.data.get("patient")
+            if not patient_id:
+                return Response(
+                    {"patient": "This field is required when staff create an allergy."},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+            try:
+                patient = Patient.objects.get(id=patient_id)
+            except Patient.DoesNotExist:
+                return Response(
+                    {"patient": "Patient not found."},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+        
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        
+        # Check for duplicate allergen
+        allergen = serializer.validated_data.get("allergen", "").strip()
+        if Allergy.objects.filter(
+            patient=patient,
+            allergen__iexact=allergen,
+            is_active=True
+        ).exists():
+            return Response(
+                {"allergen": "This allergy is already recorded for this patient."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        allergy = serializer.save(
+            patient=patient,
+            recorded_by=user,
+        )
+        
+        output_serializer = AllergySerializer(allergy)
+        return Response(output_serializer.data, status=status.HTTP_201_CREATED)
+    
+    def update(self, request, *args, **kwargs):
+        """
+        Update an allergy record.
+        """
+        partial = kwargs.pop("partial", False)
+        instance = self.get_object()
+        
+        serializer = self.get_serializer(instance, data=request.data, partial=partial)
+        serializer.is_valid(raise_exception=True)
+        
+        # Check for duplicate allergen if changing
+        new_allergen = serializer.validated_data.get("allergen")
+        if new_allergen and new_allergen.strip().lower() != instance.allergen.lower():
+            if Allergy.objects.filter(
+                patient=instance.patient,
+                allergen__iexact=new_allergen.strip(),
+                is_active=True
+            ).exclude(pk=instance.pk).exists():
+                return Response(
+                    {"allergen": "This allergy is already recorded for this patient."},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+        
+        serializer.save()
+        
+        output_serializer = AllergySerializer(instance)
+        return Response(output_serializer.data)
+    
+    def destroy(self, request, *args, **kwargs):
+        """
+        Delete an allergy record.
+        """
+        instance = self.get_object()
+        self.perform_destroy(instance)
+        return Response(status=status.HTTP_204_NO_CONTENT)

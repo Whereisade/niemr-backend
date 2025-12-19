@@ -5,7 +5,10 @@ from django.core.validators import RegexValidator, MinValueValidator
 from django.db import models
 from django.core.exceptions import ValidationError
 from facilities.models import Facility
-from .enums import (PatientStatus, EncounterType, BloodGroup, Genotype, InsuranceStatus)
+from .enums import (
+    PatientStatus, EncounterType, BloodGroup, Genotype, InsuranceStatus,
+    AllergyType, AllergySeverity
+)
 
 phone_validator = RegexValidator(
     regex=r"^\+\d{1,3}\d{6,14}$",
@@ -129,6 +132,7 @@ class Patient(models.Model):
     def __str__(self):
         return f"{self.last_name}, {self.first_name}"
     
+
 class PatientDocument(models.Model):
     class DocumentType(models.TextChoices):
         BLOOD_TEST = "BLOOD_TEST", "Blood test"
@@ -167,7 +171,7 @@ class PatientDocument(models.Model):
     uploaded_by_role = models.CharField(
         max_length=20,
         choices=UploadedBy.choices,
-        default=UploadedBy.PATIENT,  # docs tagged “Uploaded by Patient” by default
+        default=UploadedBy.PATIENT,  # docs tagged "Uploaded by Patient" by default
     )
 
     title = models.CharField(max_length=255, blank=True)
@@ -187,3 +191,87 @@ class PatientDocument(models.Model):
     def __str__(self):
         base = self.title or self.get_document_type_display()
         return f"{self.patient_id} - {base}"
+
+
+class Allergy(models.Model):
+    """
+    Patient allergy record.
+    
+    Tracks allergies reported by patients or recorded by healthcare providers.
+    Critical for medication safety and clinical decision support.
+    """
+    
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    
+    patient = models.ForeignKey(
+        "patients.Patient",
+        on_delete=models.CASCADE,
+        related_name="allergies",
+    )
+    
+    # What the patient is allergic to
+    allergen = models.CharField(
+        max_length=255,
+        help_text="The substance the patient is allergic to (e.g., Penicillin, Peanuts)"
+    )
+    
+    # Type/category of allergy
+    allergy_type = models.CharField(
+        max_length=20,
+        choices=AllergyType.choices,
+        default=AllergyType.OTHER,
+    )
+    
+    # How severe is the reaction
+    severity = models.CharField(
+        max_length=20,
+        choices=AllergySeverity.choices,
+        default=AllergySeverity.MODERATE,
+    )
+    
+    # What happens when exposed
+    reaction = models.TextField(
+        blank=True,
+        help_text="Description of the allergic reaction (e.g., rash, anaphylaxis)"
+    )
+    
+    # When did the allergy start/was discovered
+    onset_date = models.DateField(
+        null=True,
+        blank=True,
+        help_text="When the allergy was first identified or occurred"
+    )
+    
+    # Additional notes
+    notes = models.TextField(blank=True)
+    
+    # Who recorded this allergy
+    recorded_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="recorded_allergies",
+    )
+    
+    # Is this allergy still active/relevant
+    is_active = models.BooleanField(default=True)
+    
+    # Timestamps
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    
+    class Meta:
+        ordering = ("-created_at",)
+        verbose_name_plural = "Allergies"
+        # Prevent duplicate allergens for the same patient
+        constraints = [
+            models.UniqueConstraint(
+                fields=["patient", "allergen"],
+                name="unique_patient_allergen",
+                condition=models.Q(is_active=True),
+            )
+        ]
+    
+    def __str__(self):
+        return f"{self.patient} - {self.allergen} ({self.get_severity_display()})"
