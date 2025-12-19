@@ -42,6 +42,7 @@ def me(request):
     return Response(data)
 
 @api_view(["POST"])
+@authentication_classes([JWTAuthentication])
 @permission_classes([permissions.AllowAny])
 def register(request):
     s = RegisterSerializer(data=request.data)
@@ -56,6 +57,7 @@ def register(request):
     return Response({"user": {"email": user.email, "role": user.role}}, status=status.HTTP_201_CREATED)
 
 @api_view(["POST"])
+@authentication_classes([JWTAuthentication])
 @permission_classes([permissions.AllowAny])
 def login_password(request):
     s = LoginSerializer(data=request.data)
@@ -64,6 +66,7 @@ def login_password(request):
     return Response({"tokens": _jwt_pair_for(user), "user": {"email": user.email, "role": user.role}})
 
 @api_view(["POST"])
+@authentication_classes([JWTAuthentication])
 @permission_classes([permissions.AllowAny])
 def login_google(request):
     s = GoogleAuthSerializer(data=request.data)

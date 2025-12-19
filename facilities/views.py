@@ -343,7 +343,7 @@ class BedAssignmentViewSet(viewsets.ModelViewSet):
 # --- NIEMR: Public endpoint to create Facility + Super Admin and return tokens ---
 class FacilityAdminRegisterView(APIView):
     permission_classes = [AllowAny]
-    authentication_classes = [JWTAuthentication]
+    authentication_classes = []
     parser_classes = [MultiPartParser, FormParser, JSONParser]
 
     def post(self, request, *args, **kwargs):
