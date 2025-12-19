@@ -12,7 +12,15 @@ from .enums import OrderStatus, Priority, Flag
 
 
 class LabTest(models.Model):
-    code = models.CharField(max_length=40, unique=True)  # e.g., FBC_HB
+    """
+    Lab test catalog item.
+    
+    Scoping:
+    - facility: If set, test belongs to this facility's catalog
+    - created_by: If set (and facility is null), test belongs to this independent lab user
+    - A test with both null is a "global" test (legacy/admin-created)
+    """
+    code = models.CharField(max_length=40)  # e.g., FBC_HB - unique per facility/user
     name = models.CharField(max_length=160)
     unit = models.CharField(max_length=40, blank=True)  # e.g., g/dL
     ref_low = models.DecimalField(max_digits=10, decimal_places=3, null=True, blank=True)
@@ -24,6 +32,43 @@ class LabTest(models.Model):
         validators=[MinValueValidator(0)],
     )
     is_active = models.BooleanField(default=True)
+    
+    # Scoping fields
+    facility = models.ForeignKey(
+        Facility,
+        null=True,
+        blank=True,
+        on_delete=models.CASCADE,
+        related_name="lab_tests",
+        help_text="Facility this test belongs to (null for independent labs)"
+    )
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="created_lab_tests",
+        help_text="Creator (used for independent lab scoping when facility is null)"
+    )
+
+    class Meta:
+        # Unique code per facility OR per independent user
+        constraints = [
+            models.UniqueConstraint(
+                fields=["code", "facility"],
+                name="unique_labtest_code_per_facility",
+                condition=models.Q(facility__isnull=False),
+            ),
+            models.UniqueConstraint(
+                fields=["code", "created_by"],
+                name="unique_labtest_code_per_user",
+                condition=models.Q(facility__isnull=True, created_by__isnull=False),
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["facility", "is_active"]),
+            models.Index(fields=["created_by", "is_active"]),
+        ]
 
     def __str__(self) -> str:
         return f"{self.code} - {self.name}"

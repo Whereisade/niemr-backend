@@ -27,29 +27,80 @@ from .services.notify import notify_result_ready
 
 
 class LabTestViewSet(viewsets.GenericViewSet, mixins.ListModelMixin, mixins.CreateModelMixin):
-    queryset = LabTest.objects.filter(is_active=True).order_by("name")
     serializer_class = LabTestSerializer
     authentication_classes = [JWTAuthentication]
     permission_classes = [IsAuthenticated]
 
     def get_queryset(self):
-        q = self.queryset
+        """
+        Scope lab tests by facility or independent lab user:
+        - Facility staff: see tests belonging to their facility
+        - Independent lab (no facility): see tests they created
+        - Admins without facility: see all (for admin dashboards)
+        """
+        u = self.request.user
+        role = (getattr(u, "role", "") or "").upper()
+        
+        base_qs = LabTest.objects.filter(is_active=True).order_by("name")
+        
+        # Facility staff: see their facility's tests
+        if getattr(u, "facility_id", None):
+            qs = base_qs.filter(facility_id=u.facility_id)
+        # Independent lab (no facility): see their own tests
+        elif role == UserRole.LAB:
+            qs = base_qs.filter(created_by_id=u.id)
+        # Admins/Super Admins without facility: can see all for admin purposes
+        elif role in {UserRole.ADMIN, UserRole.SUPER_ADMIN}:
+            qs = base_qs
+        # Other independent providers: see tests they created (if any)
+        else:
+            qs = base_qs.filter(created_by_id=u.id)
+        
+        # Apply search filter
         s = self.request.query_params.get("s")
         if s:
-            q = q.filter(Q(name__icontains=s) | Q(code__icontains=s))
-        return q
+            qs = qs.filter(Q(name__icontains=s) | Q(code__icontains=s))
+        
+        return qs
+
+    def get_serializer_context(self):
+        ctx = super().get_serializer_context()
+        ctx["request"] = self.request
+        return ctx
 
     def create(self, request, *args, **kwargs):
         self.permission_classes = [IsAuthenticated, IsStaff]
         self.check_permissions(request)
         return super().create(request, *args, **kwargs)
 
+    def perform_create(self, serializer):
+        """
+        Automatically set facility or created_by based on the user:
+        - Facility staff: set facility
+        - Independent lab: set created_by
+        """
+        u = self.request.user
+        
+        if getattr(u, "facility_id", None):
+            # Facility staff: link test to facility
+            serializer.save(facility_id=u.facility_id, created_by=u)
+        else:
+            # Independent lab: link test to user only
+            serializer.save(facility=None, created_by=u)
+
     @action(detail=False, methods=["post"], permission_classes=[IsAuthenticated, IsStaff])
     def import_csv(self, request):
-        """CSV columns: code,name,unit,ref_low,ref_high,price"""
+        """
+        CSV columns: code,name,unit,ref_low,ref_high,price
+        
+        Tests are scoped to the user's facility or to the user (for independent labs).
+        """
         f = request.FILES.get("file")
         if not f:
             return Response({"detail": "file is required"}, status=400)
+
+        u = request.user
+        facility_id = getattr(u, "facility_id", None)
 
         buf = io.StringIO(f.read().decode("utf-8"))
         reader = csv.DictReader(buf)
@@ -69,7 +120,22 @@ class LabTestViewSet(viewsets.GenericViewSet, mixins.ListModelMixin, mixins.Crea
                 "is_active": True,
             }
 
-            obj, is_created = LabTest.objects.update_or_create(code=code, defaults=defaults)
+            if facility_id:
+                # Facility staff: scope to facility
+                _, is_created = LabTest.objects.update_or_create(
+                    code=code,
+                    facility_id=facility_id,
+                    defaults={**defaults, "created_by": u}
+                )
+            else:
+                # Independent lab: scope to user
+                _, is_created = LabTest.objects.update_or_create(
+                    code=code,
+                    facility=None,
+                    created_by=u,
+                    defaults=defaults
+                )
+
             created += int(is_created)
             updated += int(not is_created)
 
@@ -171,7 +237,7 @@ class LabOrderViewSet(
 
         if updated and order.status == OrderStatus.PENDING:
             order.status = OrderStatus.IN_PROGRESS
-            order.save(update_fields=["status", "updated_at"])
+            order.save(update_fields=["status"])
 
         return Response({"detail": f"{updated} items marked as collected."}, status=status.HTTP_200_OK)
 
@@ -233,7 +299,7 @@ class LabOrderViewSet(
             return Response({"detail": "Not allowed to cancel this order."}, status=status.HTTP_403_FORBIDDEN)
 
         order.status = OrderStatus.CANCELLED
-        order.save(update_fields=["status", "updated_at"])
+        order.save(update_fields=["status"])
 
         return Response({"detail": "Order cancelled.", "status": order.status}, status=status.HTTP_200_OK)
 

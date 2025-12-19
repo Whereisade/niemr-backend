@@ -15,7 +15,56 @@ User = get_user_model()
 class LabTestSerializer(serializers.ModelSerializer):
     class Meta:
         model = LabTest
-        fields = ["id", "code", "name", "unit", "ref_low", "ref_high", "price", "is_active"]
+        fields = [
+            "id",
+            "code",
+            "name",
+            "unit",
+            "ref_low",
+            "ref_high",
+            "price",
+            "is_active",
+            "facility",
+            "created_by",
+        ]
+        read_only_fields = ["facility", "created_by"]
+
+    def validate_code(self, value):
+        """
+        Validate that the code is unique within the user's scope (facility or user).
+        """
+        request = self.context.get("request")
+        if not request or not request.user:
+            return value
+        
+        u = request.user
+        code = (value or "").strip().upper()
+        
+        if getattr(u, "facility_id", None):
+            # Facility staff: check uniqueness within facility
+            exists = LabTest.objects.filter(
+                code__iexact=code,
+                facility_id=u.facility_id,
+                is_active=True
+            ).exists()
+            if exists:
+                raise serializers.ValidationError(
+                    f"A lab test with code '{code}' already exists in your facility catalog."
+                )
+        else:
+            # Independent lab: check uniqueness within user's tests
+            exists = LabTest.objects.filter(
+                code__iexact=code,
+                facility__isnull=True,
+                created_by_id=u.id,
+                is_active=True
+            ).exists()
+            if exists:
+                raise serializers.ValidationError(
+                    f"A lab test with code '{code}' already exists in your catalog."
+                )
+        
+        return code
 
 
 class LabOrderItemWriteSerializer(serializers.ModelSerializer):
@@ -50,10 +99,38 @@ class LabOrderItemWriteSerializer(serializers.ModelSerializer):
         name = (attrs.get("requested_name", "") or "").strip()
 
         if code:
-            try:
-                test = LabTest.objects.get(code=code, is_active=True)
-            except LabTest.DoesNotExist:
+            # Look up test in the orderer's facility catalog or their own catalog
+            request = self.context.get("request")
+            u = request.user if request else None
+            
+            test = None
+            if u and getattr(u, "facility_id", None):
+                # Facility staff: look in facility's catalog
+                test = LabTest.objects.filter(
+                    code__iexact=code,
+                    facility_id=u.facility_id,
+                    is_active=True
+                ).first()
+            elif u:
+                # Independent provider: look in their own catalog
+                test = LabTest.objects.filter(
+                    code__iexact=code,
+                    created_by_id=u.id,
+                    is_active=True
+                ).first()
+            
+            # Fallback to legacy global tests (facility=None, created_by=None)
+            if not test:
+                test = LabTest.objects.filter(
+                    code__iexact=code,
+                    facility__isnull=True,
+                    created_by__isnull=True,
+                    is_active=True
+                ).first()
+            
+            if not test:
                 raise serializers.ValidationError({"test_code": f"Unknown or inactive test_code: {code}"})
+            
             attrs["test"] = test
             attrs["requested_name"] = ""
             return attrs
