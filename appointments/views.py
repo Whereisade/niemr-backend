@@ -1,29 +1,40 @@
 from django.utils.dateparse import parse_datetime
+from django.utils import timezone
 from django.db.models import Q
 from rest_framework import viewsets, mixins, status
-from rest_framework.decorators import action, api_view, permission_classes
-from rest_framework.permissions import IsAuthenticated, AllowAny
+from rest_framework.decorators import action
+from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework_simplejwt.authentication import JWTAuthentication
 
 from .models import Appointment
-from .serializers import AppointmentSerializer, AppointmentUpdateSerializer
+from .serializers import (
+    AppointmentSerializer,
+    AppointmentUpdateSerializer,
+    AppointmentListSerializer,
+)
 from .permissions import IsStaff, CanViewAppointment
 from .enums import ApptStatus
 from .services.notify import send_confirmation, send_reminder
 from notifications.services.notify import notify_user
 
 
-class AppointmentViewSet(viewsets.GenericViewSet,
-                         mixins.CreateModelMixin,
-                         mixins.RetrieveModelMixin,
-                         mixins.UpdateModelMixin,
-                         mixins.ListModelMixin):
-    queryset = Appointment.objects.select_related("patient", "facility", "provider", "created_by")
+class AppointmentViewSet(
+    viewsets.GenericViewSet,
+    mixins.CreateModelMixin,
+    mixins.RetrieveModelMixin,
+    mixins.UpdateModelMixin,
+    mixins.ListModelMixin,
+):
+    queryset = Appointment.objects.select_related(
+        "patient", "facility", "provider", "created_by"
+    )
     authentication_classes = [JWTAuthentication]
     permission_classes = [IsAuthenticated]
 
     def get_serializer_class(self):
+        if self.action == "list":
+            return AppointmentListSerializer
         if self.action in ("update", "partial_update"):
             return AppointmentUpdateSerializer
         return AppointmentSerializer
@@ -32,48 +43,85 @@ class AppointmentViewSet(viewsets.GenericViewSet,
         q = self.queryset
         u = self.request.user
 
+        # Role-based filtering
         if u.role == "PATIENT":
             base_patient = getattr(u, "patient_profile", None)
             if base_patient:
+                # Patient can see own appointments and dependents'
                 q = q.filter(
-                    Q(patient=base_patient) |
-                    Q(patient__parent_patient=base_patient)
+                    Q(patient=base_patient) | Q(patient__parent_patient=base_patient)
                 )
             else:
                 q = q.none()
         elif u.facility_id:
+            # Facility staff see all facility appointments
             q = q.filter(facility_id=u.facility_id)
+            
+            # If 'mine' param is set, filter to provider's own appointments
+            if self.request.query_params.get("mine") in ("true", "True", "1"):
+                q = q.filter(provider_id=u.id)
+        else:
+            # Independent provider without facility - only own appointments
+            q = q.filter(provider_id=u.id)
 
+        # Query params filtering
         patient_id = self.request.query_params.get("patient")
         provider_id = self.request.query_params.get("provider")
         status_ = self.request.query_params.get("status")
         start = self.request.query_params.get("start")
         end = self.request.query_params.get("end")
-        s = self.request.query_params.get("s")
+        s = self.request.query_params.get("s") or self.request.query_params.get("q")
+        date_filter = self.request.query_params.get("date")
 
         if patient_id:
             q = q.filter(patient_id=patient_id)
         if provider_id:
             q = q.filter(provider_id=provider_id)
         if status_:
-            q = q.filter(status=status_)
+            # Handle both upper and lower case status values
+            q = q.filter(status__iexact=status_)
         if start:
-            q = q.filter(start_at__gte=parse_datetime(start) or start)
+            parsed_start = parse_datetime(start)
+            q = q.filter(start_at__gte=parsed_start or start)
         if end:
-            q = q.filter(end_at__lte=parse_datetime(end) or end)
+            parsed_end = parse_datetime(end)
+            q = q.filter(end_at__lte=parsed_end or end)
         if s:
-            q = q.filter(Q(reason__icontains=s) | Q(notes__icontains=s))
+            q = q.filter(
+                Q(reason__icontains=s)
+                | Q(notes__icontains=s)
+                | Q(patient__first_name__icontains=s)
+                | Q(patient__last_name__icontains=s)
+            )
+
+        # Date presets for convenience
+        if date_filter:
+            today = timezone.now().date()
+            if date_filter == "today":
+                q = q.filter(start_at__date=today)
+            elif date_filter == "tomorrow":
+                q = q.filter(start_at__date=today + timezone.timedelta(days=1))
+            elif date_filter == "this_week":
+                week_start = today - timezone.timedelta(days=today.weekday())
+                week_end = week_start + timezone.timedelta(days=6)
+                q = q.filter(start_at__date__gte=week_start, start_at__date__lte=week_end)
+            elif date_filter == "next_7d":
+                q = q.filter(
+                    start_at__date__gte=today,
+                    start_at__date__lte=today + timezone.timedelta(days=7),
+                )
+            # 'all' or unknown values = no date filter
 
         return q.order_by("start_at", "id")
 
-    # Create: staff can create for any patient in facility;
-    # patient can only create for *self*
     def create(self, request, *args, **kwargs):
+        """
+        Create appointment with proper patient/dependent handling.
+        """
         user = request.user
         data = request.data.copy()
 
         if user.role == "PATIENT":
-            # This is the "main" patient attached to the logged-in user
             base_patient = getattr(user, "patient_profile", None)
             if not base_patient:
                 return Response(
@@ -81,7 +129,6 @@ class AppointmentViewSet(viewsets.GenericViewSet,
                     status=status.HTTP_400_BAD_REQUEST,
                 )
 
-            # Optional patient ID coming from the frontend (for dependents)
             raw_patient_id = data.get("patient")
             target_patient_id = None
             if raw_patient_id not in (None, "", "null"):
@@ -94,13 +141,9 @@ class AppointmentViewSet(viewsets.GenericViewSet,
                     )
 
             if target_patient_id is None or target_patient_id == base_patient.id:
-                # No explicit patient, or same as self → book for self
                 data["patient"] = base_patient.id
             else:
-                # A patient id was provided – it must be one of this patient's dependents
-                allowed_ids = set(
-                    base_patient.dependents.values_list("id", flat=True)
-                )
+                allowed_ids = set(base_patient.dependents.values_list("id", flat=True))
                 if target_patient_id not in allowed_ids:
                     return Response(
                         {
@@ -113,11 +156,9 @@ class AppointmentViewSet(viewsets.GenericViewSet,
                     )
                 data["patient"] = target_patient_id
         else:
-            # Staff (PROVIDER, ADMIN, etc.) must pass permission checks
             self.permission_classes = [IsAuthenticated, IsStaff]
             self.check_permissions(request)
 
-        # Use standard serializer path (so facility, overlaps etc are handled)
         serializer = self.get_serializer(data=data)
         serializer.is_valid(raise_exception=True)
         self.perform_create(serializer)
@@ -127,20 +168,21 @@ class AppointmentViewSet(viewsets.GenericViewSet,
             headers=self.get_success_headers(serializer.data),
         )
 
-        # 🔧 NEW: Automatically link patient to facility if not already linked
+        # Auto-link patient to facility
         try:
-            appt = Appointment.objects.select_related("patient", "facility").get(id=resp.data["id"])
+            appt = Appointment.objects.select_related("patient", "facility").get(
+                id=resp.data["id"]
+            )
             patient = appt.patient
-            
-            # If patient has no facility or a different facility, update it
-            if appt.facility_id and (not patient.facility_id or patient.facility_id != appt.facility_id):
+            if appt.facility_id and (
+                not patient.facility_id or patient.facility_id != appt.facility_id
+            ):
                 patient.facility = appt.facility
                 patient.save(update_fields=["facility"])
         except Exception:
-            # Don't fail the appointment creation if this update fails
             pass
 
-        # send confirmation email (best effort)
+        # Send confirmation email
         try:
             appt = Appointment.objects.get(id=resp.data["id"])
             send_confirmation(appt)
@@ -153,7 +195,7 @@ class AppointmentViewSet(viewsets.GenericViewSet,
         obj = self.get_object()
         self.permission_classes = [IsAuthenticated, CanViewAppointment]
         self.check_object_permissions(request, obj)
-        return Response(AppointmentSerializer(obj).data)
+        return Response(AppointmentSerializer(obj, context={"request": request}).data)
 
     def update(self, request, *args, **kwargs):
         obj = self.get_object()
@@ -162,66 +204,183 @@ class AppointmentViewSet(viewsets.GenericViewSet,
             self.check_permissions(request)
         return super().update(request, *args, **kwargs)
 
+    # ─────────────────────────────────────────────────────────────
+    # Status transition actions
+    # ─────────────────────────────────────────────────────────────
+
     @action(detail=True, methods=["post"])
     def check_in(self, request, pk=None):
+        """Mark appointment as checked-in (patient has arrived)."""
         appt = self.get_object()
         self.permission_classes = [IsAuthenticated, IsStaff]
         self.check_permissions(request)
+
         if appt.status != ApptStatus.SCHEDULED:
-            return Response({"detail": "Only scheduled appointments can be checked-in."}, status=400)
+            return Response(
+                {"detail": "Only scheduled appointments can be checked-in."},
+                status=400,
+            )
+
         appt.status = ApptStatus.CHECKED_IN
         appt.save(update_fields=["status", "updated_at"])
-        return Response({"ok": True})
+
+        return Response(
+            AppointmentSerializer(appt, context={"request": request}).data
+        )
 
     @action(detail=True, methods=["post"])
     def complete(self, request, pk=None):
+        """
+        Mark appointment as completed.
+        If there's a linked encounter that's still open, this also closes it.
+        """
         appt = self.get_object()
         self.permission_classes = [IsAuthenticated, IsStaff]
         self.check_permissions(request)
+
         if appt.status not in (ApptStatus.SCHEDULED, ApptStatus.CHECKED_IN):
-            return Response({"detail": "Only scheduled/checked-in appointments can be completed."}, status=400)
+            return Response(
+                {"detail": "Only scheduled/checked-in appointments can be completed."},
+                status=400,
+            )
+
         appt.status = ApptStatus.COMPLETED
         appt.save(update_fields=["status", "updated_at"])
-        return Response({"ok": True})
+
+        # Also close linked encounter if it's still open
+        if appt.encounter_id:
+            try:
+                from encounters.models import Encounter
+                from encounters.enums import EncounterStatus
+
+                enc = Encounter.objects.filter(id=appt.encounter_id).first()
+                if enc and enc.status not in (
+                    EncounterStatus.CLOSED,
+                    EncounterStatus.CROSSED_OUT,
+                ):
+                    enc.status = EncounterStatus.CLOSED
+                    enc.save(update_fields=["status", "updated_at"])
+            except Exception:
+                pass
+
+        return Response(
+            AppointmentSerializer(appt, context={"request": request}).data
+        )
 
     @action(detail=True, methods=["post"])
     def cancel(self, request, pk=None):
+        """
+        Cancel appointment.
+        Patients can cancel their own; staff can cancel any in their facility.
+        """
         appt = self.get_object()
+
+        # Permission check
         if request.user.role != "PATIENT":
             self.permission_classes = [IsAuthenticated, IsStaff]
             self.check_permissions(request)
-        if appt.status in (ApptStatus.COMPLETED,):
-            return Response({"detail": "Completed appointments cannot be cancelled."}, status=400)
+        else:
+            # Patients can only cancel their own
+            base_patient = getattr(request.user, "patient_profile", None)
+            if not base_patient:
+                return Response(
+                    {"detail": "No patient profile linked."}, status=403
+                )
+            allowed_ids = {base_patient.id} | set(
+                base_patient.dependents.values_list("id", flat=True)
+            )
+            if appt.patient_id not in allowed_ids:
+                return Response(
+                    {"detail": "You can only cancel your own appointments."},
+                    status=403,
+                )
+
+        if appt.status == ApptStatus.COMPLETED:
+            return Response(
+                {"detail": "Completed appointments cannot be cancelled."},
+                status=400,
+            )
+
         appt.status = ApptStatus.CANCELLED
         appt.save(update_fields=["status", "updated_at"])
-        return Response({"ok": True})
+
+        return Response(
+            AppointmentSerializer(appt, context={"request": request}).data
+        )
 
     @action(detail=True, methods=["post"])
     def no_show(self, request, pk=None):
+        """Mark appointment as no-show (patient didn't arrive)."""
         appt = self.get_object()
         self.permission_classes = [IsAuthenticated, IsStaff]
         self.check_permissions(request)
+
         if appt.status != ApptStatus.SCHEDULED:
-            return Response({"detail": "Only scheduled appointments can be marked no-show."}, status=400)
+            return Response(
+                {"detail": "Only scheduled appointments can be marked no-show."},
+                status=400,
+            )
+
         appt.status = ApptStatus.NO_SHOW
         appt.save(update_fields=["status", "updated_at"])
-        return Response({"ok": True})
+
+        return Response(
+            AppointmentSerializer(appt, context={"request": request}).data
+        )
+
+    # ─────────────────────────────────────────────────────────────
+    # Utility endpoints
+    # ─────────────────────────────────────────────────────────────
 
     @action(detail=False, methods=["get"])
     def statuses(self, request):
-        return Response([c for c, _ in ApptStatus.choices])
+        """Return available appointment statuses."""
+        return Response([{"value": c, "label": l} for c, l in ApptStatus.choices])
+
+    @action(detail=False, methods=["get"])
+    def summary(self, request):
+        """
+        Return appointment counts by status for the current user's scope.
+        Useful for dashboard widgets.
+        """
+        qs = self.get_queryset()
+        
+        # Optional date range
+        date_filter = request.query_params.get("date", "today")
+        today = timezone.now().date()
+        
+        if date_filter == "today":
+            qs = qs.filter(start_at__date=today)
+        elif date_filter == "this_week":
+            week_start = today - timezone.timedelta(days=today.weekday())
+            week_end = week_start + timezone.timedelta(days=6)
+            qs = qs.filter(start_at__date__gte=week_start, start_at__date__lte=week_end)
+        
+        counts = {
+            "total": qs.count(),
+            "scheduled": qs.filter(status=ApptStatus.SCHEDULED).count(),
+            "checked_in": qs.filter(status=ApptStatus.CHECKED_IN).count(),
+            "completed": qs.filter(status=ApptStatus.COMPLETED).count(),
+            "cancelled": qs.filter(status=ApptStatus.CANCELLED).count(),
+            "no_show": qs.filter(status=ApptStatus.NO_SHOW).count(),
+        }
+        
+        return Response(counts)
 
     @action(detail=False, methods=["post"])
     def send_reminders(self, request):
+        """
+        Send reminder notifications for appointments in a time range.
+        Used by scheduled jobs.
+        """
         start = parse_datetime(request.data.get("start")) or request.data.get("start")
         end = parse_datetime(request.data.get("end")) or request.data.get("end")
+
         if not start or not end:
             return Response({"detail": "start and end required"}, status=400)
 
         qs = self.get_queryset().filter(
-            status=ApptStatus.SCHEDULED,
-            start_at__gte=start,
-            start_at__lte=end
+            status=ApptStatus.SCHEDULED, start_at__gte=start, start_at__lte=end
         )
 
         n = 0
@@ -239,3 +398,39 @@ class AppointmentViewSet(viewsets.GenericViewSet,
             n += 1
 
         return Response({"sent": n})
+
+
+# ─────────────────────────────────────────────────────────────
+# Utility functions for syncing appointment status from encounters
+# ─────────────────────────────────────────────────────────────
+
+def sync_appointment_on_encounter_start(appointment_id: int):
+    """
+    Called when an encounter is started from an appointment.
+    Updates appointment status to CHECKED_IN if still SCHEDULED.
+    """
+    try:
+        appt = Appointment.objects.get(id=appointment_id)
+        if appt.status == ApptStatus.SCHEDULED:
+            appt.status = ApptStatus.CHECKED_IN
+            appt.save(update_fields=["status", "updated_at"])
+    except Appointment.DoesNotExist:
+        pass
+
+
+def sync_appointment_on_encounter_close(encounter_id: int):
+    """
+    Called when an encounter is closed.
+    Updates linked appointment status to COMPLETED if not already terminal.
+    """
+    try:
+        appt = Appointment.objects.filter(encounter_id=encounter_id).first()
+        if appt and appt.status not in (
+            ApptStatus.COMPLETED,
+            ApptStatus.CANCELLED,
+            ApptStatus.NO_SHOW,
+        ):
+            appt.status = ApptStatus.COMPLETED
+            appt.save(update_fields=["status", "updated_at"])
+    except Exception:
+        pass

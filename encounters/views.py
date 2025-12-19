@@ -8,6 +8,7 @@ from rest_framework.response import Response
 from rest_framework_simplejwt.authentication import JWTAuthentication
 
 from appointments.models import Appointment
+from appointments.enums import ApptStatus
 from patients.models import Patient
 
 from .enums import EncounterStage, EncounterStatus, SoapSection
@@ -39,7 +40,6 @@ class EncounterViewSet(
         elif u.facility_id:
             q = q.filter(facility_id=u.facility_id)
         else:
-            # independent staff: only what they created (admins can see all)
             role = (getattr(u, "role", "") or "").upper()
             if role not in {"ADMIN", "SUPER_ADMIN"}:
                 q = q.filter(created_by_id=u.id)
@@ -89,11 +89,18 @@ class EncounterViewSet(
         self.check_permissions(request)
         return super().update(request, *args, **kwargs)
 
-    # ------------------------------------------------------------
+    # ─────────────────────────────────────────────────────────────
     # Start flows
-    # ------------------------------------------------------------
+    # ─────────────────────────────────────────────────────────────
+
     @action(detail=False, methods=["post"], url_path="start-from-appointment")
     def start_from_appointment(self, request):
+        """
+        Start an encounter from an appointment.
+        - Creates encounter if none exists
+        - Links encounter to appointment
+        - Updates appointment status to CHECKED_IN
+        """
         self.permission_classes = [IsAuthenticated, IsStaff]
         self.check_permissions(request)
 
@@ -109,12 +116,24 @@ class EncounterViewSet(
         if request.user.facility_id and appt.facility_id != request.user.facility_id:
             return Response({"detail": "Appointment is not in your facility"}, status=403)
 
-        # Reuse existing link if present
+        # Check appointment status - cannot start on cancelled/completed/no-show
+        if appt.status in (ApptStatus.CANCELLED, ApptStatus.COMPLETED, ApptStatus.NO_SHOW):
+            return Response(
+                {
+                    "detail": f"Cannot start encounter for {appt.status} appointment.",
+                    "appointment_status": appt.status,
+                },
+                status=400,
+            )
+
+        # Reuse existing active encounter if present
         if appt.encounter_id:
             enc = Encounter.objects.filter(id=appt.encounter_id).first()
-            if enc:
+            if enc and enc.status not in (EncounterStatus.CLOSED, EncounterStatus.CROSSED_OUT):
                 return Response(EncounterSerializer(enc, context={"request": request}).data)
+            # If encounter exists but is closed, allow creating a new one (follow-up scenario)
 
+        # Create new encounter
         enc = Encounter.objects.create(
             patient=appt.patient,
             facility=appt.facility,
@@ -126,13 +145,22 @@ class EncounterViewSet(
             chief_complaint=getattr(appt, "reason", "") or "",
         )
 
+        # Link encounter to appointment
         appt.encounter_id = enc.id
-        appt.save(update_fields=["encounter_id", "updated_at"])
+
+        # Update appointment status to CHECKED_IN if still SCHEDULED
+        if appt.status == ApptStatus.SCHEDULED:
+            appt.status = ApptStatus.CHECKED_IN
+
+        appt.save(update_fields=["encounter_id", "status", "updated_at"])
 
         return Response(EncounterSerializer(enc, context={"request": request}).data, status=201)
 
     @action(detail=False, methods=["post"], url_path="start-from-patient")
     def start_from_patient(self, request):
+        """
+        Start a walk-in encounter directly from patient (no appointment).
+        """
         self.permission_classes = [IsAuthenticated, IsStaff]
         self.check_permissions(request)
 
@@ -157,11 +185,13 @@ class EncounterViewSet(
         )
         return Response(EncounterSerializer(enc, context={"request": request}).data, status=201)
 
-    # ------------------------------------------------------------
+    # ─────────────────────────────────────────────────────────────
     # Lab wait controls
-    # ------------------------------------------------------------
+    # ─────────────────────────────────────────────────────────────
+
     @action(detail=True, methods=["post"])
     def pause(self, request, pk=None):
+        """Pause encounter while waiting for labs."""
         enc = self.get_object()
         self.permission_classes = [IsAuthenticated, IsStaff]
         self.check_permissions(request)
@@ -175,11 +205,11 @@ class EncounterViewSet(
 
     @action(detail=True, methods=["post"])
     def resume(self, request, pk=None):
+        """Resume a paused encounter."""
         enc = self.get_object()
         self.permission_classes = [IsAuthenticated, IsStaff]
         self.check_permissions(request)
 
-        # resume jumps to SOAP note even if labs exist
         enc.status = EncounterStatus.IN_PROGRESS
         enc.stage = EncounterStage.NOTE
         enc.resumed_at = timezone.now()
@@ -189,6 +219,7 @@ class EncounterViewSet(
 
     @action(detail=True, methods=["post"], url_path="skip_labs")
     def skip_labs(self, request, pk=None):
+        """Skip labs and go directly to SOAP note."""
         enc = self.get_object()
         self.permission_classes = [IsAuthenticated, IsStaff]
         self.check_permissions(request)
@@ -208,24 +239,49 @@ class EncounterViewSet(
         )
         return Response(EncounterSerializer(enc, context={"request": request}).data)
 
-    # ------------------------------------------------------------
-    # Existing clinical actions + new finalize note
-    # ------------------------------------------------------------
+    # ─────────────────────────────────────────────────────────────
+    # Clinical actions
+    # ─────────────────────────────────────────────────────────────
+
     @action(detail=True, methods=["post"])
     def close(self, request, pk=None):
+        """
+        Close the encounter.
+        Also updates linked appointment status to COMPLETED.
+        """
         enc = self.get_object()
         self.permission_classes = [IsAuthenticated, IsStaff]
         self.check_permissions(request)
 
         enc.status = EncounterStatus.CLOSED
         enc.save(update_fields=["status", "updated_at"])
-        return Response({"detail": "Encounter closed."})
+
+        # Sync linked appointment to COMPLETED
+        if enc.appointment_id:
+            try:
+                appt = Appointment.objects.filter(id=enc.appointment_id).first()
+                if appt and appt.status not in (
+                    ApptStatus.COMPLETED,
+                    ApptStatus.CANCELLED,
+                    ApptStatus.NO_SHOW,
+                ):
+                    appt.status = ApptStatus.COMPLETED
+                    appt.save(update_fields=["status", "updated_at"])
+            except Exception:
+                pass
+
+        return Response(
+            {
+                "detail": "Encounter closed.",
+                "status": enc.status,
+            }
+        )
 
     @action(detail=True, methods=["post"])
     def cross_out(self, request, pk=None):
-        # NOTE: Cross-out was originally exposed in list UIs, but the product
-        # requirement is now: *only* allow per-section corrections after lock.
-        # We keep this endpoint for backward compatibility, but disable it.
+        """
+        Cross-out is disabled. Use per-section corrections via /amend/ instead.
+        """
         return Response(
             {
                 "detail": (
@@ -239,11 +295,11 @@ class EncounterViewSet(
 
     @action(detail=True, methods=["post"])
     def amend(self, request, pk=None):
+        """Add a per-section correction to a locked encounter."""
         enc = self.get_object()
         self.permission_classes = [IsAuthenticated, IsStaff]
         self.check_permissions(request)
 
-        # Ensure lock state is up-to-date
         enc.maybe_lock()
         if not enc.is_locked:
             return Response(
@@ -273,7 +329,6 @@ class EncounterViewSet(
             content=content,
         )
 
-        # Return the created amendment so the frontend can optionally attach files
         return Response(
             AmendmentSerializer(a, context={"request": request, "attachments_map": {}}).data,
             status=status.HTTP_201_CREATED,
@@ -281,6 +336,7 @@ class EncounterViewSet(
 
     @action(detail=True, methods=["get"])
     def amendments(self, request, pk=None):
+        """List amendments (corrections) for an encounter."""
         enc = self.get_object()
         self.permission_classes = [IsAuthenticated, CanViewEncounter]
         self.check_object_permissions(request, enc)
@@ -291,7 +347,6 @@ class EncounterViewSet(
         if section:
             qs = qs.filter(section=section)
 
-        # Attachments are stored in the attachments app via AttachmentLink (generic relation)
         attachments_map = {}
         amendment_ids = list(qs.values_list("id", flat=True))
         if amendment_ids:
@@ -302,8 +357,7 @@ class EncounterViewSet(
 
                 ct = ContentType.objects.get(app_label="encounters", model="encounteramendment")
                 links = (
-                    AttachmentLink.objects
-                    .filter(content_type=ct, object_id__in=amendment_ids)
+                    AttachmentLink.objects.filter(content_type=ct, object_id__in=amendment_ids)
                     .select_related("file")
                     .order_by("id")
                 )
@@ -326,7 +380,7 @@ class EncounterViewSet(
     def finalize_note(self, request, pk=None):
         """
         Marks the SOAP/Dx part as completed and starts the 24h lock timer.
-        Also moves workflow to PRESCRIPTION stage.
+        Moves workflow to PRESCRIPTION stage.
         """
         enc = self.get_object()
         self.permission_classes = [IsAuthenticated, IsStaff]
