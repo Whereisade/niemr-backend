@@ -18,6 +18,7 @@ from .enums import Visibility
 REF_TYPE_MAP = {
     # Encounters
     "ENCOUNTER": ("encounters", "encounter"),
+    "ENCOUNTER_AMENDMENT": ("encounters", "encounteramendment"),
 
     # Labs
     "LAB": ("labs", "laborder"),
@@ -52,6 +53,8 @@ def _normalize_ref_type(raw):
         return "IMAGING"
     if t in {"ENCOUNTER", "ENCOUNTERS", "VISIT"}:
         return "ENCOUNTER"
+    if t in {"ENCOUNTER_AMENDMENT", "ENCOUNTERAMENDMENT", "SOAP_CORRECTION", "SOAP_AMENDMENT", "AMENDMENT"}:
+        return "ENCOUNTER_AMENDMENT"
     if t in {"PRESCRIPTION", "RX"}:
         return "PRESCRIPTION"
 

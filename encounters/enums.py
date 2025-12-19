@@ -25,6 +25,17 @@ class EncounterStage(models.TextChoices):
     PRESCRIPTION = "PRESCRIPTION", "Prescription"
 
 
+class SoapSection(models.TextChoices):
+    """Individual SOAP / clinical note sections that can be corrected after lock."""
+
+    CHIEF_COMPLAINT = "CHIEF_COMPLAINT", "Chief complaint"
+    HPI = "HPI", "History (HPI)"
+    ROS = "ROS", "Review of systems"
+    PHYSICAL_EXAM = "PHYSICAL_EXAM", "Physical exam"
+    DIAGNOSES = "DIAGNOSES", "Diagnoses"
+    PLAN = "PLAN", "Plan"
+
+
 class EncounterType(models.TextChoices):
     NEW = "NEW", "New"
     FOLLOW_UP = "FOLLOW_UP", "Follow-up"

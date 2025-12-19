@@ -5,7 +5,7 @@ from django.utils import timezone
 
 from facilities.models import Facility
 from patients.models import Patient
-from .enums import EncounterStatus, EncounterStage, EncounterType, Priority
+from .enums import EncounterStatus, EncounterStage, EncounterType, Priority, SoapSection
 
 LOCK_AFTER_HOURS = 24
 
@@ -139,6 +139,13 @@ class Encounter(models.Model):
 class EncounterAmendment(models.Model):
     encounter = models.ForeignKey(Encounter, on_delete=models.CASCADE, related_name="amendments")
     added_by = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, on_delete=models.SET_NULL)
+    section = models.CharField(
+        max_length=32,
+        choices=SoapSection.choices,
+        blank=True,
+        default="",
+        help_text="SOAP note section being corrected (required for per-section corrections).",
+    )
     reason = models.CharField(max_length=255)
     content = models.TextField()
     created_at = models.DateTimeField(auto_now_add=True)

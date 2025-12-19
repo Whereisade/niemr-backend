@@ -124,9 +124,22 @@ class AmendmentSerializer(serializers.ModelSerializer):
     Append-only: create allowed; updates/deletes are blocked in the view.
     """
 
+    added_by_name = serializers.SerializerMethodField()
+    attachments = serializers.SerializerMethodField()
+
     class Meta:
         model = EncounterAmendment
-        fields = ("id", "encounter", "added_by", "reason", "content", "created_at")
+        fields = (
+            "id",
+            "encounter",
+            "section",
+            "added_by",
+            "added_by_name",
+            "reason",
+            "content",
+            "created_at",
+            "attachments",
+        )
         read_only_fields = ("added_by", "created_at")
 
     def create(self, validated):
@@ -134,3 +147,18 @@ class AmendmentSerializer(serializers.ModelSerializer):
         if req and req.user.is_authenticated:
             validated["added_by"] = req.user
         return super().create(validated)
+
+    def get_added_by_name(self, obj):
+        u = getattr(obj, "added_by", None)
+        if not u:
+            return None
+        name = (getattr(u, "get_full_name", lambda: "")() or "").strip()
+        if name:
+            return name
+        return getattr(u, "username", None) or getattr(u, "email", None)
+
+    def get_attachments(self, obj):
+        # The view can inject a pre-serialized mapping for efficiency:
+        # { amendment_id: [FileSerializer(...).data, ...] }
+        m = self.context.get("attachments_map") or {}
+        return m.get(obj.id, [])

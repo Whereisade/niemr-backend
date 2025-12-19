@@ -10,7 +10,7 @@ from rest_framework_simplejwt.authentication import JWTAuthentication
 from appointments.models import Appointment
 from patients.models import Patient
 
-from .enums import EncounterStage, EncounterStatus
+from .enums import EncounterStage, EncounterStatus, SoapSection
 from .models import Encounter, EncounterAmendment
 from .permissions import CanViewEncounter, IsStaff
 from .serializers import AmendmentSerializer, EncounterListSerializer, EncounterSerializer
@@ -223,23 +223,19 @@ class EncounterViewSet(
 
     @action(detail=True, methods=["post"])
     def cross_out(self, request, pk=None):
-        enc = self.get_object()
-        self.permission_classes = [IsAuthenticated, IsStaff]
-        self.check_permissions(request)
-
-        reason = (request.data.get("reason") or "").strip()
-        if not reason:
-            return Response({"detail": "reason is required"}, status=400)
-
-        enc.status = EncounterStatus.CROSSED_OUT
-        enc.save(update_fields=["status", "updated_at"])
-        EncounterAmendment.objects.create(
-            encounter=enc,
-            added_by=request.user,
-            reason=f"CROSSED OUT: {reason}",
-            content="(Encounter crossed out)",
+        # NOTE: Cross-out was originally exposed in list UIs, but the product
+        # requirement is now: *only* allow per-section corrections after lock.
+        # We keep this endpoint for backward compatibility, but disable it.
+        return Response(
+            {
+                "detail": (
+                    "Encounter cross-out is disabled. "
+                    "After a note is locked, add a correction to a specific SOAP section via "
+                    "POST /api/encounters/{id}/amend/ with {section, reason, content}."
+                )
+            },
+            status=400,
         )
-        return Response({"detail": "Encounter crossed out."})
 
     @action(detail=True, methods=["post"])
     def amend(self, request, pk=None):
@@ -247,15 +243,41 @@ class EncounterViewSet(
         self.permission_classes = [IsAuthenticated, IsStaff]
         self.check_permissions(request)
 
+        # Ensure lock state is up-to-date
+        enc.maybe_lock()
+        if not enc.is_locked:
+            return Response(
+                {
+                    "detail": "Encounter note is not locked yet. Edit the SOAP fields directly until the lock activates.",
+                    "lock_due_at": getattr(enc, "lock_due_at", None),
+                },
+                status=400,
+            )
+
+        section = (request.data.get("section") or "").strip()
+        if not section:
+            return Response({"detail": "section is required"}, status=400)
+        if section not in {c[0] for c in SoapSection.choices}:
+            return Response({"detail": "Invalid section"}, status=400)
+
         reason = (request.data.get("reason") or "").strip()
         content = (request.data.get("content") or "").strip()
         if not reason or not content:
             return Response({"detail": "reason and content are required"}, status=400)
 
-        EncounterAmendment.objects.create(
-            encounter=enc, added_by=request.user, reason=reason, content=content
+        a = EncounterAmendment.objects.create(
+            encounter=enc,
+            added_by=request.user,
+            section=section,
+            reason=reason,
+            content=content,
         )
-        return Response({"detail": "Amendment added."}, status=status.HTTP_201_CREATED)
+
+        # Return the created amendment so the frontend can optionally attach files
+        return Response(
+            AmendmentSerializer(a, context={"request": request, "attachments_map": {}}).data,
+            status=status.HTTP_201_CREATED,
+        )
 
     @action(detail=True, methods=["get"])
     def amendments(self, request, pk=None):
@@ -263,8 +285,42 @@ class EncounterViewSet(
         self.permission_classes = [IsAuthenticated, CanViewEncounter]
         self.check_object_permissions(request, enc)
 
-        qs = enc.amendments.select_related("added_by").order_by("-created_at")
-        return Response(AmendmentSerializer(qs, many=True).data)
+        qs = enc.amendments.select_related("added_by").order_by("created_at")
+
+        section = (request.query_params.get("section") or "").strip()
+        if section:
+            qs = qs.filter(section=section)
+
+        # Attachments are stored in the attachments app via AttachmentLink (generic relation)
+        attachments_map = {}
+        amendment_ids = list(qs.values_list("id", flat=True))
+        if amendment_ids:
+            try:
+                from django.contrib.contenttypes.models import ContentType
+                from attachments.models import AttachmentLink
+                from attachments.serializers import FileSerializer
+
+                ct = ContentType.objects.get(app_label="encounters", model="encounteramendment")
+                links = (
+                    AttachmentLink.objects
+                    .filter(content_type=ct, object_id__in=amendment_ids)
+                    .select_related("file")
+                    .order_by("id")
+                )
+                for link in links:
+                    attachments_map.setdefault(link.object_id, []).append(
+                        FileSerializer(link.file, context={"request": request}).data
+                    )
+            except Exception:
+                attachments_map = {}
+
+        return Response(
+            AmendmentSerializer(
+                qs,
+                many=True,
+                context={"request": request, "attachments_map": attachments_map},
+            ).data
+        )
 
     @action(detail=True, methods=["post"], url_path="finalize_note")
     def finalize_note(self, request, pk=None):
