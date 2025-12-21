@@ -10,7 +10,7 @@ from rest_framework_simplejwt.authentication import JWTAuthentication
 from appointments.models import Appointment
 from appointments.enums import ApptStatus
 from patients.models import Patient
-
+from accounts.enums import UserRole
 from .enums import EncounterStage, EncounterStatus, SoapSection
 from .models import Encounter, EncounterAmendment
 from .permissions import CanViewEncounter, IsStaff
@@ -100,6 +100,7 @@ class EncounterViewSet(
         - Creates encounter if none exists
         - Links encounter to appointment
         - Updates appointment status to CHECKED_IN
+        - Sets nurse or provider based on user role
         """
         self.permission_classes = [IsAuthenticated, IsStaff]
         self.check_permissions(request)
@@ -112,11 +113,9 @@ class EncounterViewSet(
         if not appt:
             return Response({"detail": "Appointment not found"}, status=404)
 
-        # Facility staff can't start encounter from another facility's appointment
         if request.user.facility_id and appt.facility_id != request.user.facility_id:
             return Response({"detail": "Appointment is not in your facility"}, status=403)
 
-        # Check appointment status - cannot start on cancelled/completed/no-show
         if appt.status in (ApptStatus.CANCELLED, ApptStatus.COMPLETED, ApptStatus.NO_SHOW):
             return Response(
                 {
@@ -131,19 +130,51 @@ class EncounterViewSet(
             enc = Encounter.objects.filter(id=appt.encounter_id).first()
             if enc and enc.status not in (EncounterStatus.CLOSED, EncounterStatus.CROSSED_OUT):
                 return Response(EncounterSerializer(enc, context={"request": request}).data)
-            # If encounter exists but is closed, allow creating a new one (follow-up scenario)
 
-        # Create new encounter
-        enc = Encounter.objects.create(
-            patient=appt.patient,
-            facility=appt.facility,
-            created_by=request.user,
-            status=EncounterStatus.IN_PROGRESS,
-            stage=EncounterStage.LABS,
-            occurred_at=timezone.now(),
-            appointment_id=appt.id,
-            chief_complaint=getattr(appt, "reason", "") or "",
-        )
+        # Create new encounter with proper role assignment
+        user_role = getattr(request.user, "role", "").upper()
+        
+        # Determine who is starting the encounter
+        if user_role == UserRole.NURSE:
+            # Nurse starts: set nurse, leave provider empty
+            enc = Encounter.objects.create(
+                patient=appt.patient,
+                facility=appt.facility,
+                created_by=request.user,
+                nurse=request.user,
+                provider=None,  # Will be set when doctor takes over
+                status=EncounterStatus.IN_PROGRESS,
+                stage=EncounterStage.LABS,  # Actually starts at nurse assessment, but kept for compatibility
+                occurred_at=timezone.now(),
+                appointment_id=appt.id,
+                chief_complaint=getattr(appt, "reason", "") or "",
+            )
+        elif user_role in (UserRole.DOCTOR, UserRole.ADMIN, UserRole.SUPER_ADMIN):
+            # Doctor starts directly: set provider, no nurse
+            enc = Encounter.objects.create(
+                patient=appt.patient,
+                facility=appt.facility,
+                created_by=request.user,
+                nurse=None,
+                provider=request.user,
+                status=EncounterStatus.IN_PROGRESS,
+                stage=EncounterStage.LABS,
+                occurred_at=timezone.now(),
+                appointment_id=appt.id,
+                chief_complaint=getattr(appt, "reason", "") or "",
+            )
+        else:
+            # Other roles: just set created_by
+            enc = Encounter.objects.create(
+                patient=appt.patient,
+                facility=appt.facility,
+                created_by=request.user,
+                status=EncounterStatus.IN_PROGRESS,
+                stage=EncounterStage.LABS,
+                occurred_at=timezone.now(),
+                appointment_id=appt.id,
+                chief_complaint=getattr(appt, "reason", "") or "",
+            )
 
         # Link encounter to appointment
         appt.encounter_id = enc.id
@@ -156,10 +187,12 @@ class EncounterViewSet(
 
         return Response(EncounterSerializer(enc, context={"request": request}).data, status=201)
 
+
     @action(detail=False, methods=["post"], url_path="start-from-patient")
     def start_from_patient(self, request):
         """
         Start a walk-in encounter directly from patient (no appointment).
+        Sets nurse or provider based on user role.
         """
         self.permission_classes = [IsAuthenticated, IsStaff]
         self.check_permissions(request)
@@ -175,16 +208,68 @@ class EncounterViewSet(
         if request.user.facility_id and patient.facility_id != request.user.facility_id:
             return Response({"detail": "Patient is not in your facility"}, status=403)
 
-        enc = Encounter.objects.create(
-            patient=patient,
-            facility=request.user.facility if request.user.facility_id else patient.facility,
-            created_by=request.user,
-            status=EncounterStatus.IN_PROGRESS,
-            stage=EncounterStage.LABS,
-            occurred_at=timezone.now(),
-        )
+        user_role = getattr(request.user, "role", "").upper()
+        
+        # Determine who is starting the encounter
+        if user_role == UserRole.NURSE:
+            enc = Encounter.objects.create(
+                patient=patient,
+                facility=request.user.facility if request.user.facility_id else patient.facility,
+                created_by=request.user,
+                nurse=request.user,
+                provider=None,
+                status=EncounterStatus.IN_PROGRESS,
+                stage=EncounterStage.LABS,
+                occurred_at=timezone.now(),
+            )
+        elif user_role in (UserRole.DOCTOR, UserRole.ADMIN, UserRole.SUPER_ADMIN):
+            enc = Encounter.objects.create(
+                patient=patient,
+                facility=request.user.facility if request.user.facility_id else patient.facility,
+                created_by=request.user,
+                nurse=None,
+                provider=request.user,
+                status=EncounterStatus.IN_PROGRESS,
+                stage=EncounterStage.LABS,
+                occurred_at=timezone.now(),
+            )
+        else:
+            enc = Encounter.objects.create(
+                patient=patient,
+                facility=request.user.facility if request.user.facility_id else patient.facility,
+                created_by=request.user,
+                status=EncounterStatus.IN_PROGRESS,
+                stage=EncounterStage.LABS,
+                occurred_at=timezone.now(),
+            )
+        
         return Response(EncounterSerializer(enc, context={"request": request}).data, status=201)
 
+    @action(detail=True, methods=["post"], url_path="assign_provider")
+    def assign_provider(self, request, pk=None):
+        """
+        Assign the current user as the provider (doctor) for this encounter.
+        Called when a doctor takes over from a nurse's initial assessment.
+        """
+        enc = self.get_object()
+        self.permission_classes = [IsAuthenticated, IsStaff]
+        self.check_permissions(request)
+
+        user_role = getattr(request.user, "role", "").upper()
+        
+        # Only doctors, admins, or super admins can be assigned as providers
+        if user_role not in (UserRole.DOCTOR, UserRole.ADMIN, UserRole.SUPER_ADMIN):
+            return Response(
+                {"detail": "Only doctors or admins can be assigned as providers."},
+                status=403,
+            )
+
+        # Assign provider if not already set
+        if not enc.provider:
+            enc.provider = request.user
+            enc.save(update_fields=["provider", "updated_at"])
+
+        return Response(EncounterSerializer(enc, context={"request": request}).data)
     # ─────────────────────────────────────────────────────────────
     # Lab wait controls
     # ─────────────────────────────────────────────────────────────

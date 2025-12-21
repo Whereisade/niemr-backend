@@ -21,6 +21,24 @@ class Encounter(models.Model):
     updated_by = models.ForeignKey(
         settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL, related_name="encounters_updated"
     )
+    
+    # Workflow roles
+    nurse = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="encounters_as_nurse",
+        help_text="Nurse who initiated the encounter and recorded vitals",
+    )
+    provider = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="encounters_as_provider",
+        help_text="Doctor or clinical provider responsible for diagnosis and treatment",
+    )
 
     # meta
     encounter_type = models.CharField(max_length=16, choices=EncounterType.choices, default=EncounterType.NEW)

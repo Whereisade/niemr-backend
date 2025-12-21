@@ -33,12 +33,25 @@ def _immutable_changes(instance: Encounter, incoming: dict) -> set:
     return changed
 
 
+def _get_user_name(user):
+    """Helper to get full name from user object"""
+    if not user:
+        return None
+    first = getattr(user, "first_name", "") or ""
+    last = getattr(user, "last_name", "") or ""
+    full = f"{first} {last}".strip()
+    return full if full else getattr(user, "email", None)
+
+
 class EncounterListSerializer(serializers.ModelSerializer):
     locked = serializers.SerializerMethodField(read_only=True)
 
     # Computed name fields for frontend display
     patient_name = serializers.SerializerMethodField(read_only=True)
     facility_name = serializers.SerializerMethodField(read_only=True)
+    
+    # NEW: Distinguish between nurse and provider
+    nurse_name = serializers.SerializerMethodField(read_only=True)
     provider_name = serializers.SerializerMethodField(read_only=True)
     created_by_name = serializers.SerializerMethodField(read_only=True)
 
@@ -51,8 +64,11 @@ class EncounterListSerializer(serializers.ModelSerializer):
             "facility",
             "facility_name",
             "created_by",
-            "provider_name",
             "created_by_name",
+            "nurse",
+            "nurse_name",
+            "provider",
+            "provider_name",
             "occurred_at",
             "status",
             "stage",
@@ -81,24 +97,21 @@ class EncounterListSerializer(serializers.ModelSerializer):
             return None
         return getattr(obj.facility, "name", None)
 
+    def get_nurse_name(self, obj):
+        """Return nurse's full name if set"""
+        return _get_user_name(obj.nurse)
+
     def get_provider_name(self, obj):
-        # created_by is the provider who created the encounter
-        if not obj.created_by:
-            return None
-        first = getattr(obj.created_by, "first_name", "") or ""
-        last = getattr(obj.created_by, "last_name", "") or ""
-        full = f"{first} {last}".strip()
-        return full if full else getattr(obj.created_by, "email", None)
+        """Return provider's (doctor's) full name if set"""
+        return _get_user_name(obj.provider)
 
     def get_created_by_name(self, obj):
-        return self.get_provider_name(obj)
+        """Return creator's full name"""
+        return _get_user_name(obj.created_by)
 
 
 class EncounterSerializer(serializers.ModelSerializer):
     locked = serializers.SerializerMethodField(read_only=True)
-
-    # ✅ FIX: do NOT set source="lock_due_at" when the field name is lock_due_at.
-    # We use SerializerMethodField so it works whether lock_due_at is a @property or not.
     lock_due_at = serializers.SerializerMethodField(read_only=True)
 
     # Computed name fields for frontend display
@@ -106,9 +119,16 @@ class EncounterSerializer(serializers.ModelSerializer):
     patient_first_name = serializers.SerializerMethodField(read_only=True)
     patient_last_name = serializers.SerializerMethodField(read_only=True)
     facility_name = serializers.SerializerMethodField(read_only=True)
+    
+    # NEW: Separate nurse and provider
+    nurse_name = serializers.SerializerMethodField(read_only=True)
+    nurse_first_name = serializers.SerializerMethodField(read_only=True)
+    nurse_last_name = serializers.SerializerMethodField(read_only=True)
+    
     provider_name = serializers.SerializerMethodField(read_only=True)
     provider_first_name = serializers.SerializerMethodField(read_only=True)
     provider_last_name = serializers.SerializerMethodField(read_only=True)
+    
     created_by_name = serializers.SerializerMethodField(read_only=True)
     created_by_first_name = serializers.SerializerMethodField(read_only=True)
     created_by_last_name = serializers.SerializerMethodField(read_only=True)
@@ -128,12 +148,9 @@ class EncounterSerializer(serializers.ModelSerializer):
         return obj.is_locked
 
     def get_lock_due_at(self, obj):
-        # If your model already has a lock_due_at property, prefer it.
         existing = getattr(obj, "lock_due_at", None)
         if existing:
             return existing
-
-        # Fallback: created_at + LOCK_AFTER_HOURS
         if not getattr(obj, "created_at", None):
             return None
         return obj.created_at + timedelta(hours=LOCK_AFTER_HOURS)
@@ -163,34 +180,47 @@ class EncounterSerializer(serializers.ModelSerializer):
             return None
         return getattr(obj.facility, "name", None)
 
-    # Provider fields (created_by is the provider)
-    def get_provider_name(self, obj):
-        if not obj.created_by:
+    # Nurse fields
+    def get_nurse_name(self, obj):
+        return _get_user_name(obj.nurse)
+
+    def get_nurse_first_name(self, obj):
+        if not obj.nurse:
             return None
-        first = getattr(obj.created_by, "first_name", "") or ""
-        last = getattr(obj.created_by, "last_name", "") or ""
-        full = f"{first} {last}".strip()
-        return full if full else getattr(obj.created_by, "email", None)
+        return getattr(obj.nurse, "first_name", None)
+
+    def get_nurse_last_name(self, obj):
+        if not obj.nurse:
+            return None
+        return getattr(obj.nurse, "last_name", None)
+
+    # Provider fields (doctor)
+    def get_provider_name(self, obj):
+        return _get_user_name(obj.provider)
 
     def get_provider_first_name(self, obj):
+        if not obj.provider:
+            return None
+        return getattr(obj.provider, "first_name", None)
+
+    def get_provider_last_name(self, obj):
+        if not obj.provider:
+            return None
+        return getattr(obj.provider, "last_name", None)
+
+    # Created by fields
+    def get_created_by_name(self, obj):
+        return _get_user_name(obj.created_by)
+
+    def get_created_by_first_name(self, obj):
         if not obj.created_by:
             return None
         return getattr(obj.created_by, "first_name", None)
 
-    def get_provider_last_name(self, obj):
+    def get_created_by_last_name(self, obj):
         if not obj.created_by:
             return None
         return getattr(obj.created_by, "last_name", None)
-
-    # Created by fields
-    def get_created_by_name(self, obj):
-        return self.get_provider_name(obj)
-
-    def get_created_by_first_name(self, obj):
-        return self.get_provider_first_name(obj)
-
-    def get_created_by_last_name(self, obj):
-        return self.get_provider_last_name(obj)
 
     def create(self, validated):
         req = self.context.get("request")
@@ -261,7 +291,5 @@ class AmendmentSerializer(serializers.ModelSerializer):
         return getattr(u, "username", None) or getattr(u, "email", None)
 
     def get_attachments(self, obj):
-        # The view can inject a pre-serialized mapping for efficiency:
-        # { amendment_id: [FileSerializer(...).data, ...] }
         m = self.context.get("attachments_map") or {}
         return m.get(obj.id, [])
