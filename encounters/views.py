@@ -6,7 +6,7 @@ from rest_framework.decorators import action
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework_simplejwt.authentication import JWTAuthentication
-
+from accounts.models import User
 from appointments.models import Appointment
 from appointments.enums import ApptStatus
 from patients.models import Patient
