@@ -248,26 +248,55 @@ class EncounterViewSet(
     @action(detail=True, methods=["post"], url_path="assign_provider")
     def assign_provider(self, request, pk=None):
         """
-        Assign the current user as the provider (doctor) for this encounter.
-        Called when a doctor takes over from a nurse's initial assessment.
+        Assign a doctor as the provider for this encounter.
+        Can be called by nurses to assign a doctor, or by doctors to assign themselves.
         """
         enc = self.get_object()
         self.permission_classes = [IsAuthenticated, IsStaff]
         self.check_permissions(request)
 
-        user_role = getattr(request.user, "role", "").upper()
+        # Get the provider ID from request body (if provided)
+        provider_id = request.data.get("provider")
         
-        # Only doctors, admins, or super admins can be assigned as providers
-        if user_role not in (UserRole.DOCTOR, UserRole.ADMIN, UserRole.SUPER_ADMIN):
-            return Response(
-                {"detail": "Only doctors or admins can be assigned as providers."},
-                status=403,
-            )
-
-        # Assign provider if not already set
-        if not enc.provider:
+        if provider_id:
+            # Nurse is assigning a specific doctor
+            try:
+                provider = User.objects.get(id=provider_id)
+                
+                # Verify the provider being assigned is a doctor/admin
+                provider_role = getattr(provider, "role", "").upper()
+                if provider_role not in (UserRole.DOCTOR, UserRole.ADMIN, UserRole.SUPER_ADMIN):
+                    return Response(
+                        {"detail": "Only doctors can be assigned as providers."},
+                        status=400,
+                    )
+                
+                # Verify provider is in same facility (if applicable)
+                if request.user.facility_id and provider.facility_id != request.user.facility_id:
+                    return Response(
+                        {"detail": "Can only assign providers from your facility."},
+                        status=403,
+                    )
+                
+                enc.provider = provider
+            except User.DoesNotExist:
+                return Response(
+                    {"detail": "Provider not found."},
+                    status=404,
+                )
+        else:
+            # Doctor is assigning themselves
+            user_role = getattr(request.user, "role", "").upper()
+            
+            if user_role not in (UserRole.DOCTOR, UserRole.ADMIN, UserRole.SUPER_ADMIN):
+                return Response(
+                    {"detail": "Only doctors or admins can assign themselves as providers."},
+                    status=403,
+                )
+            
             enc.provider = request.user
-            enc.save(update_fields=["provider", "updated_at"])
+
+        enc.save(update_fields=["provider", "updated_at"])
 
         return Response(EncounterSerializer(enc, context={"request": request}).data)
     # ─────────────────────────────────────────────────────────────
