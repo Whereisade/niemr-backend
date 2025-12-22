@@ -251,54 +251,100 @@ class EncounterViewSet(
         Assign a doctor as the provider for this encounter.
         Can be called by nurses to assign a doctor, or by doctors to assign themselves.
         """
-        enc = self.get_object()
-        self.permission_classes = [IsAuthenticated, IsStaff]
-        self.check_permissions(request)
-
-        # Get the provider ID from request body (if provided)
-        provider_id = request.data.get("provider")
+        import traceback
+        import logging
+        logger = logging.getLogger(__name__)
         
-        if provider_id:
-            # Nurse is assigning a specific doctor
-            try:
-                provider = User.objects.get(id=provider_id)
-                
-                # Verify the provider being assigned is a doctor/admin
-                provider_role = getattr(provider, "role", "").upper()
-                if provider_role not in (UserRole.DOCTOR, UserRole.ADMIN, UserRole.SUPER_ADMIN):
+        try:
+            enc = self.get_object()
+            self.permission_classes = [IsAuthenticated, IsStaff]
+            self.check_permissions(request)
+
+            # Get the provider ID from request body (if provided)
+            provider_id = request.data.get("provider")
+            logger.info(f"assign_provider called with provider_id={provider_id}, user={request.user.id}")
+            
+            if provider_id:
+                # Nurse is assigning a specific doctor
+                try:
+                    logger.info(f"Attempting to fetch User with id={provider_id}")
+                    
+                    # Check if User model is importable
+                    from accounts.models import User as UserModel
+                    logger.info(f"User model imported successfully: {UserModel}")
+                    
+                    provider = UserModel.objects.get(id=provider_id)
+                    logger.info(f"Found provider: {provider.id}, {provider.email}, role={provider.role}")
+                    
+                    # Verify the provider being assigned is a doctor/admin
+                    provider_role = getattr(provider, "role", "")
+                    logger.info(f"Provider role: '{provider_role}' (type: {type(provider_role)})")
+                    
+                    # Import UserRole to compare
+                    from accounts.enums import UserRole as UR
+                    logger.info(f"UserRole values: DOCTOR={UR.DOCTOR}, ADMIN={UR.ADMIN}, SUPER_ADMIN={UR.SUPER_ADMIN}")
+                    
+                    if provider_role not in (UR.DOCTOR, UR.ADMIN, UR.SUPER_ADMIN):
+                        logger.warning(f"Provider role '{provider_role}' not in allowed roles")
+                        return Response(
+                            {"detail": f"Only doctors can be assigned as providers. Provider role is: {provider_role}"},
+                            status=400,
+                        )
+                    
+                    # Verify provider is in same facility (if applicable)
+                    if request.user.facility_id:
+                        logger.info(f"Checking facility: user.facility_id={request.user.facility_id}, provider.facility_id={provider.facility_id}")
+                        if provider.facility_id != request.user.facility_id:
+                            return Response(
+                                {"detail": "Can only assign providers from your facility."},
+                                status=403,
+                            )
+                    
+                    enc.provider = provider
+                    logger.info(f"Provider assigned successfully")
+                    
+                except UserModel.DoesNotExist:
+                    logger.error(f"User with id={provider_id} not found")
                     return Response(
-                        {"detail": "Only doctors can be assigned as providers."},
+                        {"detail": "Provider not found."},
+                        status=404,
+                    )
+                except Exception as e:
+                    logger.error(f"Error in provider assignment: {str(e)}")
+                    logger.error(traceback.format_exc())
+                    return Response(
+                        {"detail": f"Error assigning provider: {str(e)}"},
                         status=400,
                     )
+            else:
+                # Doctor is assigning themselves
+                user_role = getattr(request.user, "role", "")
+                logger.info(f"Self-assignment by user {request.user.id}, role={user_role}")
                 
-                # Verify provider is in same facility (if applicable)
-                if request.user.facility_id and provider.facility_id != request.user.facility_id:
+                from accounts.enums import UserRole as UR
+                if user_role not in (UR.DOCTOR, UR.ADMIN, UR.SUPER_ADMIN):
                     return Response(
-                        {"detail": "Can only assign providers from your facility."},
+                        {"detail": "Only doctors or admins can assign themselves as providers."},
                         status=403,
                     )
                 
-                enc.provider = provider
-            except User.DoesNotExist:
-                return Response(
-                    {"detail": "Provider not found."},
-                    status=404,
-                )
-        else:
-            # Doctor is assigning themselves
-            user_role = getattr(request.user, "role", "").upper()
-            
-            if user_role not in (UserRole.DOCTOR, UserRole.ADMIN, UserRole.SUPER_ADMIN):
-                return Response(
-                    {"detail": "Only doctors or admins can assign themselves as providers."},
-                    status=403,
-                )
-            
-            enc.provider = request.user
+                enc.provider = request.user
+                logger.info(f"Self-assigned successfully")
 
-        enc.save(update_fields=["provider", "updated_at"])
+            enc.save(update_fields=["provider", "updated_at"])
+            logger.info(f"Encounter {enc.id} saved with provider {enc.provider_id}")
 
-        return Response(EncounterSerializer(enc, context={"request": request}).data)
+            serializer = EncounterSerializer(enc, context={"request": request})
+            logger.info("Serializer created, returning response")
+            return Response(serializer.data)
+            
+        except Exception as e:
+            logger.error(f"Unexpected error in assign_provider: {str(e)}")
+            logger.error(traceback.format_exc())
+            return Response(
+                {"detail": f"Unexpected error: {str(e)}"},
+                status=500,
+            )
     # ─────────────────────────────────────────────────────────────
     # Lab wait controls
     # ─────────────────────────────────────────────────────────────
