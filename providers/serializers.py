@@ -49,6 +49,7 @@ class ProviderProfileSerializer(serializers.ModelSerializer):
     last_name = serializers.CharField(source="user.last_name", read_only=True)
     email = serializers.EmailField(source="user.email", read_only=True)
     role = serializers.SerializerMethodField(read_only=True)
+    user_role = serializers.CharField(source="user.role", read_only=True)  # 🆕 Actual User.role from accounts
     facility_name = serializers.CharField(
         source="user.facility.name",
         read_only=True,
