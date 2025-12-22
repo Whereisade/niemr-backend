@@ -1,6 +1,6 @@
 from django.utils.dateparse import parse_datetime
 from django.utils import timezone
-from django.db.models import Q
+from django.db.models import Q, Case, When, IntegerField, Value
 from rest_framework import viewsets, mixins, status
 from rest_framework.decorators import action
 from rest_framework.permissions import IsAuthenticated
@@ -112,7 +112,54 @@ class AppointmentViewSet(
                 )
             # 'all' or unknown values = no date filter
 
-        return q.order_by("start_at", "id")
+        # Order list with active (new/current) appointments first
+        status_rank = Case(
+            When(status__iexact=ApptStatus.CHECKED_IN, then=Value(0)),
+            When(status__iexact=ApptStatus.SCHEDULED, then=Value(1)),
+            When(status__iexact=ApptStatus.COMPLETED, then=Value(2)),
+            When(status__iexact=ApptStatus.CANCELLED, then=Value(3)),
+            When(status__iexact=ApptStatus.NO_SHOW, then=Value(4)),
+            default=Value(99),
+            output_field=IntegerField(),
+        )
+
+        return q.annotate(_status_rank=status_rank).order_by("_status_rank", "start_at", "id")
+
+
+    def _attach_prefetched_encounters(self, appts):
+        """Attach Encounter objects to each appointment (as _prefetched_encounter) to avoid N+1."""
+        try:
+            from encounters.models import Encounter
+        except Exception:
+            return
+
+        encounter_ids = [a.encounter_id for a in appts if getattr(a, "encounter_id", None)]
+        if not encounter_ids:
+            return
+
+        enc_map = {
+            e.id: e
+            for e in Encounter.objects.filter(id__in=encounter_ids).select_related("nurse", "provider")
+        }
+
+        for a in appts:
+            if getattr(a, "encounter_id", None):
+                a._prefetched_encounter = enc_map.get(a.encounter_id)
+
+    def list(self, request, *args, **kwargs):
+        queryset = self.filter_queryset(self.get_queryset())
+
+        page = self.paginate_queryset(queryset)
+        if page is not None:
+            # page is already a list
+            self._attach_prefetched_encounters(page)
+            serializer = self.get_serializer(page, many=True)
+            return self.get_paginated_response(serializer.data)
+
+        objs = list(queryset)
+        self._attach_prefetched_encounters(objs)
+        serializer = self.get_serializer(objs, many=True)
+        return Response(serializer.data)
 
     def create(self, request, *args, **kwargs):
         """

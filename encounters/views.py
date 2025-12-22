@@ -332,6 +332,21 @@ class EncounterViewSet(
                 logger.info(f"Self-assigned successfully")
 
             enc.save(update_fields=["provider", "updated_at"])
+
+
+            # Keep the appointment record in sync so the facility appointment list
+            # reflects the doctor assigned during the encounter workflow.
+            try:
+                if enc.appointment_id and enc.provider_id:
+                    from appointments.models import Appointment
+
+                    appt = Appointment.objects.filter(id=enc.appointment_id).first()
+                    if appt and appt.provider_id != enc.provider_id:
+                        appt.provider_id = enc.provider_id
+                        appt.save(update_fields=["provider", "updated_at"])
+            except Exception:
+                # Never fail provider assignment because appointment sync failed
+                pass
             logger.info(f"Encounter {enc.id} saved with provider {enc.provider_id}")
 
             serializer = EncounterSerializer(enc, context={"request": request})

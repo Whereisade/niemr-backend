@@ -1,4 +1,3 @@
-from datetime import timedelta
 from django.db.models import Q
 from rest_framework import serializers
 
@@ -7,20 +6,37 @@ from .enums import ApptStatus
 from facilities.models import Facility
 
 
+def _get_user_name(user):
+    """Best-effort full name for display."""
+    if not user:
+        return None
+    first = getattr(user, "first_name", "") or ""
+    last = getattr(user, "last_name", "") or ""
+    full = f"{first} {last}".strip()
+    return full if full else (getattr(user, "email", None) or str(user))
+
+
+def _get_prefetched_encounter(obj):
+    """Use encounter object attached by the viewset to avoid N+1 lookups."""
+    return getattr(obj, "_prefetched_encounter", None)
+
+
 class AppointmentSerializer(serializers.ModelSerializer):
-    """
-    Full appointment serializer with display fields for patient, provider, facility,
-    and linked encounter information.
-    """
+    """Full appointment serializer with display fields + linked encounter info."""
+
     # Display-only fields
     patient_name = serializers.SerializerMethodField(read_only=True)
     provider_name = serializers.SerializerMethodField(read_only=True)
     facility_name = serializers.SerializerMethodField(read_only=True)
-    
+
+    # NEW: nurse display (derived from linked encounter)
+    nurse = serializers.SerializerMethodField(read_only=True)
+    nurse_name = serializers.SerializerMethodField(read_only=True)
+
     # Encounter linking info
     has_encounter = serializers.SerializerMethodField(read_only=True)
     encounter_status = serializers.SerializerMethodField(read_only=True)
-    
+
     # Computed fields for UI
     can_start_encounter = serializers.SerializerMethodField(read_only=True)
     available_actions = serializers.SerializerMethodField(read_only=True)
@@ -35,6 +51,8 @@ class AppointmentSerializer(serializers.ModelSerializer):
             "facility_name",
             "provider",
             "provider_name",
+            "nurse",
+            "nurse_name",
             "created_by",
             "appt_type",
             "status",
@@ -62,7 +80,6 @@ class AppointmentSerializer(serializers.ModelSerializer):
         ]
 
     def get_patient_name(self, obj):
-        """Return 'First Last' for the patient if available."""
         if not obj.patient_id:
             return None
         first = getattr(obj.patient, "first_name", "") or ""
@@ -70,103 +87,100 @@ class AppointmentSerializer(serializers.ModelSerializer):
         name = (first + " " + last).strip()
         return name or str(obj.patient)
 
-    def get_provider_name(self, obj):
-        """Return 'First Last' for the provider if available."""
-        if not obj.provider_id:
-            return None
-        first = getattr(obj.provider, "first_name", "") or ""
-        last = getattr(obj.provider, "last_name", "") or ""
-        name = (first + " " + last).strip()
-        if name:
-            return name
-        return getattr(obj.provider, "email", None) or str(obj.provider)
-
     def get_facility_name(self, obj):
-        """Return facility name for display."""
         if not obj.facility_id:
             return None
         return getattr(obj.facility, "name", None) or str(obj.facility)
 
+    def get_provider_name(self, obj):
+        """
+        Provider column should reflect the doctor assigned to the linked encounter
+        (when present), otherwise fall back to appointment.provider.
+        """
+        enc = _get_prefetched_encounter(obj)
+        if enc and getattr(enc, "provider", None):
+            return _get_user_name(enc.provider)
+
+        # Fallback to appointment.provider
+        if not obj.provider_id:
+            return None
+        return _get_user_name(obj.provider)
+
+    def get_nurse(self, obj):
+        enc = _get_prefetched_encounter(obj)
+        return getattr(enc, "nurse_id", None) if enc else None
+
+    def get_nurse_name(self, obj):
+        enc = _get_prefetched_encounter(obj)
+        if enc and getattr(enc, "nurse", None):
+            return _get_user_name(enc.nurse)
+
+        # Fallback (no prefetched encounter): quick lookup by encounter_id
+        if not obj.encounter_id:
+            return None
+        try:
+            from encounters.models import Encounter
+
+            enc2 = (
+                Encounter.objects.filter(id=obj.encounter_id)
+                .select_related("nurse")
+                .only("id", "nurse_id", "nurse__first_name", "nurse__last_name", "nurse__email")
+                .first()
+            )
+            return _get_user_name(enc2.nurse) if enc2 and enc2.nurse_id else None
+        except Exception:
+            return None
+
     def get_has_encounter(self, obj):
-        """Check if appointment has a linked encounter."""
         return obj.encounter_id is not None
 
     def get_encounter_status(self, obj):
-        """
-        Return the linked encounter's status if one exists.
-        Uses prefetched data if available, otherwise does a lookup.
-        """
         if not obj.encounter_id:
             return None
-        
-        # Try to use prefetched encounter if available
-        encounter = getattr(obj, "_prefetched_encounter", None)
-        if encounter:
-            return encounter.status
-        
-        # Fallback: do a lookup (avoid N+1 by using select_related in queryset)
+
+        enc = _get_prefetched_encounter(obj)
+        if enc is not None:
+            return getattr(enc, "status", None)
+
         try:
             from encounters.models import Encounter
-            enc = Encounter.objects.filter(id=obj.encounter_id).values("status").first()
-            return enc.get("status") if enc else None
+
+            row = Encounter.objects.filter(id=obj.encounter_id).values("status").first()
+            return row.get("status") if row else None
         except Exception:
             return None
 
     def get_can_start_encounter(self, obj):
-        """
-        Determine if an encounter can be started for this appointment.
-        
-        Cannot start encounter if:
-        - Appointment is CANCELLED, COMPLETED, or NO_SHOW
-        - Appointment already has an active encounter (not CLOSED/CROSSED_OUT)
-        """
-        # Cannot start on terminal appointment statuses
         if obj.status in (ApptStatus.CANCELLED, ApptStatus.COMPLETED, ApptStatus.NO_SHOW):
             return False
-        
-        # If no encounter linked, can start
+
         if not obj.encounter_id:
             return True
-        
-        # If encounter exists, check its status
+
         enc_status = self.get_encounter_status(obj)
         if enc_status is None:
-            return True  # Encounter was deleted or doesn't exist
-        
-        # Can only start new encounter if previous is closed/crossed out
+            return True
+
         return enc_status in ("CLOSED", "CROSSED_OUT")
 
     def get_available_actions(self, obj):
-        """
-        Return list of available status transition actions based on current state.
-        
-        This centralizes the logic that was previously duplicated in frontend.
-        """
         status = obj.status
         enc_status = self.get_encounter_status(obj)
-        
-        # Terminal states - no actions
+
         if status in (ApptStatus.COMPLETED, ApptStatus.CANCELLED, ApptStatus.NO_SHOW):
             return []
-        
-        actions = []
-        
+
         if status == ApptStatus.SCHEDULED:
-            # If encounter is active, only allow cancel (patient left without being seen)
             if enc_status and enc_status not in ("CLOSED", "CROSSED_OUT"):
-                actions = ["cancel"]
-            else:
-                actions = ["check_in", "cancel", "no_show"]
-        
-        elif status == ApptStatus.CHECKED_IN:
-            # Once checked in, can complete or cancel
-            # If encounter is in progress, they should use encounter close
+                return ["cancel"]
+            return ["check_in", "cancel", "no_show"]
+
+        if status == ApptStatus.CHECKED_IN:
             if enc_status and enc_status not in ("CLOSED", "CROSSED_OUT"):
-                actions = ["cancel"]  # Can still cancel if patient leaves
-            else:
-                actions = ["complete", "cancel"]
-        
-        return actions
+                return ["cancel"]
+            return ["complete", "cancel"]
+
+        return []
 
     def validate(self, attrs):
         """
@@ -251,10 +265,8 @@ class AppointmentSerializer(serializers.ModelSerializer):
 
 
 class AppointmentUpdateSerializer(AppointmentSerializer):
-    """
-    Serializer for updating appointments.
-    Prevents changing facility after creation.
-    """
+    """Serializer for updating appointments. Prevents changing facility after creation."""
+
     class Meta(AppointmentSerializer.Meta):
         read_only_fields = [
             "facility",
@@ -265,12 +277,16 @@ class AppointmentUpdateSerializer(AppointmentSerializer):
 
 
 class AppointmentListSerializer(serializers.ModelSerializer):
-    """
-    Lightweight serializer for list views with essential display fields.
-    """
+    """Lightweight serializer for list views with essential display fields."""
+
     patient_name = serializers.SerializerMethodField(read_only=True)
     provider_name = serializers.SerializerMethodField(read_only=True)
     facility_name = serializers.SerializerMethodField(read_only=True)
+
+    # NEW: nurse display (derived from linked encounter)
+    nurse = serializers.SerializerMethodField(read_only=True)
+    nurse_name = serializers.SerializerMethodField(read_only=True)
+
     has_encounter = serializers.SerializerMethodField(read_only=True)
     encounter_status = serializers.SerializerMethodField(read_only=True)
     can_start_encounter = serializers.SerializerMethodField(read_only=True)
@@ -286,6 +302,8 @@ class AppointmentListSerializer(serializers.ModelSerializer):
             "facility_name",
             "provider",
             "provider_name",
+            "nurse",
+            "nurse_name",
             "appt_type",
             "status",
             "reason",
@@ -307,20 +325,43 @@ class AppointmentListSerializer(serializers.ModelSerializer):
         name = (first + " " + last).strip()
         return name or str(obj.patient)
 
-    def get_provider_name(self, obj):
-        if not obj.provider_id:
-            return None
-        first = getattr(obj.provider, "first_name", "") or ""
-        last = getattr(obj.provider, "last_name", "") or ""
-        name = (first + " " + last).strip()
-        if name:
-            return name
-        return getattr(obj.provider, "email", None) or str(obj.provider)
-
     def get_facility_name(self, obj):
         if not obj.facility_id:
             return None
         return getattr(obj.facility, "name", None) or str(obj.facility)
+
+    def get_provider_name(self, obj):
+        enc = _get_prefetched_encounter(obj)
+        if enc and getattr(enc, "provider", None):
+            return _get_user_name(enc.provider)
+
+        if not obj.provider_id:
+            return None
+        return _get_user_name(obj.provider)
+
+    def get_nurse(self, obj):
+        enc = _get_prefetched_encounter(obj)
+        return getattr(enc, "nurse_id", None) if enc else None
+
+    def get_nurse_name(self, obj):
+        enc = _get_prefetched_encounter(obj)
+        if enc and getattr(enc, "nurse", None):
+            return _get_user_name(enc.nurse)
+
+        if not obj.encounter_id:
+            return None
+        try:
+            from encounters.models import Encounter
+
+            enc2 = (
+                Encounter.objects.filter(id=obj.encounter_id)
+                .select_related("nurse")
+                .only("id", "nurse_id", "nurse__first_name", "nurse__last_name", "nurse__email")
+                .first()
+            )
+            return _get_user_name(enc2.nurse) if enc2 and enc2.nurse_id else None
+        except Exception:
+            return None
 
     def get_has_encounter(self, obj):
         return obj.encounter_id is not None
@@ -328,10 +369,16 @@ class AppointmentListSerializer(serializers.ModelSerializer):
     def get_encounter_status(self, obj):
         if not obj.encounter_id:
             return None
+
+        enc = _get_prefetched_encounter(obj)
+        if enc is not None:
+            return getattr(enc, "status", None)
+
         try:
             from encounters.models import Encounter
-            enc = Encounter.objects.filter(id=obj.encounter_id).values("status").first()
-            return enc.get("status") if enc else None
+
+            row = Encounter.objects.filter(id=obj.encounter_id).values("status").first()
+            return row.get("status") if row else None
         except Exception:
             return None
 
@@ -348,21 +395,18 @@ class AppointmentListSerializer(serializers.ModelSerializer):
     def get_available_actions(self, obj):
         status = obj.status
         enc_status = self.get_encounter_status(obj)
-        
+
         if status in (ApptStatus.COMPLETED, ApptStatus.CANCELLED, ApptStatus.NO_SHOW):
             return []
-        
-        actions = []
-        
+
         if status == ApptStatus.SCHEDULED:
             if enc_status and enc_status not in ("CLOSED", "CROSSED_OUT"):
-                actions = ["cancel"]
-            else:
-                actions = ["check_in", "cancel", "no_show"]
-        elif status == ApptStatus.CHECKED_IN:
+                return ["cancel"]
+            return ["check_in", "cancel", "no_show"]
+
+        if status == ApptStatus.CHECKED_IN:
             if enc_status and enc_status not in ("CLOSED", "CROSSED_OUT"):
-                actions = ["cancel"]
-            else:
-                actions = ["complete", "cancel"]
-        
-        return actions
+                return ["cancel"]
+            return ["complete", "cancel"]
+
+        return []
