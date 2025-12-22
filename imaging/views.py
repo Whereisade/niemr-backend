@@ -17,6 +17,7 @@ from .permissions import IsStaff, CanViewRequest
 from .enums import RequestStatus
 from .services.notify import notify_report_ready
 from notifications.services.notify import notify_user
+from notifications.enums import Topic, Priority
 
 class ProcedureViewSet(viewsets.GenericViewSet, mixins.ListModelMixin, mixins.CreateModelMixin):
     queryset = ImagingProcedure.objects.filter(is_active=True).order_by("name")
@@ -171,11 +172,26 @@ class ImagingRequestViewSet(viewsets.GenericViewSet,
         if req.patient and req.patient.user_id:
             notify_user(
                 user=req.patient.user,
-                topic="IMAGING_REPORT_READY",
+                topic=Topic.IMAGING_REPORT_READY,
+                priority=Priority.NORMAL,
                 title="Your imaging report is ready",
                 body=f"Report for {req.procedure.name} is available.",
                 data={"request_id": req.id},
                 facility_id=req.facility_id,
+            )
+
+        # Ordering clinician (in-app)
+        if getattr(req, "requested_by_id", None):
+            notify_user(
+                user=req.requested_by,
+                topic=Topic.IMAGING_REPORT_READY,
+                priority=Priority.HIGH,
+                title="Imaging report ready",
+                body=f"Imaging request #{req.id} report is ready for review.",
+                data={"request_id": req.id, "patient_id": req.patient_id},
+                facility_id=req.facility_id,
+                action_url="/facility/imaging",
+                group_key=f"IMAGING:{req.id}:READY",
             )
 
         return Response(ImagingReportSerializer(rep).data, status=201)

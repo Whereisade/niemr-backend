@@ -32,6 +32,9 @@ from .serializers import (
 from .permissions import IsSelfProvider, IsAdmin
 from .enums import VerificationStatus
 
+from notifications.services.notify import notify_users
+from notifications.enums import Topic, Priority
+
 
 class ProviderViewSet(
     viewsets.GenericViewSet,
@@ -301,6 +304,32 @@ def apply_to_facility(request):
     )
     serializer.is_valid(raise_exception=True)
     application = serializer.save()  # or pass account if your serializer expects it
+
+    # In-app notification to facility admins/frontdesk
+    try:
+        facility_id = application.facility_id
+        applicant = getattr(application.provider, "user", None)
+        applicant_name = getattr(applicant, "full_name", None) or getattr(applicant, "email", "A provider")
+
+        if facility_id:
+            recipients = User.objects.filter(
+                facility_id=facility_id,
+                role__in=[UserRole.SUPER_ADMIN, UserRole.ADMIN, UserRole.FRONTDESK],
+            ).distinct()
+
+            notify_users(
+                users=recipients,
+                topic=Topic.STAFF_ASSIGNED,
+                priority=Priority.NORMAL,
+                title="New provider application",
+                body=f"{applicant_name} applied to join your facility.",
+                facility_id=facility_id,
+                data={"application_id": application.id, "provider_id": application.provider_id, "facility_id": facility_id},
+                action_url="/facility/providers",
+                group_key=f"FACILITY_APP:{application.id}",
+            )
+    except Exception:
+        pass
 
     return Response(
         ProviderFacilityApplicationSerializer(application).data,

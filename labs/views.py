@@ -12,6 +12,7 @@ from rest_framework_simplejwt.authentication import JWTAuthentication
 
 from accounts.enums import UserRole
 from notifications.services.notify import notify_user
+from notifications.enums import Topic, Priority
 
 from .enums import OrderStatus
 from .models import LabTest, LabOrder, LabOrderItem
@@ -265,11 +266,26 @@ class LabOrderViewSet(
             if order.patient and getattr(order.patient, "user_id", None):
                 notify_user(
                     user=order.patient.user,
-                    topic="LAB_RESULT_READY",
+                    topic=Topic.LAB_RESULT_READY,
+                    priority=Priority.NORMAL,
                     title="Your lab result is ready",
                     body=f"Lab order #{order.id} now has results.",
                     data={"order_id": order.id},
                     facility_id=order.facility_id,
+                )
+
+            # Ordering clinician
+            if getattr(order, "ordered_by_id", None):
+                notify_user(
+                    user=order.ordered_by,
+                    topic=Topic.LAB_RESULT_READY,
+                    priority=Priority.HIGH,
+                    title="Lab results ready",
+                    body=f"Lab order #{order.id} results are ready for review.",
+                    data={"order_id": order.id, "patient_id": order.patient_id},
+                    facility_id=order.facility_id,
+                    action_url="/facility/labs",
+                    group_key=f"LAB:{order.id}:READY",
                 )
 
         return Response(LabOrderItemReadSerializer(item).data)

@@ -6,6 +6,7 @@ from rest_framework.decorators import action
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework_simplejwt.authentication import JWTAuthentication
+from django.contrib.auth import get_user_model
 
 from .models import Appointment
 from .serializers import (
@@ -16,7 +17,11 @@ from .serializers import (
 from .permissions import IsStaff, CanViewAppointment
 from .enums import ApptStatus
 from .services.notify import send_confirmation, send_reminder
-from notifications.services.notify import notify_user
+from notifications.services.notify import notify_user, notify_users
+from notifications.enums import Topic, Priority
+from accounts.enums import UserRole
+
+User = get_user_model()
 
 
 class AppointmentViewSet(
@@ -250,6 +255,76 @@ class AppointmentViewSet(
         except Exception:
             pass
 
+        # In-app notifications (facility staff + provider + patient)
+        try:
+            appt = Appointment.objects.select_related(
+                "patient", "facility", "provider", "patient__user"
+            ).get(id=resp.data["id"])
+
+            facility_id = appt.facility_id
+            patient_name = getattr(appt.patient, "full_name", None) or f"Patient #{appt.patient_id}"
+            when = appt.start_at.strftime("%Y-%m-%d %H:%M") if appt.start_at else ""
+
+            title = "New appointment scheduled"
+            body = f"{patient_name} • {when}\nReason: {appt.reason or '-'}"
+            data_payload = {"appointment_id": appt.id, "patient_id": appt.patient_id}
+            group_key = f"APPT:{appt.id}:CREATED"
+
+            # Provider
+            if appt.provider_id:
+                notify_user(
+                    user=appt.provider,
+                    topic=Topic.APPOINTMENT_CONFIRMED,
+                    priority=Priority.NORMAL,
+                    title=title,
+                    body=body,
+                    facility_id=facility_id,
+                    data=data_payload,
+                    action_url="/facility/appointments",
+                    group_key=group_key,
+                )
+
+            # Facility staff
+            if facility_id:
+                staff_roles = [
+                    UserRole.SUPER_ADMIN,
+                    UserRole.ADMIN,
+                    UserRole.FRONTDESK,
+                    UserRole.NURSE,
+                ]
+                staff_users = (
+                    User.objects.filter(facility_id=facility_id, role__in=staff_roles)
+                    .exclude(id=appt.provider_id)
+                    .distinct()
+                )
+                notify_users(
+                    users=staff_users,
+                    topic=Topic.APPOINTMENT_CONFIRMED,
+                    priority=Priority.NORMAL,
+                    title=title,
+                    body=body,
+                    facility_id=facility_id,
+                    data=data_payload,
+                    action_url="/facility/appointments",
+                    group_key=group_key,
+                )
+
+            # Patient
+            if getattr(appt.patient, "user_id", None):
+                notify_user(
+                    user=appt.patient.user,
+                    topic=Topic.APPOINTMENT_CONFIRMED,
+                    priority=Priority.LOW,
+                    title="Appointment booked",
+                    body=f"Your appointment is scheduled for {when}.",
+                    facility_id=facility_id,
+                    data=data_payload,
+                    action_url="/patient/appointments",
+                    group_key=group_key,
+                )
+        except Exception:
+            pass
+
         return resp
 
     def retrieve(self, request, *args, **kwargs):
@@ -285,6 +360,37 @@ class AppointmentViewSet(
         appt.status = ApptStatus.CHECKED_IN
         appt.save(update_fields=["status", "updated_at"])
 
+        try:
+            when = appt.start_at.strftime("%Y-%m-%d %H:%M") if appt.start_at else ""
+            payload = {"appointment_id": appt.id, "patient_id": appt.patient_id}
+            group_key = f"APPT:{appt.id}:CHECKED_IN"
+            if appt.provider_id:
+                notify_user(
+                    user=appt.provider,
+                    topic=Topic.APPOINTMENT_CHECKED_IN,
+                    priority=Priority.HIGH,
+                    title="Patient checked-in",
+                    body=f"Appointment {when} has been checked-in.",
+                    facility_id=appt.facility_id,
+                    data=payload,
+                    action_url="/facility/appointments",
+                    group_key=group_key,
+                )
+            if appt.patient and appt.patient.user_id:
+                notify_user(
+                    user=appt.patient.user,
+                    topic=Topic.APPOINTMENT_CHECKED_IN,
+                    priority=Priority.LOW,
+                    title="Checked-in",
+                    body=f"You have been checked-in for your appointment ({when}).",
+                    facility_id=appt.facility_id,
+                    data=payload,
+                    action_url="/patient/appointments",
+                    group_key=group_key,
+                )
+        except Exception:
+            pass
+
         return Response(
             AppointmentSerializer(appt, context={"request": request}).data
         )
@@ -307,6 +413,37 @@ class AppointmentViewSet(
 
         appt.status = ApptStatus.COMPLETED
         appt.save(update_fields=["status", "updated_at"])
+
+        try:
+            when = appt.start_at.strftime("%Y-%m-%d %H:%M") if appt.start_at else ""
+            payload = {"appointment_id": appt.id, "patient_id": appt.patient_id}
+            group_key = f"APPT:{appt.id}:COMPLETED"
+            if appt.provider_id:
+                notify_user(
+                    user=appt.provider,
+                    topic=Topic.APPOINTMENT_COMPLETED,
+                    priority=Priority.NORMAL,
+                    title="Appointment completed",
+                    body=f"Appointment {when} has been marked completed.",
+                    facility_id=appt.facility_id,
+                    data=payload,
+                    action_url="/facility/appointments",
+                    group_key=group_key,
+                )
+            if appt.patient and appt.patient.user_id:
+                notify_user(
+                    user=appt.patient.user,
+                    topic=Topic.APPOINTMENT_COMPLETED,
+                    priority=Priority.LOW,
+                    title="Appointment completed",
+                    body="Your appointment has been completed.",
+                    facility_id=appt.facility_id,
+                    data=payload,
+                    action_url="/patient/appointments",
+                    group_key=group_key,
+                )
+        except Exception:
+            pass
 
         # Also close linked encounter if it's still open
         if appt.encounter_id:
@@ -365,6 +502,55 @@ class AppointmentViewSet(
         appt.status = ApptStatus.CANCELLED
         appt.save(update_fields=["status", "updated_at"])
 
+        try:
+            when = appt.start_at.strftime("%Y-%m-%d %H:%M") if appt.start_at else ""
+            payload = {"appointment_id": appt.id, "patient_id": appt.patient_id}
+            group_key = f"APPT:{appt.id}:CANCELLED"
+
+            if appt.provider_id:
+                notify_user(
+                    user=appt.provider,
+                    topic=Topic.APPOINTMENT_CANCELLED,
+                    priority=Priority.NORMAL,
+                    title="Appointment cancelled",
+                    body=f"An appointment ({when}) was cancelled.",
+                    facility_id=appt.facility_id,
+                    data=payload,
+                    action_url="/facility/appointments",
+                    group_key=group_key,
+                )
+
+            if appt.patient and appt.patient.user_id:
+                notify_user(
+                    user=appt.patient.user,
+                    topic=Topic.APPOINTMENT_CANCELLED,
+                    priority=Priority.LOW,
+                    title="Appointment cancelled",
+                    body="Your appointment was cancelled.",
+                    facility_id=appt.facility_id,
+                    data=payload,
+                    action_url="/patient/appointments",
+                    group_key=group_key,
+                )
+
+            # If a patient cancelled, let facility frontdesk/admin know.
+            if request.user.role == "PATIENT" and appt.facility_id:
+                staff_roles = [UserRole.SUPER_ADMIN, UserRole.ADMIN, UserRole.FRONTDESK]
+                staff_users = User.objects.filter(facility_id=appt.facility_id, role__in=staff_roles).distinct()
+                notify_users(
+                    users=staff_users,
+                    topic=Topic.APPOINTMENT_CANCELLED,
+                    priority=Priority.NORMAL,
+                    title="Appointment cancelled by patient",
+                    body=f"Appointment ({when}) was cancelled by a patient.",
+                    facility_id=appt.facility_id,
+                    data=payload,
+                    action_url="/facility/appointments",
+                    group_key=group_key,
+                )
+        except Exception:
+            pass
+
         return Response(
             AppointmentSerializer(appt, context={"request": request}).data
         )
@@ -384,6 +570,25 @@ class AppointmentViewSet(
 
         appt.status = ApptStatus.NO_SHOW
         appt.save(update_fields=["status", "updated_at"])
+
+        try:
+            when = appt.start_at.strftime("%Y-%m-%d %H:%M") if appt.start_at else ""
+            payload = {"appointment_id": appt.id, "patient_id": appt.patient_id}
+            group_key = f"APPT:{appt.id}:NO_SHOW"
+            if appt.provider_id:
+                notify_user(
+                    user=appt.provider,
+                    topic=Topic.APPOINTMENT_NO_SHOW,
+                    priority=Priority.NORMAL,
+                    title="Appointment no-show",
+                    body=f"Patient did not show for {when}.",
+                    facility_id=appt.facility_id,
+                    data=payload,
+                    action_url="/facility/appointments",
+                    group_key=group_key,
+                )
+        except Exception:
+            pass
 
         return Response(
             AppointmentSerializer(appt, context={"request": request}).data

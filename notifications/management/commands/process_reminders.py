@@ -1,177 +1,96 @@
-# notifications/management/commands/process_reminders.py
-"""
-Management command to process and send due reminders.
+"""notifications.management.commands.process_reminders
+
+Processes due reminders and turns them into in-app notifications for the assigned nurse.
+
+Run periodically (cron / Celery beat), e.g. every 1-5 minutes.
 
 Usage:
-    python manage.py process_reminders                # Process all due reminders
-    python manage.py process_reminders --dry-run     # Show what would be processed
-    python manage.py process_reminders --lookahead 15 # Include reminders due within 15 minutes
-
-This command should be run on a schedule (e.g., every 5 minutes via cron/celery beat).
+  python manage.py process_reminders
+  python manage.py process_reminders --dry-run
+  python manage.py process_reminders --lookahead 5
 """
+
+from datetime import timedelta
 
 from django.core.management.base import BaseCommand
 from django.utils import timezone
-from datetime import timedelta
 
 
 class Command(BaseCommand):
     help = "Process and send due reminders"
 
     def add_arguments(self, parser):
-        parser.add_argument(
-            "--dry-run",
-            action="store_true",
-            help="Show what would be processed without actually doing it",
-        )
-        parser.add_argument(
-            "--lookahead",
-            type=int,
-            default=5,
-            help="Process reminders due within this many minutes (default: 5)",
-        )
-        parser.add_argument(
-            "--batch-size",
-            type=int,
-            default=100,
-            help="Process in batches of this size (default: 100)",
-        )
+        parser.add_argument("--dry-run", action="store_true", help="Do not send, just print")
+        parser.add_argument("--lookahead", type=int, default=5, help="Minutes to look ahead")
+        parser.add_argument("--batch-size", type=int, default=200, help="Max reminders per run")
 
     def handle(self, *args, **options):
         from notifications.models import Reminder
-        from notifications.services import notify_user
+        from notifications.services.notify import notify_user
         from notifications.enums import Topic, Priority
 
-        dry_run = options["dry_run"]
-        lookahead = options["lookahead"]
-        batch_size = options["batch_size"]
+        dry_run = bool(options["dry_run"])
+        lookahead = int(options["lookahead"])
+        batch_size = int(options["batch_size"])
 
         now = timezone.now()
         cutoff = now + timedelta(minutes=lookahead)
 
-        if dry_run:
-            self.stdout.write(self.style.WARNING("DRY RUN - No changes will be made"))
+        qs = (
+            Reminder.objects.select_related("patient", "nurse")
+            .filter(status=Reminder.Status.PENDING, reminder_time__lte=cutoff)
+            .order_by("reminder_time")
+        )
 
-        # Find pending reminders that are due
-        due_reminders = Reminder.objects.filter(
-            status="PENDING",
-            reminder_time__lte=cutoff,
-        ).select_related("patient", "nurse", "facility")[:batch_size]
-
-        due_count = due_reminders.count()
-
-        if due_count == 0:
-            self.stdout.write("No reminders due at this time")
+        due = list(qs[:batch_size])
+        if not due:
+            self.stdout.write("No reminders due")
             return
 
-        self.stdout.write(f"Found {due_count} reminders due for processing")
+        if dry_run:
+            self.stdout.write(self.style.WARNING("DRY RUN - no notifications will be created"))
 
-        sent_count = 0
-        failed_count = 0
+        sent = 0
+        skipped = 0
+        failed = 0
 
-        for reminder in due_reminders:
+        for rem in due:
+            if not rem.nurse_id:
+                skipped += 1
+                continue
+
+            title = f"Reminder: {rem.get_reminder_type_display()}"
+            patient_name = getattr(rem.patient, "full_name", None) or f"Patient #{rem.patient_id}"
+            body = f"{patient_name}\n{rem.message}"
+
             if dry_run:
-                self.stdout.write(
-                    f"Would send: [{reminder.reminder_type}] "
-                    f"Patient: {reminder.patient} - {reminder.message[:50]}..."
-                )
+                self.stdout.write(f"Would notify nurse={rem.nurse_id} reminder={rem.id} time={rem.reminder_time}")
                 continue
 
             try:
-                # Determine the recipient (nurse assigned to the reminder)
-                if not reminder.nurse or not reminder.nurse.user:
-                    self.stdout.write(
-                        self.style.WARNING(
-                            f"Reminder {reminder.id} has no nurse with user account, skipping"
-                        )
-                    )
-                    continue
-
-                # Map reminder type to notification topic
-                topic_map = {
-                    "VITALS": Topic.REMINDER,
-                    "MEDICATION": Topic.PRESCRIPTION_READY,
-                    "LAB": Topic.LAB_RESULT_READY,
-                    "APPOINTMENT": Topic.APPOINTMENT_REMINDER,
-                    "FOLLOW_UP": Topic.REMINDER,
-                    "OTHER": Topic.REMINDER,
-                }
-                topic = topic_map.get(reminder.reminder_type, Topic.REMINDER)
-
-                # Send notification to the nurse
                 notify_user(
-                    user=reminder.nurse.user,
-                    topic=topic,
-                    title=f"Reminder: {reminder.get_reminder_type_display()}",
-                    body=f"Patient: {reminder.patient.first_name} {reminder.patient.last_name}\n{reminder.message}",
-                    facility=reminder.facility,
-                    data={
-                        "reminder_id": reminder.id,
-                        "patient_id": reminder.patient.id,
-                        "reminder_type": reminder.reminder_type,
-                    },
-                    action_url=f"/facility/patients/{reminder.patient.id}/",
+                    user=rem.nurse,
+                    topic=Topic.REMINDER,
+                    priority=Priority.NORMAL,
+                    title=title,
+                    body=body,
+                    facility_id=getattr(getattr(rem.patient, "facility", None), "id", None),
+                    data={"reminder_id": rem.id, "patient_id": rem.patient_id, "reminder_type": rem.reminder_type},
+                    action_url=f"/facility/patients/{rem.patient_id}",
+                    group_key=f"REMINDER:{rem.id}",
                 )
 
-                # Update reminder status
-                reminder.status = "SENT"
-                reminder.sent_at = now
-                reminder.save(update_fields=["status", "sent_at", "updated_at"])
+                rem.status = Reminder.Status.SENT
+                rem.sent_at = now
+                rem.save(update_fields=["status", "sent_at"])
 
-                sent_count += 1
-                self.stdout.write(
-                    self.style.SUCCESS(f"Sent reminder {reminder.id} to {reminder.nurse.user.email}")
-                )
-
-                # Handle recurring reminders
-                if reminder.is_recurring and reminder.recurrence_interval:
-                    # Check if we should create another reminder
-                    next_time = reminder.reminder_time + reminder.recurrence_interval
-                    
-                    # Only create if before recurrence end date (if set)
-                    if reminder.recurrence_end is None or next_time <= reminder.recurrence_end:
-                        Reminder.objects.create(
-                            patient=reminder.patient,
-                            nurse=reminder.nurse,
-                            facility=reminder.facility,
-                            reminder_type=reminder.reminder_type,
-                            message=reminder.message,
-                            reminder_time=next_time,
-                            is_recurring=True,
-                            recurrence_interval=reminder.recurrence_interval,
-                            recurrence_end=reminder.recurrence_end,
-                            status="PENDING",
-                        )
-                        self.stdout.write(
-                            f"  Created next recurring reminder for {next_time}"
-                        )
-
+                sent += 1
             except Exception as e:
-                failed_count += 1
-                self.stdout.write(
-                    self.style.ERROR(f"Failed to process reminder {reminder.id}: {str(e)}")
-                )
+                failed += 1
+                self.stdout.write(self.style.ERROR(f"Failed reminder {rem.id}: {e}"))
 
-        # Mark overdue reminders as expired
-        overdue_cutoff = now - timedelta(hours=24)
-        expired_count = Reminder.objects.filter(
-            status="PENDING",
-            reminder_time__lt=overdue_cutoff,
-        ).update(status="EXPIRED")
-
-        if expired_count > 0:
-            self.stdout.write(
-                self.style.WARNING(f"Marked {expired_count} overdue reminders as expired")
-            )
-
-        # Summary
         if dry_run:
-            self.stdout.write(
-                self.style.WARNING(f"\nDRY RUN COMPLETE - Would have processed {due_count} reminders")
-            )
-        else:
-            self.stdout.write(
-                self.style.SUCCESS(
-                    f"\nProcessing complete: {sent_count} sent, {failed_count} failed"
-                )
-            )
+            self.stdout.write(self.style.WARNING(f"DRY RUN complete. Would process: {len(due)}"))
+            return
+
+        self.stdout.write(self.style.SUCCESS(f"Processed reminders: sent={sent} skipped={skipped} failed={failed}"))
