@@ -24,7 +24,7 @@ class EncounterViewSet(
     mixins.UpdateModelMixin,
     mixins.ListModelMixin,
 ):
-    queryset = Encounter.objects.select_related("patient", "facility", "created_by").all()
+    queryset = Encounter.objects.select_related("patient", "facility", "created_by", "nurse",  "provider").all()
     authentication_classes = [JWTAuthentication]
     permission_classes = [IsAuthenticated]
 
