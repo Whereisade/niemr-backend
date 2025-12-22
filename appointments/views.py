@@ -1,6 +1,6 @@
 from django.utils.dateparse import parse_datetime
 from django.utils import timezone
-from django.db.models import Q, Case, When, IntegerField, Value
+from django.db.models import Q, Case, When, IntegerField, Value, Subquery
 from rest_framework import viewsets, mixins, status
 from rest_framework.decorators import action
 from rest_framework.permissions import IsAuthenticated
@@ -54,11 +54,25 @@ class AppointmentViewSet(
             else:
                 q = q.none()
         elif u.facility_id:
-            # Facility staff see all facility appointments
+            # Facility-scoped users
             q = q.filter(facility_id=u.facility_id)
-            
-            # If 'mine' param is set, filter to provider's own appointments
-            if self.request.query_params.get("mine") in ("true", "True", "1"):
+
+            # IMPORTANT: Facility doctors should only see appointments assigned to them.
+            # Other facility roles (SUPER_ADMIN, ADMIN, NURSE, FRONTDESK, etc.) can see all.
+            if u.role == "DOCTOR":
+                # Primary: appointment.provider points to the assigned doctor
+                # Fallback: if older data only has encounter.provider, include those too.
+                try:
+                    from encounters.models import Encounter
+
+                    enc_ids = Encounter.objects.filter(provider_id=u.id).values("id")
+                    q = q.filter(Q(provider_id=u.id) | Q(encounter_id__in=Subquery(enc_ids)))
+                except Exception:
+                    q = q.filter(provider_id=u.id)
+
+            # Optional: facility staff can still request only their own appointments via ?mine=true
+            # (ignored for doctors because they are always scoped to their own).
+            elif self.request.query_params.get("mine") in ("true", "True", "1"):
                 q = q.filter(provider_id=u.id)
         else:
             # Independent provider without facility - only own appointments
