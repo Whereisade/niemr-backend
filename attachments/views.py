@@ -1,6 +1,7 @@
 from django.contrib.contenttypes.models import ContentType
 from django.shortcuts import get_object_or_404
 from django.utils.encoding import smart_str
+from django.db.models import Q
 from rest_framework import viewsets, mixins, status
 from rest_framework.decorators import action
 from rest_framework.permissions import IsAuthenticated
@@ -115,6 +116,25 @@ class FileViewSet(
             q = q.filter(patient__user_id=u.id)
         elif getattr(u, "facility_id", None):
             q = q.filter(facility_id=u.facility_id)
+
+        else:
+            # Independent staff users (no facility) must NOT see all files.
+            # Scope to files they uploaded or that belong to patients related to them.
+            role = (getattr(u, "role", "") or "").upper()
+            if role not in {"SUPER_ADMIN", "ADMIN"}:
+                uid = getattr(u, "id", None)
+                if uid:
+                    q = q.filter(
+                        Q(uploaded_by_id=uid)
+                        | Q(patient__appointments__provider_id=uid)
+                        | Q(patient__encounters__created_by_id=uid)
+                        | Q(patient__encounters__provider_id=uid)
+                        | Q(patient__encounters__nurse_id=uid)
+                        | Q(patient__lab_orders__ordered_by_id=uid)
+                        | Q(patient__lab_orders__outsourced_to_id=uid)
+                        | Q(patient__prescriptions__prescribed_by_id=uid)
+                        | Q(patient__prescriptions__outsourced_to_id=uid)
+                    ).distinct()
 
         params = self.request.query_params
 

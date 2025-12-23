@@ -38,8 +38,10 @@ class CanViewEncounter(BasePermission):
         if u.role in STAFF_ROLES and u.facility_id and obj.facility_id == u.facility_id:
             return True
 
-        # independent staff: own created encounters only
-        if u.role in STAFF_ROLES and not u.facility_id and obj.created_by_id == getattr(u, "id", None):
-            return True
+        # independent staff: allow access to encounters they are involved with (created_by / provider / nurse)
+        if u.role in STAFF_ROLES and not u.facility_id:
+            uid = getattr(u, "id", None)
+            if uid and (obj.created_by_id == uid or obj.provider_id == uid or obj.nurse_id == uid):
+                return True
 
         return False

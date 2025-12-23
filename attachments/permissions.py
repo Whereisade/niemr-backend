@@ -26,6 +26,36 @@ class CanViewFile(BasePermission):
             if obj.visibility != Visibility.INTERNAL or u.role in (UserRole.SUPER_ADMIN, UserRole.ADMIN):
                 return True
 
+
+        # Independent staff (no facility): allow access to files they uploaded or that belong to
+        # patients related to them. INTERNAL visibility remains admin-only.
+        if u.role in STAFF and not u.facility_id:
+            if obj.visibility == Visibility.INTERNAL and u.role not in (UserRole.SUPER_ADMIN, UserRole.ADMIN):
+                return False
+
+            uid = getattr(u, "id", None)
+            if not uid:
+                return False
+
+            if obj.uploaded_by_id == uid:
+                return True
+
+            patient = getattr(obj, "patient", None)
+            if not (patient_id := getattr(patient, "id", None)):
+                return False
+
+            # Relationship checks via patient reverse relations
+            return (
+                patient.appointments.filter(provider_id=uid).exists()
+                or patient.encounters.filter(created_by_id=uid).exists()
+                or patient.encounters.filter(provider_id=uid).exists()
+                or patient.encounters.filter(nurse_id=uid).exists()
+                or patient.lab_orders.filter(ordered_by_id=uid).exists()
+                or patient.lab_orders.filter(outsourced_to_id=uid).exists()
+                or patient.prescriptions.filter(prescribed_by_id=uid).exists()
+                or patient.prescriptions.filter(outsourced_to_id=uid).exists()
+            )
+
         # INTERNAL docs only for admins anywhere (optional tighten by facility)
         if obj.visibility == Visibility.INTERNAL and u.role in (UserRole.SUPER_ADMIN, UserRole.ADMIN):
             return True

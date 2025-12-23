@@ -143,23 +143,37 @@ class StockViewSet(viewsets.GenericViewSet, mixins.ListModelMixin):
     authentication_classes = [JWTAuthentication]
     permission_classes = [IsAuthenticated, IsPharmacyStaff]
 
+    def _scope(self, user):
+        role = (getattr(user, "role", "") or "").upper()
+
+        # Facility pharmacy stock
+        if getattr(user, "facility_id", None):
+            return {"facility": user.facility, "owner": None}
+
+        # Independent pharmacy stock (tracked per owner)
+        if role == UserRole.PHARMACY:
+            return {"facility": None, "owner": user}
+
+        return None
+
     def get_queryset(self):
-        # independent pharmacies do not manage facility stock here
-        if not getattr(self.request.user, "facility_id", None):
+        scope = self._scope(self.request.user)
+        if not scope:
             return StockItem.objects.none()
 
-        return (
-            StockItem.objects.select_related("drug", "facility")
-            .filter(facility=self.request.user.facility)
-        )
+        qs = StockItem.objects.select_related("drug")
+        if scope["facility"]:
+            return qs.filter(facility=scope["facility"])
+        return qs.filter(owner=scope["owner"])
 
     def get_serializer_class(self):
         return StockItemSerializer
 
     @action(detail=False, methods=["post"], permission_classes=[IsAuthenticated, IsPharmacyStaff])
     def adjust(self, request):
-        if not request.user.facility_id:
-            return Response({"detail": "Stock adjustments require a facility pharmacy user."}, status=403)
+        scope = self._scope(request.user)
+        if not scope:
+            return Response({"detail": "You do not have access to pharmacy stock."}, status=403)
 
         u = request.user
         drug_id = request.data.get("drug_id")
@@ -168,7 +182,8 @@ class StockViewSet(viewsets.GenericViewSet, mixins.ListModelMixin):
             return Response({"detail": "drug_id and non-zero qty required"}, status=400)
 
         stock, _ = StockItem.objects.get_or_create(
-            facility=u.facility,
+            facility=scope["facility"],
+            owner=scope["owner"],
             drug_id=drug_id,
             defaults={"current_qty": 0},
         )
@@ -176,7 +191,8 @@ class StockViewSet(viewsets.GenericViewSet, mixins.ListModelMixin):
         stock.save(update_fields=["current_qty"])
 
         StockTxn.objects.create(
-            facility=u.facility,
+            facility=scope["facility"],
+            owner=scope["owner"],
             drug_id=drug_id,
             txn_type=TxnType.IN if qty > 0 else TxnType.ADJUST,
             qty=qty,
@@ -187,18 +203,22 @@ class StockViewSet(viewsets.GenericViewSet, mixins.ListModelMixin):
 
     @action(detail=False, methods=["get"], permission_classes=[IsAuthenticated, IsPharmacyStaff])
     def txns(self, request):
-        if not request.user.facility_id:
-            return Response([], status=200)
+        scope = self._scope(request.user)
+        if not scope:
+            return Response({"detail": "You do not have access to pharmacy stock."}, status=403)
 
-        qs = (
-            StockTxn.objects.filter(facility=request.user.facility)
-            .select_related("drug", "created_by")
-            .order_by("-created_at")
-        )
+        qs = StockTxn.objects.all()
+        if scope["facility"]:
+            qs = qs.filter(facility=scope["facility"])
+        else:
+            qs = qs.filter(owner=scope["owner"])
+
+        qs = qs.select_related("drug", "created_by").order_by("-created_at")
         return Response(StockTxnSerializer(qs, many=True).data)
 
 
 # --- Prescriptions ---
+
 class PrescriptionViewSet(
     viewsets.GenericViewSet,
     mixins.CreateModelMixin,

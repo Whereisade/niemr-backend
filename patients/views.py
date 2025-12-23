@@ -41,9 +41,29 @@ class PatientViewSet(viewsets.GenericViewSet,
 
     def list(self, request, *args, **kwargs):
         q = self.queryset
-        # staff can only see within their facility
-        if request.user.facility_id:
-            q = q.filter(facility_id=request.user.facility_id)
+        u = request.user
+
+        # Facility staff: scope to their facility patients
+        if getattr(u, "facility_id", None):
+            q = q.filter(facility_id=u.facility_id)
+        else:
+            # Independent staff users (no facility) must NOT see all patients.
+            # Scope to patients they are related to via appointments/encounters/labs/prescriptions.
+            role = (getattr(u, "role", "") or "").upper()
+            if role not in {"SUPER_ADMIN", "ADMIN"}:
+                uid = getattr(u, "id", None)
+                if uid:
+                    q = q.filter(
+                        Q(appointments__provider_id=uid)
+                        | Q(encounters__created_by_id=uid)
+                        | Q(encounters__provider_id=uid)
+                        | Q(encounters__nurse_id=uid)
+                        | Q(lab_orders__ordered_by_id=uid)
+                        | Q(lab_orders__outsourced_to_id=uid)
+                        | Q(prescriptions__prescribed_by_id=uid)
+                        | Q(prescriptions__outsourced_to_id=uid)
+                    ).distinct()
+
         # basic search
         s = request.query_params.get("s")
         if s:

@@ -43,16 +43,16 @@ class DrugSerializer(serializers.ModelSerializer):
         request = self.context.get("request")
         if not request or not request.user:
             return value
-        
+
         u = request.user
         code = (value or "").strip().upper()
-        
+
         if getattr(u, "facility_id", None):
             # Facility staff: check uniqueness within facility
             exists = Drug.objects.filter(
                 code__iexact=code,
                 facility_id=u.facility_id,
-                is_active=True
+                is_active=True,
             ).exists()
             if exists:
                 raise serializers.ValidationError(
@@ -64,13 +64,13 @@ class DrugSerializer(serializers.ModelSerializer):
                 code__iexact=code,
                 facility__isnull=True,
                 created_by_id=u.id,
-                is_active=True
+                is_active=True,
             ).exists()
             if exists:
                 raise serializers.ValidationError(
                     f"A drug with code '{code}' already exists in your catalog."
                 )
-        
+
         return code
 
 
@@ -85,8 +85,8 @@ class StockItemSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = StockItem
-        fields = ["id", "facility", "drug", "drug_id", "current_qty"]
-        read_only_fields = ["facility"]
+        fields = ["id", "facility", "owner", "drug", "drug_id", "current_qty"]
+        read_only_fields = ["facility", "owner"]
 
 
 class StockTxnSerializer(serializers.ModelSerializer):
@@ -95,6 +95,7 @@ class StockTxnSerializer(serializers.ModelSerializer):
         fields = [
             "id",
             "facility",
+            "owner",
             "drug",
             "txn_type",
             "qty",
@@ -102,7 +103,7 @@ class StockTxnSerializer(serializers.ModelSerializer):
             "created_by",
             "created_at",
         ]
-        read_only_fields = ["facility", "created_by", "created_at"]
+        read_only_fields = ["facility", "owner", "created_by", "created_at"]
 
 
 # --- Prescriptions ---
@@ -133,44 +134,45 @@ class PrescriptionItemWriteSerializer(serializers.ModelSerializer):
         name = (attrs.get("drug_name", "") or "").strip()
 
         if code:
-            # Look up drug in the prescriber's facility catalog or their own catalog
             request = self.context.get("request")
             u = request.user if request else None
-            
+
             drug = None
             if u and getattr(u, "facility_id", None):
-                # Facility staff: look in facility's catalog
                 drug = Drug.objects.filter(
                     code__iexact=code,
                     facility_id=u.facility_id,
-                    is_active=True
+                    is_active=True,
                 ).first()
             elif u:
-                # Independent provider: look in their own catalog
                 drug = Drug.objects.filter(
                     code__iexact=code,
                     created_by_id=u.id,
-                    is_active=True
+                    is_active=True,
                 ).first()
-            
-            # Fallback to legacy global drugs (facility=None, created_by=None)
+
+            # Fallback to global/legacy drugs
             if not drug:
                 drug = Drug.objects.filter(
                     code__iexact=code,
                     facility__isnull=True,
                     created_by__isnull=True,
-                    is_active=True
+                    is_active=True,
                 ).first()
-            
+
             if not drug:
-                raise serializers.ValidationError({"drug_code": f"Unknown/inactive drug_code: {code}"})
-            
+                raise serializers.ValidationError(
+                    {"drug_code": f"Unknown/inactive drug_code: {code}"}
+                )
+
             attrs["drug"] = drug
             attrs["drug_name"] = ""
             return attrs
 
         if not name:
-            raise serializers.ValidationError({"detail": "Provide either drug_code (catalog) or drug_name (free-text)."})
+            raise serializers.ValidationError(
+                {"detail": "Provide either drug_code (catalog) or drug_name (free-text)."}
+            )
 
         attrs["drug"] = None
         attrs["drug_name"] = name
@@ -225,9 +227,11 @@ class PrescriptionCreateSerializer(serializers.ModelSerializer):
         if role != UserRole.PHARMACY:
             raise serializers.ValidationError("outsourced_to must be a PHARMACY user")
 
-        # Outsourcing targets independent providers (facility=None)
+        # Outsourcing targets independent pharmacies (facility=None)
         if getattr(user, "facility_id", None):
-            raise serializers.ValidationError("outsourced_to must be an independent PHARMACY (facility must be null)")
+            raise serializers.ValidationError(
+                "outsourced_to must be an independent PHARMACY (facility must be null)"
+            )
 
         return user.id
 
@@ -244,45 +248,29 @@ class PrescriptionCreateSerializer(serializers.ModelSerializer):
             patient=patient,
             facility=facility,
             prescribed_by=u,
-            encounter_id=validated.get("encounter_id"),
-            status=RxStatus.PRESCRIBED,
-            note=validated.get("note", ""),
             outsourced_to_id=outsourced_to_id,
+            **validated,
         )
 
-        for i in items:
-            PrescriptionItem.objects.create(prescription=rx, **i)
+        for it in items:
+            PrescriptionItem.objects.create(prescription=rx, **it)
 
-        # Link to encounter (append rx.id to encounter.prescription_ids) — best-effort
-        if rx.encounter_id:
+        # Notify outsourced pharmacy if applicable
+        if outsourced_to_id:
             try:
-                from encounters.models import Encounter
-
-                enc = Encounter.objects.filter(id=rx.encounter_id).first()
-                if enc:
-                    ids = list(enc.prescription_ids or [])
-                    if rx.id not in ids:
-                        ids.append(rx.id)
-                        enc.prescription_ids = ids
-                        enc.save(update_fields=["prescription_ids", "updated_at"])
-            except Exception:
-                pass
-
-        try:
-            if rx.patient:
-                notify_patient(
-                    patient=rx.patient,
+                notify_user(
+                    user_id=outsourced_to_id,
                     topic=Topic.PRESCRIPTION_READY,
                     priority=Priority.NORMAL,
-                    title='Prescription issued',
-                    body=f'Prescription #{rx.id} has been created and is ready for dispensing.',
-                    data={'prescription_id': rx.id, 'encounter_id': rx.encounter_id},
-                    facility_id=rx.facility_id,
-                    action_url='/patient/pharmacy',
-                    group_key=f'RX:{rx.id}:PRESCRIBED',
+                    title="New outsourced prescription",
+                    body=f"Prescription #{rx.id} assigned to you.",
+                    data={"prescription_id": rx.id},
+                    facility_id=getattr(facility, "id", None),
+                    action_url="/provider/pharmacy",
+                    group_key=f"RX:{rx.id}:ASSIGNED",
                 )
-        except Exception:
-            pass
+            except Exception:
+                pass
 
         return rx
 
@@ -331,27 +319,49 @@ class DispenseSerializer(serializers.Serializer):
         if not item:
             raise serializers.ValidationError("Item not found in prescription")
 
-        remaining = item.remaining()
-        take = self.validated_data["qty"]
-        if take > remaining:
-            raise serializers.ValidationError(f"Only {remaining} remaining to dispense")
+        take = int(self.validated_data["qty"])
+        if take <= 0:
+            raise serializers.ValidationError("qty must be >= 1")
 
-        is_outsourced = bool(getattr(rx, "outsourced_to_id", None))
-        is_free_text = item.drug_id is None
+        if item.remaining() <= 0:
+            raise serializers.ValidationError("Item already fully dispensed")
 
-        # stock applies only when:
-        # - not outsourced
-        # - has facility
-        # - item is catalog drug
-        stock_required = (not is_outsourced) and bool(rx.facility_id) and (not is_free_text)
+        take = min(take, item.remaining())
+
+        is_outsourced = bool(rx.outsourced_to_id)
+        is_free_text = not bool(item.drug_id)
+
+        # Determine stock scope:
+        # - Facility pharmacy (not outsourced): facility stock
+        # - Independent outsourced pharmacy: owner stock (pharmacy user)
+        stock_scope = None
+        role = (getattr(user, "role", "") or "").upper()
+
+        if not is_free_text:
+            if (not is_outsourced) and bool(rx.facility_id) and bool(getattr(user, "facility_id", None)) and rx.facility_id == user.facility_id:
+                stock_scope = {"facility": rx.facility}
+            elif is_outsourced and role == UserRole.PHARMACY and (not getattr(user, "facility_id", None)) and rx.outsourced_to_id == getattr(user, "id", None):
+                stock_scope = {"owner": user}
+
+        stock_required = bool(stock_scope)
 
         with transaction.atomic():
             if stock_required:
-                stock, _ = StockItem.objects.select_for_update().get_or_create(
-                    facility=rx.facility,
-                    drug=item.drug,
-                    defaults={"current_qty": 0},
-                )
+                if "facility" in stock_scope:
+                    stock, _ = StockItem.objects.select_for_update().get_or_create(
+                        facility=stock_scope["facility"],
+                        owner=None,
+                        drug=item.drug,
+                        defaults={"current_qty": 0},
+                    )
+                else:
+                    stock, _ = StockItem.objects.select_for_update().get_or_create(
+                        facility=None,
+                        owner=stock_scope["owner"],
+                        drug=item.drug,
+                        defaults={"current_qty": 0},
+                    )
+
                 if stock.current_qty < take:
                     raise serializers.ValidationError(
                         f"Insufficient stock for {item.drug.name}. In stock: {stock.current_qty}"
@@ -361,7 +371,8 @@ class DispenseSerializer(serializers.Serializer):
                 stock.save(update_fields=["current_qty"])
 
                 StockTxn.objects.create(
-                    facility=rx.facility,
+                    facility=stock_scope.get("facility"),
+                    owner=stock_scope.get("owner"),
                     drug=item.drug,
                     txn_type=TxnType.OUT,
                     qty=-take,
@@ -431,14 +442,21 @@ class DispenseSerializer(serializers.Serializer):
                             patient=rx.patient,
                             topic=Topic.PRESCRIPTION_READY,
                             priority=Priority.NORMAL,
-                            title='Medication dispensed',
-                            body=f'{drug.name} x{take} has been dispensed.',
-                            data={'prescription_id': rx.id, 'charge_id': charge.id, 'drug_id': drug.id, 'qty': take},
+                            title="Medication dispensed",
+                            body=f"{drug.name} x{take} has been dispensed.",
+                            data={
+                                "prescription_id": rx.id,
+                                "charge_id": charge.id,
+                                "drug_id": drug.id,
+                                "qty": take,
+                            },
                             facility_id=facility.id,
-                            action_url='/patient/pharmacy',
-                            group_key=f'RX:{rx.id}:DISPENSE',
+                            action_url="/patient/pharmacy",
+                            group_key=f"RX:{rx.id}:DISPENSE",
                         )
                 except Exception:
                     pass
 
         return item
+
+

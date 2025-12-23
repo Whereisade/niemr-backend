@@ -42,9 +42,11 @@ class EncounterViewSet(
         elif u.facility_id:
             q = q.filter(facility_id=u.facility_id)
         else:
+            # Independent staff (no facility) should still see encounters they are involved in.
+            # This includes encounters they created, were assigned to (provider), or participated in (nurse).
             role = (getattr(u, "role", "") or "").upper()
             if role not in {"ADMIN", "SUPER_ADMIN"}:
-                q = q.filter(created_by_id=u.id)
+                q = q.filter(Q(created_by_id=u.id) | Q(provider_id=u.id) | Q(nurse_id=u.id))
 
         patient_id = self.request.query_params.get("patient")
         if patient_id:

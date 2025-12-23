@@ -17,6 +17,25 @@ class IsSelfOrFacilityStaff(BasePermission):
             return True
         if u.role in self.staff_roles and u.facility_id and obj.facility_id == u.facility_id:
             return True
+
+        # Independent staff (no facility): allow access only if the patient is related to the user
+        # via appointments/encounters/labs/prescriptions.
+        if u.role in self.staff_roles and not u.facility_id:
+            uid = getattr(u, "id", None)
+            if not uid:
+                return False
+
+            return (
+                obj.appointments.filter(provider_id=uid).exists()
+                or obj.encounters.filter(created_by_id=uid).exists()
+                or obj.encounters.filter(provider_id=uid).exists()
+                or obj.encounters.filter(nurse_id=uid).exists()
+                or obj.lab_orders.filter(ordered_by_id=uid).exists()
+                or obj.lab_orders.filter(outsourced_to_id=uid).exists()
+                or obj.prescriptions.filter(prescribed_by_id=uid).exists()
+                or obj.prescriptions.filter(outsourced_to_id=uid).exists()
+            )
+
         return False
 
 class IsStaff(BasePermission):

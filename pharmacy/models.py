@@ -70,23 +70,67 @@ class Drug(models.Model):
 
 class StockItem(models.Model):
     """
-    Stock per facility per drug. Keep it simple; one row aggregates current_qty.
+    Stock per scope per drug.
+
+    Scoping rules:
+    - Facility stock: facility is set, owner is null
+    - Independent pharmacy stock: owner is set, facility is null
+
+    Keep it simple; one row aggregates current_qty.
     """
-    facility = models.ForeignKey(Facility, on_delete=models.CASCADE, related_name="stock_items")
+    facility = models.ForeignKey(
+        Facility,
+        null=True,
+        blank=True,
+        on_delete=models.CASCADE,
+        related_name="stock_items",
+    )
+    owner = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        null=True,
+        blank=True,
+        on_delete=models.CASCADE,
+        related_name="owned_stock_items",
+        help_text="Independent pharmacy owner (used when facility is null)",
+    )
     drug = models.ForeignKey(Drug, on_delete=models.CASCADE, related_name="stock_items")
     current_qty = models.PositiveIntegerField(default=0)  # base unit (e.g., tablets)
 
     class Meta:
-        unique_together = ("facility", "drug")
+        constraints = [
+            models.UniqueConstraint(
+                fields=["facility", "drug"],
+                name="unique_stock_per_facility_drug",
+                condition=models.Q(facility__isnull=False),
+            ),
+            models.UniqueConstraint(
+                fields=["owner", "drug"],
+                name="unique_stock_per_owner_drug",
+                condition=models.Q(owner__isnull=False),
+            ),
+        ]
 
 
 class StockTxn(models.Model):
-    facility = models.ForeignKey(Facility, on_delete=models.CASCADE)
+    facility = models.ForeignKey(
+        Facility,
+        null=True,
+        blank=True,
+        on_delete=models.CASCADE,
+    )
+    owner = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        null=True,
+        blank=True,
+        on_delete=models.CASCADE,
+        related_name="owned_stock_txns",
+        help_text="Independent pharmacy owner (used when facility is null)",
+    )
     drug = models.ForeignKey(Drug, on_delete=models.CASCADE)
     txn_type = models.CharField(max_length=8, choices=TxnType.choices)
     qty = models.IntegerField()  # positive for IN, negative for OUT
     note = models.CharField(max_length=255, blank=True)
-    created_by = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, on_delete=models.SET_NULL)
+    created_by = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, on_delete=models.SET_NULL, related_name="stock_txns_created")
     created_at = models.DateTimeField(auto_now_add=True)
 
 
