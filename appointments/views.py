@@ -17,7 +17,7 @@ from .serializers import (
 from .permissions import IsStaff, CanViewAppointment
 from .enums import ApptStatus
 from .services.notify import send_confirmation, send_reminder
-from notifications.services.notify import notify_user, notify_users
+from notifications.services.notify import notify_user, notify_users, notify_facility_roles
 from notifications.enums import Topic, Priority
 from accounts.enums import UserRole
 
@@ -363,6 +363,7 @@ class AppointmentViewSet(
         try:
             when = appt.start_at.strftime("%Y-%m-%d %H:%M") if appt.start_at else ""
             payload = {"appointment_id": appt.id, "patient_id": appt.patient_id}
+            patient_name = " ".join([p for p in [getattr(appt.patient, 'first_name', ''), getattr(appt.patient, 'middle_name', ''), getattr(appt.patient, 'last_name', '')] if p]).strip()
             group_key = f"APPT:{appt.id}:CHECKED_IN"
             if appt.provider_id:
                 notify_user(
@@ -388,6 +389,20 @@ class AppointmentViewSet(
                     action_url="/patient/appointments",
                     group_key=group_key,
                 )
+            # Ops feed (role-scoped): Nurses get check-in events
+            if appt.facility_id:
+                notify_facility_roles(
+                    facility_id=appt.facility_id,
+                    roles=[UserRole.NURSE],
+                    topic=Topic.APPOINTMENT_CHECKED_IN,
+                    priority=Priority.NORMAL,
+                    title="Patient checked-in",
+                    body=f"{patient_name} checked-in for {when}.",
+                    data=payload,
+                    action_url=f"/facility/appointments/{appt.id}",
+                    group_key=group_key,
+                )
+
         except Exception:
             pass
 
@@ -505,6 +520,7 @@ class AppointmentViewSet(
         try:
             when = appt.start_at.strftime("%Y-%m-%d %H:%M") if appt.start_at else ""
             payload = {"appointment_id": appt.id, "patient_id": appt.patient_id}
+            patient_name = " ".join([p for p in [getattr(appt.patient, 'first_name', ''), getattr(appt.patient, 'middle_name', ''), getattr(appt.patient, 'last_name', '')] if p]).strip()
             group_key = f"APPT:{appt.id}:CANCELLED"
 
             if appt.provider_id:
@@ -532,22 +548,21 @@ class AppointmentViewSet(
                     action_url="/patient/appointments",
                     group_key=group_key,
                 )
-
-            # If a patient cancelled, let facility frontdesk/admin know.
-            if request.user.role == "PATIENT" and appt.facility_id:
-                staff_roles = [UserRole.SUPER_ADMIN, UserRole.ADMIN, UserRole.FRONTDESK]
-                staff_users = User.objects.filter(facility_id=appt.facility_id, role__in=staff_roles).distinct()
-                notify_users(
-                    users=staff_users,
+            # Ops feed (role-scoped): Frontdesk gets cancellation events
+            if appt.facility_id:
+                cancelled_by = "patient" if request.user.role == "PATIENT" else "staff"
+                notify_facility_roles(
+                    facility_id=appt.facility_id,
+                    roles=[UserRole.FRONTDESK],
                     topic=Topic.APPOINTMENT_CANCELLED,
                     priority=Priority.NORMAL,
-                    title="Appointment cancelled by patient",
-                    body=f"Appointment ({when}) was cancelled by a patient.",
-                    facility_id=appt.facility_id,
+                    title="Appointment cancelled",
+                    body=f"{patient_name}'s appointment ({when}) was cancelled by {cancelled_by}.",
                     data=payload,
-                    action_url="/facility/appointments",
+                    action_url=f"/facility/appointments/{appt.id}",
                     group_key=group_key,
                 )
+
         except Exception:
             pass
 

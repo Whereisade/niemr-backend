@@ -11,6 +11,8 @@ from appointments.models import Appointment
 from appointments.enums import ApptStatus
 from patients.models import Patient
 from accounts.enums import UserRole
+from notifications.services.notify import notify_user
+from notifications.enums import Topic, Priority
 from .enums import EncounterStage, EncounterStatus, SoapSection
 from .models import Encounter, EncounterAmendment
 from .permissions import CanViewEncounter, IsStaff
@@ -257,6 +259,7 @@ class EncounterViewSet(
         
         try:
             enc = self.get_object()
+            old_provider_id = enc.provider_id
             self.permission_classes = [IsAuthenticated, IsStaff]
             self.check_permissions(request)
 
@@ -346,6 +349,30 @@ class EncounterViewSet(
                         appt.save(update_fields=["provider", "updated_at"])
             except Exception:
                 # Never fail provider assignment because appointment sync failed
+                pass
+            # Ops feed (role-scoped): Doctor gets assigned encounter
+            try:
+                if enc.provider_id and enc.provider_id != old_provider_id:
+                    patient_name = ""
+                    try:
+                        patient_name = " ".join(
+                            [p for p in [getattr(enc.patient, "first_name", ""), getattr(enc.patient, "middle_name", ""), getattr(enc.patient, "last_name", "")] if p]
+                        ).strip()
+                    except Exception:
+                        patient_name = ""
+
+                    notify_user(
+                        user=enc.provider,
+                        topic=Topic.STAFF_ASSIGNED,
+                        priority=Priority.HIGH,
+                        title="Encounter assigned",
+                        body=f"You have been assigned to an encounter for {patient_name}.",
+                        facility_id=enc.facility_id,
+                        data={"encounter_id": enc.id, "patient_id": enc.patient_id},
+                        action_url=f"/facility/encounters/{enc.id}",
+                        group_key=f"ENC:{enc.id}:ASSIGNED",
+                    )
+            except Exception:
                 pass
             logger.info(f"Encounter {enc.id} saved with provider {enc.provider_id}")
 
