@@ -7,8 +7,8 @@ from rest_framework import serializers
 from accounts.enums import UserRole
 from billing.models import Service, Charge
 from billing.services.pricing import resolve_price
-from notifications.services.notify import notify_user
-from notifications.enums import Topic
+from notifications.services.notify import notify_user, notify_patient
+from notifications.enums import Topic, Priority
 
 from .models import Drug, StockItem, StockTxn, Prescription, PrescriptionItem, DispenseEvent
 from .enums import RxStatus, TxnType
@@ -268,6 +268,22 @@ class PrescriptionCreateSerializer(serializers.ModelSerializer):
             except Exception:
                 pass
 
+        try:
+            if rx.patient:
+                notify_patient(
+                    patient=rx.patient,
+                    topic=Topic.PRESCRIPTION_READY,
+                    priority=Priority.NORMAL,
+                    title='Prescription issued',
+                    body=f'Prescription #{rx.id} has been created and is ready for dispensing.',
+                    data={'prescription_id': rx.id, 'encounter_id': rx.encounter_id},
+                    facility_id=rx.facility_id,
+                    action_url='/patient/pharmacy',
+                    group_key=f'RX:{rx.id}:PRESCRIBED',
+                )
+        except Exception:
+            pass
+
         return rx
 
 
@@ -409,16 +425,18 @@ class DispenseSerializer(serializers.Serializer):
                     encounter_id=rx.encounter_id,
                     created_by=user,
                 )
-
                 try:
-                    if rx.patient.user_id:
-                        notify_user(
-                            user=rx.patient.user,
-                            topic=Topic.BILL_CHARGE_ADDED,
-                            title="Medication dispensed",
-                            body=f"{drug.name} x{take} - {amount}",
-                            data={"charge_id": charge.id, "prescription_id": rx.id},
+                    if rx.patient:
+                        notify_patient(
+                            patient=rx.patient,
+                            topic=Topic.PRESCRIPTION_READY,
+                            priority=Priority.NORMAL,
+                            title='Medication dispensed',
+                            body=f'{drug.name} x{take} has been dispensed.',
+                            data={'prescription_id': rx.id, 'charge_id': charge.id, 'drug_id': drug.id, 'qty': take},
                             facility_id=facility.id,
+                            action_url='/patient/pharmacy',
+                            group_key=f'RX:{rx.id}:DISPENSE',
                         )
                 except Exception:
                     pass

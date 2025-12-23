@@ -16,7 +16,8 @@ from .serializers import (
 )
 from .permissions import IsStaff
 from .enums import ChargeStatus, PaymentMethod
-from notifications.services.notify import notify_user
+from notifications.services.notify import notify_user, notify_patient
+from notifications.enums import Topic, Priority
 
 # --- Service Catalog ---
 class ServiceViewSet(viewsets.GenericViewSet, mixins.ListModelMixin, mixins.CreateModelMixin):
@@ -103,14 +104,17 @@ class ChargeViewSet(viewsets.GenericViewSet, mixins.CreateModelMixin, mixins.Ret
         resp = super().create(request, *args, **kwargs)
         try:
             charge = Charge.objects.get(id=resp.data["id"])
-            if charge.patient and charge.patient.user_id:
-                notify_user(
-                    user=charge.patient.user,
-                    topic="BILL_CHARGE_ADDED",
+            if getattr(charge, 'patient_id', None):
+                notify_patient(
+                    patient=charge.patient,
+                    topic=Topic.BILL_CHARGE_ADDED,
+                    priority=Priority.NORMAL,
                     title="New charge added",
                     body=f"{charge.service.name} - {charge.amount}",
                     data={"charge_id": charge.id},
                     facility_id=charge.facility_id,
+                    action_url="/patient/billing",
+                    group_key=f"BILL:CHARGE:{charge.id}",
                 )
         except Exception:
             pass
@@ -177,14 +181,17 @@ class PaymentViewSet(viewsets.GenericViewSet, mixins.CreateModelMixin, mixins.Re
         resp = super().create(request, *args, **kwargs)
         try:
             payment = Payment.objects.get(id=resp.data["id"])
-            if payment.patient and payment.patient.user_id:
-                notify_user(
-                    user=payment.patient.user,
-                    topic="BILL_PAYMENT_POSTED",
+            if getattr(payment, 'patient_id', None):
+                notify_patient(
+                    patient=payment.patient,
+                    topic=Topic.BILL_PAYMENT_POSTED,
+                    priority=Priority.NORMAL,
                     title="Payment received",
                     body=f"Amount: {payment.amount} ({payment.method}) Ref: {payment.reference}",
                     data={"payment_id": payment.id},
                     facility_id=payment.facility_id,
+                    action_url="/patient/billing",
+                    group_key=f"BILL:PAY:{payment.id}",
                 )
         except Exception:
             pass

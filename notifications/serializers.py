@@ -170,8 +170,12 @@ class FacilityAnnouncementCreateSerializer(serializers.ModelSerializer):
         ]
 
     def validate_audience_roles(self, roles):
-        # Exclude PATIENT for facility staff announcements.
+        """Validate and normalize roles list.
+
+        Notes:
+        - If empty, the backend will default to facility staff roles.
+        - If includes PATIENT, the announcement will also be fanned out to
+          patient/guardian accounts linked to patients in the facility.
+        """
         cleaned = [r for r in (roles or []) if r]
-        if UserRole.PATIENT in cleaned:
-            raise serializers.ValidationError("audience_roles cannot include PATIENT")
         return cleaned

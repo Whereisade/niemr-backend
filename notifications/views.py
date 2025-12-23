@@ -22,7 +22,7 @@ from .serializers import (
 )
 
 from .permissions import CanBroadcastFacilityAnnouncements
-from .services.notify import notify_facility_roles, facility_staff_roles
+from .services.notify import notify_facility_roles, notify_facility_patients, facility_staff_roles
 
 
 class StandardPagination(PageNumberPagination):
@@ -446,18 +446,61 @@ class FacilityAnnouncementViewSet(
             "announcement_id": ann.id,
             "audience_roles": roles,
         }
-        created_count = notify_facility_roles(
-            facility_id=facility_id,
-            roles=roles,
-            topic=ann.topic,
-            title=ann.title,
-            body=ann.body or "",
-            data=data,
-            priority=ann.priority,
-            action_url=ann.action_url or "",
-            group_key=group_key,
-        )
-        ann.sent_count = int(created_count or 0)
+
+        # Fan-out to staff roles and/or patients/guardians depending on audience_roles.
+        sent_total = 0
+        patient_included = UserRole.PATIENT in (roles or [])
+        staff_roles = [r for r in (roles or []) if r != UserRole.PATIENT]
+
+        if staff_roles:
+            sent_total += int(
+                notify_facility_roles(
+                    facility_id=facility_id,
+                    roles=staff_roles,
+                    topic=ann.topic,
+                    title=ann.title,
+                    body=ann.body or "",
+                    data=data,
+                    priority=ann.priority,
+                    action_url=ann.action_url or "",
+                    group_key=group_key,
+                )
+                or 0
+            )
+        else:
+            # If roles only included PATIENT, don't accidentally default to staff.
+            if not patient_included:
+                sent_total += int(
+                    notify_facility_roles(
+                        facility_id=facility_id,
+                        roles=None,
+                        topic=ann.topic,
+                        title=ann.title,
+                        body=ann.body or "",
+                        data=data,
+                        priority=ann.priority,
+                        action_url=ann.action_url or "",
+                        group_key=group_key,
+                    )
+                    or 0
+                )
+
+        if patient_included:
+            sent_total += int(
+                notify_facility_patients(
+                    facility_id=facility_id,
+                    topic=ann.topic,
+                    title=ann.title,
+                    body=ann.body or "",
+                    data=data,
+                    priority=ann.priority,
+                    action_url=ann.action_url or "",
+                    group_key=group_key,
+                )
+                or 0
+            )
+
+        ann.sent_count = int(sent_total or 0)
         ann.save(update_fields=["sent_count", "updated_at"])
         return ann
 

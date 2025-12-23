@@ -11,7 +11,7 @@ from rest_framework.response import Response
 from rest_framework_simplejwt.authentication import JWTAuthentication
 
 from accounts.enums import UserRole
-from notifications.services.notify import notify_user
+from notifications.services.notify import notify_user, notify_patient
 from notifications.enums import Topic, Priority
 
 from .enums import OrderStatus
@@ -263,9 +263,9 @@ class LabOrderViewSet(
             if order.patient and getattr(order.patient, "email", None):
                 notify_result_ready(order.patient.email, order.id)
 
-            if order.patient and getattr(order.patient, "user_id", None):
-                notify_user(
-                    user=order.patient.user,
+            if order.patient:
+                notify_patient(
+                    patient=order.patient,
                     topic=Topic.LAB_RESULT_READY,
                     priority=Priority.NORMAL,
                     title="Your lab result is ready",

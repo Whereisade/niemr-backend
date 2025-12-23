@@ -11,7 +11,7 @@ from appointments.models import Appointment
 from appointments.enums import ApptStatus
 from patients.models import Patient
 from accounts.enums import UserRole
-from notifications.services.notify import notify_user
+from notifications.services.notify import notify_user, notify_patient
 from notifications.enums import Topic, Priority
 from .enums import EncounterStage, EncounterStatus, SoapSection
 from .models import Encounter, EncounterAmendment
@@ -472,6 +472,23 @@ class EncounterViewSet(
             except Exception:
                 pass
 
+        # Notify patient/guardian (best-effort)
+        try:
+            if enc.patient:
+                notify_patient(
+                    patient=enc.patient,
+                    topic=Topic.ENCOUNTER_COMPLETED,
+                    priority=Priority.NORMAL,
+                    title="Visit completed",
+                    body=f"Your encounter #{enc.id} has been closed.",
+                    facility_id=enc.facility_id,
+                    data={"encounter_id": enc.id},
+                    action_url="/patient/encounters",
+                    group_key=f"ENC:{enc.id}:CLOSED",
+                )
+        except Exception:
+            pass
+
         return Response(
             {
                 "detail": "Encounter closed.",
@@ -594,4 +611,22 @@ class EncounterViewSet(
 
         enc.stage = EncounterStage.PRESCRIPTION
         enc.save(update_fields=["clinical_finalized_at", "clinical_finalized_by", "stage", "updated_at"])
+
+        # Notify patient/guardian (best-effort)
+        try:
+            if enc.patient:
+                notify_patient(
+                    patient=enc.patient,
+                    topic=Topic.ENCOUNTER_UPDATED,
+                    priority=Priority.LOW,
+                    title="Visit note finalized",
+                    body=f"Your visit note for encounter #{enc.id} has been finalized.",
+                    facility_id=enc.facility_id,
+                    data={"encounter_id": enc.id},
+                    action_url="/patient/encounters",
+                    group_key=f"ENC:{enc.id}:FINALIZED",
+                )
+        except Exception:
+            pass
+
         return Response(EncounterSerializer(enc, context={"request": request}).data)

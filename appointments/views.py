@@ -17,7 +17,7 @@ from .serializers import (
 from .permissions import IsStaff, CanViewAppointment
 from .enums import ApptStatus
 from .services.notify import send_confirmation, send_reminder
-from notifications.services.notify import notify_user, notify_users, notify_facility_roles
+from notifications.services.notify import notify_user, notify_users, notify_facility_roles, notify_patient
 from notifications.enums import Topic, Priority
 from accounts.enums import UserRole
 
@@ -309,10 +309,10 @@ class AppointmentViewSet(
                     group_key=group_key,
                 )
 
-            # Patient
-            if getattr(appt.patient, "user_id", None):
-                notify_user(
-                    user=appt.patient.user,
+            # Patient (and guardian, if dependent)
+            if appt.patient:
+                notify_patient(
+                    patient=appt.patient,
                     topic=Topic.APPOINTMENT_CONFIRMED,
                     priority=Priority.LOW,
                     title="Appointment booked",
@@ -334,11 +334,79 @@ class AppointmentViewSet(
         return Response(AppointmentSerializer(obj, context={"request": request}).data)
 
     def update(self, request, *args, **kwargs):
-        obj = self.get_object()
-        if request.user.role != "PATIENT":
-            self.permission_classes = [IsAuthenticated, IsStaff]
-            self.check_permissions(request)
-        return super().update(request, *args, **kwargs)
+        appt = self.get_object()
+
+        # Only staff can update appointments (patients book via create and can cancel).
+        self.permission_classes = [IsAuthenticated, IsStaff]
+        self.check_permissions(request)
+
+        old_start = appt.start_at
+        old_end = appt.end_at
+        old_provider_id = appt.provider_id
+
+        resp = super().update(request, *args, **kwargs)
+
+        try:
+            appt.refresh_from_db()
+            changed_time = (old_start != appt.start_at) or (old_end != appt.end_at)
+            changed_provider = (old_provider_id != appt.provider_id)
+
+            if changed_time or changed_provider:
+                new_when = appt.start_at.strftime("%Y-%m-%d %H:%M") if appt.start_at else ""
+                old_when = old_start.strftime("%Y-%m-%d %H:%M") if old_start else ""
+                payload = {"appointment_id": appt.id, "patient_id": appt.patient_id}
+                group_key = f"APPT:{appt.id}:UPDATED"
+
+                if changed_time and appt.patient:
+                    body = (
+                        f"Your appointment has been rescheduled to {new_when}."
+                        if not old_when
+                        else f"Your appointment has been rescheduled from {old_when} to {new_when}."
+                    )
+                    notify_patient(
+                        patient=appt.patient,
+                        topic=Topic.APPOINTMENT_RESCHEDULED,
+                        priority=Priority.NORMAL,
+                        title="Appointment rescheduled",
+                        body=body,
+                        facility_id=appt.facility_id,
+                        data=payload,
+                        action_url="/patient/appointments",
+                        group_key=group_key,
+                    )
+
+                # Provider changes (if any)
+                if changed_provider and appt.provider_id:
+                    notify_user(
+                        user=appt.provider,
+                        topic=Topic.STAFF_APPOINTMENT_ASSIGNED,
+                        priority=Priority.NORMAL,
+                        title="New appointment assigned",
+                        body=f"You have been assigned an appointment for {new_when}.",
+                        facility_id=appt.facility_id,
+                        data=payload,
+                        action_url="/facility/appointments",
+                        group_key=group_key,
+                    )
+
+                # Ops feed
+                if appt.facility_id:
+                    patient_name = " ".join([p for p in [getattr(appt.patient, 'first_name', ''), getattr(appt.patient, 'middle_name', ''), getattr(appt.patient, 'last_name', '')] if p]).strip()
+                    notify_facility_roles(
+                        facility_id=appt.facility_id,
+                        roles=[UserRole.FRONTDESK, UserRole.NURSE],
+                        topic=Topic.APPOINTMENT_RESCHEDULED,
+                        priority=Priority.LOW,
+                        title="Appointment updated",
+                        body=f"{patient_name or 'A patient'} appointment updated to {new_when}.",
+                        data=payload,
+                        action_url=f"/facility/appointments/{appt.id}",
+                        group_key=group_key,
+                    )
+        except Exception:
+            pass
+
+        return resp
 
     # ─────────────────────────────────────────────────────────────
     # Status transition actions
@@ -377,9 +445,9 @@ class AppointmentViewSet(
                     action_url="/facility/appointments",
                     group_key=group_key,
                 )
-            if appt.patient and appt.patient.user_id:
-                notify_user(
-                    user=appt.patient.user,
+            if appt.patient:
+                notify_patient(
+                    patient=appt.patient,
                     topic=Topic.APPOINTMENT_CHECKED_IN,
                     priority=Priority.LOW,
                     title="Checked-in",
@@ -445,9 +513,9 @@ class AppointmentViewSet(
                     action_url="/facility/appointments",
                     group_key=group_key,
                 )
-            if appt.patient and appt.patient.user_id:
-                notify_user(
-                    user=appt.patient.user,
+            if appt.patient:
+                notify_patient(
+                    patient=appt.patient,
                     topic=Topic.APPOINTMENT_COMPLETED,
                     priority=Priority.LOW,
                     title="Appointment completed",
@@ -536,9 +604,9 @@ class AppointmentViewSet(
                     group_key=group_key,
                 )
 
-            if appt.patient and appt.patient.user_id:
-                notify_user(
-                    user=appt.patient.user,
+            if appt.patient:
+                notify_patient(
+                    patient=appt.patient,
                     topic=Topic.APPOINTMENT_CANCELLED,
                     priority=Priority.LOW,
                     title="Appointment cancelled",
@@ -667,9 +735,9 @@ class AppointmentViewSet(
         n = 0
         for appt in qs:
             send_reminder(appt)
-            if appt.patient and appt.patient.user_id:
-                notify_user(
-                    user=appt.patient.user,
+            if appt.patient:
+                notify_patient(
+                    patient=appt.patient,
                     topic="APPT_REMINDER",
                     title="Appointment Reminder",
                     body=f"Reminder: appointment at {appt.start_at}.",

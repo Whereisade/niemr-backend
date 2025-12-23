@@ -16,7 +16,7 @@ from .serializers import (
 from .permissions import IsStaff, CanViewRequest
 from .enums import RequestStatus
 from .services.notify import notify_report_ready
-from notifications.services.notify import notify_user
+from notifications.services.notify import notify_user, notify_patient
 from notifications.enums import Topic, Priority
 
 class ProcedureViewSet(viewsets.GenericViewSet, mixins.ListModelMixin, mixins.CreateModelMixin):
@@ -169,15 +169,17 @@ class ImagingRequestViewSet(viewsets.GenericViewSet,
         if req.patient and req.patient.email:
             notify_report_ready(req.patient.email, req.id)
         
-        if req.patient and req.patient.user_id:
-            notify_user(
-                user=req.patient.user,
+        if req.patient:
+            notify_patient(
+                patient=req.patient,
                 topic=Topic.IMAGING_REPORT_READY,
                 priority=Priority.NORMAL,
                 title="Your imaging report is ready",
                 body=f"Report for {req.procedure.name} is available.",
                 data={"request_id": req.id},
                 facility_id=req.facility_id,
+                action_url="/patient/imaging",
+                group_key=f"IMAGING:{req.id}:READY",
             )
 
         # Ordering clinician (in-app)
