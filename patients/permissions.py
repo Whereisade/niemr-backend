@@ -34,6 +34,7 @@ class IsSelfOrFacilityStaff(BasePermission):
                 or obj.lab_orders.filter(outsourced_to_id=uid).exists()
                 or obj.prescriptions.filter(prescribed_by_id=uid).exists()
                 or obj.prescriptions.filter(outsourced_to_id=uid).exists()
+                or obj.provider_links.filter(provider_id=uid).exists()
             )
 
         return False

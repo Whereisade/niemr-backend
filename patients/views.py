@@ -7,7 +7,7 @@ from rest_framework.response import Response
 from rest_framework_simplejwt.authentication import JWTAuthentication
 from rest_framework.exceptions import ValidationError
 
-from .models import Patient, PatientDocument, HMO, Allergy
+from .models import Patient, PatientDocument, HMO, Allergy, PatientProviderLink
 from .serializers import (
     PatientSerializer, PatientCreateByStaffSerializer, PatientDocumentSerializer,
     HMOSerializer, SelfRegisterSerializer,
@@ -62,6 +62,7 @@ class PatientViewSet(viewsets.GenericViewSet,
                         | Q(lab_orders__outsourced_to_id=uid)
                         | Q(prescriptions__prescribed_by_id=uid)
                         | Q(prescriptions__outsourced_to_id=uid)
+                        | Q(provider_links__provider_id=uid)
                     ).distinct()
 
         # basic search
@@ -77,6 +78,28 @@ class PatientViewSet(viewsets.GenericViewSet,
             return self.get_paginated_response(ser.data)
         ser = PatientSerializer(q, many=True)
         return Response(ser.data)
+
+    def perform_create(self, serializer):
+        """On independent provider create, auto-link patient to the creator.
+
+        This prevents the provider workspace from having to auto-start an encounter
+        just to make the new patient visible in the provider patient list.
+        """
+
+        patient = serializer.save()
+        u = self.request.user
+        # For independent provider staff (no facility), link the created patient
+        if not getattr(u, "facility_id", None):
+            role = (getattr(u, "role", "") or "").upper()
+            if role not in {"SUPER_ADMIN", "ADMIN"} and role in {
+                "DOCTOR",
+                "NURSE",
+                "LAB",
+                "PHARMACY",
+                "FRONTDESK",
+            }:
+                PatientProviderLink.objects.get_or_create(patient=patient, provider=u)
+        return patient
 
     @action(detail=True, methods=["post"], permission_classes=[IsAuthenticated, IsSelfOrFacilityStaff])
     def upload_document(self, request, pk=None):

@@ -131,6 +131,37 @@ class Patient(models.Model):
 
     def __str__(self):
         return f"{self.last_name}, {self.first_name}"
+
+
+class PatientProviderLink(models.Model):
+    """Link table for *independent* providers (no facility) to manage a patient roster.
+
+    Facility staff already scope patients by `Patient.facility`.
+    Independent providers do not have a facility, so we attach patients to them
+    explicitly via this link.
+    """
+
+    patient = models.ForeignKey(
+        "patients.Patient",
+        on_delete=models.CASCADE,
+        related_name="provider_links",
+    )
+    provider = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="managed_patients_links",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        unique_together = ("patient", "provider")
+        indexes = [
+            models.Index(fields=["provider", "patient"]),
+            models.Index(fields=["patient", "provider"]),
+        ]
+
+    def __str__(self):
+        return f"PatientProviderLink(patient={self.patient_id}, provider={self.provider_id})"
     
 
 class PatientDocument(models.Model):
