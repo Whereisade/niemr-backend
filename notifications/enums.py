@@ -43,6 +43,7 @@ class Topic(models.TextChoices):
 
     # Operations
     STAFF_ASSIGNED        = "STAFF_ASSIGNED", "Staff assigned"
+    WARD_ADMISSION_REQUEST = "WARD_ADMISSION_REQUEST", "Ward admission request"
     MESSAGE               = "MESSAGE", "Message"
     REMINDER              = "REMINDER", "Reminder"
     VITAL_ALERT           = "VITAL_ALERT", "Vital alert"

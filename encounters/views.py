@@ -11,7 +11,7 @@ from appointments.models import Appointment
 from appointments.enums import ApptStatus
 from patients.models import Patient
 from accounts.enums import UserRole
-from notifications.services.notify import notify_user, notify_patient
+from notifications.services.notify import notify_user, notify_patient, notify_facility_roles
 from notifications.enums import Topic, Priority
 from .enums import EncounterStage, EncounterStatus, SoapSection
 from .models import Encounter, EncounterAmendment
@@ -74,8 +74,8 @@ class EncounterViewSet(
             q = q.filter(occurred_at__gte=parse_datetime(start) or start)
         if end:
             q = q.filter(occurred_at__lte=parse_datetime(end) or end)
-        # Ensure newest-created encounters appear first in list views
-        return q.order_by('-created_at', '-id')
+
+        return q
 
     def create(self, request, *args, **kwargs):
         self.permission_classes = [IsAuthenticated, IsStaff]
@@ -632,3 +632,94 @@ class EncounterViewSet(
             pass
 
         return Response(EncounterSerializer(enc, context={"request": request}).data)
+
+
+    @action(detail=True, methods=["post"], url_path="request_admission")
+    def request_admission(self, request, pk=None):
+        """Request that nursing staff admit the patient to a ward.
+
+        This action only sends in-app notifications (no ward/bed assignment happens here).
+        """
+        enc = self.get_object()
+        self.permission_classes = [IsAuthenticated, IsStaff]
+        self.check_permissions(request)
+
+        role = (getattr(request.user, "role", "") or "").upper()
+        if role not in (UserRole.DOCTOR, UserRole.ADMIN, UserRole.SUPER_ADMIN):
+            return Response(
+                {"detail": "Only doctors (or admins) can request ward admission."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        if not enc.facility_id:
+            return Response(
+                {"detail": "Ward admission requests are only available for facility encounters."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        # Basic names (best-effort)
+        doctor_name = (
+            f"{getattr(request.user, 'first_name', '')} {getattr(request.user, 'last_name', '')}".strip()
+            or getattr(request.user, "email", "")
+            or "Doctor"
+        )
+        patient_name = ""
+        try:
+            patient_name = " ".join(
+                [
+                    p
+                    for p in [
+                        getattr(enc.patient, "first_name", ""),
+                        getattr(enc.patient, "middle_name", ""),
+                        getattr(enc.patient, "last_name", ""),
+                    ]
+                    if p
+                ]
+            ).strip()
+        except Exception:
+            patient_name = ""
+
+        title = "Ward admission requested"
+        body = (
+            f"{doctor_name} requested ward admission for {patient_name or f'patient #{enc.patient_id}'} "
+            f"(Encounter #{enc.id})."
+        )
+        payload = {"encounter_id": enc.id, "patient_id": enc.patient_id}
+        action_url = "/facility/wards"
+        group_key = f"ENC:{enc.id}:WARD_ADMIT_REQ"
+
+        # Prefer notifying the encounter nurse if one exists; otherwise notify all facility nurses.
+        notified = 0
+        try:
+            if enc.nurse_id and getattr(enc, "nurse", None):
+                notify_user(
+                    user=enc.nurse,
+                    topic=Topic.WARD_ADMISSION_REQUEST,
+                    priority=Priority.HIGH,
+                    title=title,
+                    body=body,
+                    facility_id=enc.facility_id,
+                    data=payload,
+                    action_url=action_url,
+                    group_key=group_key,
+                )
+                notified = 1
+            else:
+                notified = notify_facility_roles(
+                    facility_id=enc.facility_id,
+                    roles=[UserRole.NURSE],
+                    topic=Topic.WARD_ADMISSION_REQUEST,
+                    priority=Priority.HIGH,
+                    title=title,
+                    body=body,
+                    data=payload,
+                    action_url=action_url,
+                    group_key=group_key,
+                )
+        except Exception:
+            notified = 0
+
+        return Response(
+            {"detail": "Ward admission request sent.", "notified": notified},
+            status=status.HTTP_200_OK,
+        )
