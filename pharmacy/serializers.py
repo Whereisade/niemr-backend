@@ -241,15 +241,20 @@ class PrescriptionCreateSerializer(serializers.ModelSerializer):
         items = validated.pop("items", [])
         outsourced_to_id = validated.pop("outsourced_to", None)
 
-        patient = validated["patient"]
-        facility = u.facility if getattr(u, "facility_id", None) else getattr(patient, "facility", None)
+        # ✅ IMPORTANT: remove patient from validated so it isn't passed twice
+        patient = validated.pop("patient")
+
+        facility = (
+            u.facility if getattr(u, "facility_id", None)
+            else getattr(patient, "facility", None)
+        )
 
         rx = Prescription.objects.create(
             patient=patient,
             facility=facility,
             prescribed_by=u,
             outsourced_to_id=outsourced_to_id,
-            **validated,
+            **validated,  # now contains only encounter_id, note, etc.
         )
 
         for it in items:
@@ -273,6 +278,9 @@ class PrescriptionCreateSerializer(serializers.ModelSerializer):
                 pass
 
         return rx
+
+
+
 
 
 class PrescriptionReadSerializer(serializers.ModelSerializer):

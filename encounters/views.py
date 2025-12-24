@@ -74,8 +74,8 @@ class EncounterViewSet(
             q = q.filter(occurred_at__gte=parse_datetime(start) or start)
         if end:
             q = q.filter(occurred_at__lte=parse_datetime(end) or end)
-
-        return q
+        # Ensure newest-created encounters appear first in list views
+        return q.order_by('-created_at', '-id')
 
     def create(self, request, *args, **kwargs):
         self.permission_classes = [IsAuthenticated, IsStaff]

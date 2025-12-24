@@ -37,6 +37,8 @@ class AppointmentSerializer(serializers.ModelSerializer):
     has_encounter = serializers.SerializerMethodField(read_only=True)
     encounter_status = serializers.SerializerMethodField(read_only=True)
 
+    encounter_stage = serializers.SerializerMethodField(read_only=True)
+
     # Computed fields for UI
     can_start_encounter = serializers.SerializerMethodField(read_only=True)
     available_actions = serializers.SerializerMethodField(read_only=True)
@@ -63,8 +65,9 @@ class AppointmentSerializer(serializers.ModelSerializer):
             "encounter_id",
             "has_encounter",
             "encounter_status",
+            "encounter_stage",
             "can_start_encounter",
-            "available_actions",
+                        "available_actions",
             "lab_order_id",
             "imaging_request_id",
             "notify_email",
@@ -133,7 +136,6 @@ class AppointmentSerializer(serializers.ModelSerializer):
 
     def get_has_encounter(self, obj):
         return obj.encounter_id is not None
-
     def get_encounter_status(self, obj):
         if not obj.encounter_id:
             return None
@@ -150,6 +152,21 @@ class AppointmentSerializer(serializers.ModelSerializer):
         except Exception:
             return None
 
+    def get_encounter_stage(self, obj):
+        if not obj.encounter_id:
+            return None
+
+        enc = _get_prefetched_encounter(obj)
+        if enc is not None:
+            return getattr(enc, "stage", None)
+
+        try:
+            from encounters.models import Encounter
+
+            row = Encounter.objects.filter(id=obj.encounter_id).values("stage").first()
+            return row.get("stage") if row else None
+        except Exception:
+            return None
     def get_can_start_encounter(self, obj):
         if obj.status in (ApptStatus.CANCELLED, ApptStatus.COMPLETED, ApptStatus.NO_SHOW):
             return False
@@ -289,6 +306,7 @@ class AppointmentListSerializer(serializers.ModelSerializer):
 
     has_encounter = serializers.SerializerMethodField(read_only=True)
     encounter_status = serializers.SerializerMethodField(read_only=True)
+    encounter_stage = serializers.SerializerMethodField(read_only=True)
     can_start_encounter = serializers.SerializerMethodField(read_only=True)
     available_actions = serializers.SerializerMethodField(read_only=True)
 
@@ -312,8 +330,9 @@ class AppointmentListSerializer(serializers.ModelSerializer):
             "encounter_id",
             "has_encounter",
             "encounter_status",
+            "encounter_stage",
             "can_start_encounter",
-            "available_actions",
+                        "available_actions",
             "created_at",
         ]
 
@@ -365,7 +384,6 @@ class AppointmentListSerializer(serializers.ModelSerializer):
 
     def get_has_encounter(self, obj):
         return obj.encounter_id is not None
-
     def get_encounter_status(self, obj):
         if not obj.encounter_id:
             return None
@@ -382,6 +400,21 @@ class AppointmentListSerializer(serializers.ModelSerializer):
         except Exception:
             return None
 
+    def get_encounter_stage(self, obj):
+        if not obj.encounter_id:
+            return None
+
+        enc = _get_prefetched_encounter(obj)
+        if enc is not None:
+            return getattr(enc, "stage", None)
+
+        try:
+            from encounters.models import Encounter
+
+            row = Encounter.objects.filter(id=obj.encounter_id).values("stage").first()
+            return row.get("stage") if row else None
+        except Exception:
+            return None
     def get_can_start_encounter(self, obj):
         if obj.status in (ApptStatus.CANCELLED, ApptStatus.COMPLETED, ApptStatus.NO_SHOW):
             return False
