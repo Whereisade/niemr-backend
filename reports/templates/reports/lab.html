@@ -1,29 +1,77 @@
 {% extends "reports/base.html" %}
+
 {% block content %}
-<h2>Lab Result</h2>
-<div class="section">
-  <strong>Patient:</strong> {{ patient.first_name }} {{ patient.last_name }} (ID: {{ patient.id }})<br>
-  <strong>Order #:</strong> {{ order.id }} • <strong>Status:</strong> {{ status }}<br>
-  <strong>Indication:</strong> {{ indication }}
+
+<div class="section keep">
+  <div class="section-header-row">
+    <div class="left">
+      <h2>Lab Result</h2>
+      <div class="section-subtitle">
+        Summary of ordered investigation and reported values for this patient.
+      </div>
+    </div>
+    <div class="right muted">
+      Order #{{ order.id }}{% if status %} • {{ status }}{% endif %}
+    </div>
+  </div>
+
+  <table class="kv">
+    <tr>
+      <td class="k">Patient</td>
+      <td class="v">
+        {{ patient.first_name }} {{ patient.last_name }} (ID: {{ patient.id }})
+      </td>
+    </tr>
+    <tr>
+      <td class="k">Order</td>
+      <td class="v">
+        #{{ order.id }}
+        {% if status %} • Status: {{ status }}{% endif %}
+      </td>
+    </tr>
+    <tr>
+      <td class="k">Indication</td>
+      <td class="v">
+        {% if indication %}
+          {{ indication }}
+        {% else %}
+          <span class="muted">—</span>
+        {% endif %}
+      </td>
+    </tr>
+  </table>
 </div>
 
-<div class="section">
+<div class="section keep">
   <h3>Results</h3>
   <table>
-    <thead><tr><th>Test</th><th>Value</th><th>Unit</th><th>Reference</th><th>Flag</th></tr></thead>
-    <tbody>
-    {% for r in results %}
+    <thead>
       <tr>
-        <td>{{ r.test_name }}</td>
-        <td>{{ r.value }}</td>
-        <td>{{ r.unit }}</td>
-        <td class="muted">{{ r.ref_range }}</td>
-        <td>{% if r.flag %}{{ r.flag }}{% endif %}</td>
+        <th>Test</th>
+        <th>Value</th>
+        <th>Unit</th>
+        <th>Reference</th>
+        <th>Flag</th>
       </tr>
-    {% empty %}
-      <tr><td colspan="5" class="muted">No results yet.</td></tr>
-    {% endfor %}
+    </thead>
+    <tbody>
+      {% for r in results %}
+        <tr>
+          <td>{{ r.test_name }}</td>
+          <td>{{ r.value }}</td>
+          <td>{{ r.unit }}</td>
+          <td class="muted">{{ r.ref_range }}</td>
+          <td>{% if r.flag %}{{ r.flag }}{% endif %}</td>
+        </tr>
+      {% empty %}
+        <tr>
+          <td colspan="5" class="muted">No results yet.</td>
+        </tr>
+      {% endfor %}
     </tbody>
   </table>
 </div>
+
 {% endblock %}
+
+

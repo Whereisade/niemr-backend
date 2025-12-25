@@ -14,142 +14,322 @@
       }
     }
 
+
     html, body {
-      font-family: Inter, Arial, sans-serif;
+      font-family: -apple-system, BlinkMacSystemFont, "Inter", system-ui, -sans-serif, Arial;
       font-size: 12px;
-      color: #111;
-      line-height: 1.35;
+      color: #111827;
+      line-height: 1.4;
     }
 
-    h1, h2 {
-      margin: 0 0 8px;
+
+    h1, h2, h3 {
+      margin: 0;
+      font-weight: 600;
+      color: #111827;
     }
+
+
+    h1 {
+      font-size: 18px;
+    }
+
+
+    h2 {
+      font-size: 16px;
+    }
+
 
     h3 {
-      margin: 0 0 6px;
+      font-size: 13px;
     }
+
+
+    /* ==== HEADER ===== */
+
 
     .header {
-      border-bottom: 2px solid #222;
-      padding-bottom: 8px;
-      margin-bottom: 12px;
+      margin-bottom: 16px;
+      padding-bottom: 10px;
+      border-bottom: 1px solid #E5E7EB;
     }
 
-    .header .row {
+
+    .header-top {
       display: table;
       width: 100%;
+      margin-bottom: 6px;
     }
 
-    .header .left,
-    .header .right {
+
+    .header-top .left,
+    .header-top .right {
       display: table-cell;
       vertical-align: top;
     }
 
-    .header .right {
+
+    .header-top .right {
       text-align: right;
     }
+
+
+    .brand-block {
+      display: inline-block;
+      padding: 6px 10px;
+      border-radius: 6px;
+      border: 1px solid #E5E7EB;
+      background: linear-gradient(90deg, #EFF6FF, #ECFEFF);
+    }
+
 
     .brand {
       font-size: 18px;
       font-weight: 700;
+      letter-spacing: 0.02em;
+      color: #0F172A;
     }
+
 
     .title {
       font-size: 12px;
       font-weight: 600;
-      margin-top: 2px;
-      color: #333;
+      margin-top: 3px;
+      color: #4B5563;
     }
 
+
     .meta {
-      font-size: 11px;
-      color: #555;
-      margin-top: 4px;
+      font-size: 10.5px;
+      color: #6B7280;
     }
+
+
+    .header-meta-row {
+      display: table;
+      width: 100%;
+      margin-top: 4px;
+      font-size: 10.5px;
+      color: #6B7280;
+    }
+
+
+    .header-meta-row .left,
+    .header-meta-row .right {
+      display: table-cell;
+      vertical-align: middle;
+    }
+
+
+    .header-meta-row .right {
+      text-align: right;
+      font-style: italic;
+    }
+
+
+    .pill-muted {
+      display: inline-block;
+      padding: 2px 6px;
+      border-radius: 999px;
+      background-color: #F3F4F6;
+      font-size: 10px;
+      font-weight: 500;
+      color: #4B5563;
+    }
+
+
+    /* ==== SECTIONS / LAYOUT ===== */
+
 
     .section {
       margin: 14px 0;
     }
 
+
     .section h3 {
       font-size: 13px;
-      border-bottom: 1px solid #ddd;
-      padding-bottom: 3px;
-    }
-
-    table {
-      width: 100%;
-      border-collapse: collapse;
-    }
-
-    th, td {
-      border: 1px solid #e5e5e5;
-      padding: 6px 8px;
-      text-align: left;
-      vertical-align: top;
-    }
-
-    .kv th, .kv td {
-      border: 0;
-      padding: 2px 0;
-    }
-
-    .kv .k {
-      width: 26%;
       font-weight: 600;
-      color: #555;
-      padding-right: 10px;
+      padding-bottom: 4px;
+      border-bottom: 1px solid #E5E7EB;
+      color: #111827;
     }
 
-    .text {
-      white-space: pre-wrap;
-      word-break: break-word;
+
+    .section-header-row {
+      display: table;
+      width: 100%;
+      margin-bottom: 4px;
     }
 
-    .muted {
-      color: #666;
+
+    .section-header-row .left,
+    .section-header-row .right {
+      display: table-cell;
+      vertical-align: middle;
     }
 
-    .right {
+
+    .section-header-row .right {
       text-align: right;
+      font-size: 10px;
+      color: #6B7280;
     }
+
+
+    .section-subtitle {
+      font-size: 11px;
+      color: #6B7280;
+      margin-top: 2px;
+    }
+
 
     .keep {
       page-break-inside: avoid;
     }
 
+
+    .hr {
+      border-top: 1px dashed #D1D5DB;
+      margin: 10px 0;
+    }
+
+
+    .text {
+      white-space: pre-wrap;
+      word-break: break-word;
+      font-size: 11.5px;
+      color: #111827;
+    }
+
+
+    .muted {
+      color: #6B7280;
+    }
+
+
+    .right {
+      text-align: right;
+    }
+
+
     ul {
       margin: 0 0 0 18px;
       padding: 0;
+      font-size: 11.5px;
     }
+
 
     li {
       margin: 0 0 3px 0;
     }
 
-    .hr {
-      border-top: 1px solid #ddd;
-      margin: 10px 0;
+
+    /* ==== TABLES ===== */
+
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      border-spacing: 0;
+      font-size: 11.5px;
+    }
+
+
+    th, td {
+      border: 1px solid #E5E7EB;
+      padding: 6px 8px;
+      text-align: left;
+      vertical-align: top;
+    }
+
+
+    thead th {
+      font-size: 11px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      color: #4B5563;
+      background-color: #F3F4F6;
+    }
+
+
+    tbody tr:nth-child(even) td {
+      background-color: #F9FAFB;
+    }
+
+
+    tbody tr:nth-child(odd) td {
+      background-color: #FFFFFF;
+    }
+
+
+    /* key–value table (details) */
+    .kv {
+      width: 100%;
+      border-collapse: collapse;
+      margin-top: 2px;
+    }
+
+
+    .kv th,
+    .kv td {
+      border: 0;
+      padding: 2px 0;
+      font-size: 11.5px;
+    }
+
+
+    .kv .k {
+      width: 30%;
+      font-weight: 600;
+      color: #4B5563;
+      padding-right: 10px;
+      white-space: nowrap;
+    }
+
+
+    .kv .v {
+      color: #111827;
+    }
+
+
+    .kv .muted {
+      color: #6B7280;
     }
   </style>
 </head>
 <body>
   <div class="header">
-    <div class="row">
+    <div class="header-top">
       <div class="left">
-        <div class="brand">{{ brand.name }}</div>
-        {% if title %}<div class="title">{{ title }}</div>{% endif %}
+        <div class="brand-block">
+          <div class="brand">{{ brand.name }}</div>
+          {% if title %}
+            <div class="title">{{ title }}</div>
+          {% endif %}
+        </div>
       </div>
       <div class="right meta">
-        Generated at: {{ generated_at }}
+        <span class="pill-muted">Generated at</span>
+        &nbsp;{{ generated_at }}
       </div>
     </div>
-    <div class="meta">
-      {{ brand.address }} • {{ brand.phone }} • {{ brand.email }}
+
+
+    <div class="header-meta-row">
+      <div class="left">
+        {{ brand.address }} • {{ brand.phone }} • {{ brand.email }}
+      </div>
+      <div class="right">
+        <!-- Reserved for optional report-level tags/badges in child templates -->
+      </div>
     </div>
   </div>
+
 
   {% block content %}{% endblock %}
 </body>
 </html>
+
+
+

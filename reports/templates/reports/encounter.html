@@ -1,46 +1,80 @@
 {% extends "reports/base.html" %}
-{% block content %}
-<h2>Encounter Summary</h2>
 
-<table class="kv keep">
-  <tr>
-    <td class="k">Patient</td>
-    <td>
-      {{ patient.last_name }}, {{ patient.first_name }}{% if patient.middle_name %} {{ patient.middle_name }}{% endif %}
-      (ID: {{ patient.id }})
-      {% if patient.gender %} • {{ patient.gender }}{% endif %}
-      {% if patient.dob %} • DOB: {{ patient.dob|date:"Y-m-d" }}{% endif %}
-    </td>
-  </tr>
-  <tr>
-    <td class="k">Facility</td>
-    <td>{{ facility.name|default:"—" }}</td>
-  </tr>
-  <tr>
-    <td class="k">Encounter</td>
-    <td>
-      #{{ encounter.id }}
+
+{% block content %}
+
+
+<!-- Top summary section -->
+<div class="section keep">
+  <div class="section-header-row">
+    <div class="left">
+      <h2>Encounter Summary</h2>
+      <div class="section-subtitle">
+        Overview of the patient, facility, and care team for this encounter.
+      </div>
+    </div>
+    <div class="right muted">
+      Encounter #{{ encounter.id }}
       {% if encounter.occurred_at %} • {{ encounter.occurred_at|date:"Y-m-d H:i" }}{% endif %}
       {% if encounter.encounter_type %} • {{ encounter.encounter_type }}{% endif %}
-      {% if encounter.status %} • {{ encounter.status }}{% endif %}
-      {% if encounter.stage %} • {{ encounter.stage }}{% endif %}
-    </td>
-  </tr>
-  <tr>
-    <td class="k">Provider</td>
-    <td>
-      {% if provider %}{{ provider.get_full_name|default:provider.email }}{% else %}<span class="muted">—</span>{% endif %}
-    </td>
-  </tr>
-  <tr>
-    <td class="k">Nurse</td>
-    <td>
-      {% if nurse %}{{ nurse.get_full_name|default:nurse.email }}{% else %}<span class="muted">—</span>{% endif %}
-    </td>
-  </tr>
-</table>
+    </div>
+  </div>
 
-<div class="section">
+
+  <table class="kv">
+    <tr>
+      <td class="k">Patient</td>
+      <td class="v">
+        {{ patient.last_name }}, {{ patient.first_name }}{% if patient.middle_name %} {{ patient.middle_name }}{% endif %}
+        (ID: {{ patient.id }})
+        {% if patient.gender %} • {{ patient.gender }}{% endif %}
+        {% if patient.dob %} • DOB: {{ patient.dob|date:"Y-m-d" }}{% endif %}
+      </td>
+    </tr>
+    <tr>
+      <td class="k">Facility</td>
+      <td class="v">
+        {{ facility.name|default:"—" }}
+      </td>
+    </tr>
+    <tr>
+      <td class="k">Encounter</td>
+      <td class="v">
+        #{{ encounter.id }}
+        {% if encounter.occurred_at %} • {{ encounter.occurred_at|date:"Y-m-d H:i" }}{% endif %}
+        {% if encounter.encounter_type %} • {{ encounter.encounter_type }}{% endif %}
+        {% if encounter.status %} • {{ encounter.status }}{% endif %}
+        {% if encounter.stage %} • {{ encounter.stage }}{% endif %}
+      </td>
+    </tr>
+    <tr>
+      <td class="k">Provider</td>
+      <td class="v">
+        {% if provider %}
+          {{ provider.get_full_name|default:provider.email }}
+        {% else %}
+          <span class="muted">—</span>
+        {% endif %}
+      </td>
+    </tr>
+    <tr>
+      <td class="k">Nurse</td>
+      <td class="v">
+        {% if nurse %}
+          {{ nurse.get_full_name|default:nurse.email }}
+        {% else %}
+          <span class="muted">—</span>
+        {% endif %}
+      </td>
+    </tr>
+  </table>
+</div>
+
+
+<!-- SOAP-style sections -->
+
+
+<div class="section keep">
   <h3>Chief Complaint</h3>
   {% if chief_complaint %}
     <div class="text">{{ chief_complaint }}</div>
@@ -49,7 +83,8 @@
   {% endif %}
 </div>
 
-<div class="section">
+
+<div class="section keep">
   <h3>History of Present Illness (HPI)</h3>
   {% if hpi %}
     <div class="text">{{ hpi }}</div>
@@ -58,7 +93,8 @@
   {% endif %}
 </div>
 
-<div class="section">
+
+<div class="section keep">
   <h3>Review of Systems (ROS)</h3>
   {% if ros %}
     <div class="text">{{ ros }}</div>
@@ -67,7 +103,8 @@
   {% endif %}
 </div>
 
-<div class="section">
+
+<div class="section keep">
   <h3>Physical Examination</h3>
   {% if physical_exam %}
     <div class="text">{{ physical_exam }}</div>
@@ -76,11 +113,14 @@
   {% endif %}
 </div>
 
+
 <div class="section keep">
   <h3>Diagnoses</h3>
   {% if diagnoses_list and diagnoses_list|length > 0 %}
     <ul>
-      {% for d in diagnoses_list %}<li>{{ d }}</li>{% endfor %}
+      {% for d in diagnoses_list %}
+        <li>{{ d }}</li>
+      {% endfor %}
     </ul>
   {% elif diagnoses_text %}
     <div class="text">{{ diagnoses_text }}</div>
@@ -89,11 +129,14 @@
   {% endif %}
 </div>
 
+
 <div class="section keep">
   <h3>Plan</h3>
   {% if plan_list and plan_list|length > 0 %}
     <ul>
-      {% for p in plan_list %}<li>{{ p }}</li>{% endfor %}
+      {% for p in plan_list %}
+        <li>{{ p }}</li>
+      {% endfor %}
     </ul>
   {% elif plan_text %}
     <div class="text">{{ plan_text }}</div>
@@ -102,4 +145,8 @@
   {% endif %}
 </div>
 
+
 {% endblock %}
+
+
+

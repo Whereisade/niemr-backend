@@ -1,22 +1,62 @@
 {% extends "reports/base.html" %}
+
 {% block content %}
-<h2>Imaging Report</h2>
-<div class="section">
-  <strong>Patient:</strong> {{ patient.first_name }} {{ patient.last_name }} (ID: {{ patient.id }})<br>
-  <strong>Request #:</strong> {{ request.id }} • <strong>Procedure:</strong> {{ procedure.name }} ({{ procedure.modality }})<br>
+
+<div class="section keep">
+  <div class="section-header-row">
+    <div class="left">
+      <h2>Imaging Report</h2>
+      <div class="section-subtitle">
+        Summary of requested imaging procedure and radiology findings.
+      </div>
+    </div>
+    <div class="right muted">
+      Request #{{ request.id }}
+      {% if procedure %}
+        • {{ procedure.modality }}{% if procedure.name %} – {{ procedure.name }}{% endif %}
+      {% endif %}
+    </div>
+  </div>
+
+  <table class="kv">
+    <tr>
+      <td class="k">Patient</td>
+      <td class="v">
+        {{ patient.first_name }} {{ patient.last_name }} (ID: {{ patient.id }})
+      </td>
+    </tr>
+    <tr>
+      <td class="k">Request</td>
+      <td class="v">
+        #{{ request.id }}
+        {% if procedure %}
+          • Procedure: {{ procedure.name }} ({{ procedure.modality }})
+        {% endif %}
+      </td>
+    </tr>
+  </table>
 </div>
 
 {% if report %}
-<div class="section">
-  <h3>Findings</h3>
-  <div>{{ report.findings|linebreaks }}</div>
-</div>
+  <div class="section keep">
+    <h3>Findings</h3>
+    <div class="text">
+      {{ report.findings|linebreaks }}
+    </div>
+  </div>
 
-<div class="section">
-  <h3>Impression</h3>
-  <div><strong>{{ report.impression|linebreaks }}</strong></div>
-</div>
+  <div class="section keep">
+    <h3>Impression</h3>
+    <div class="text">
+      <strong>{{ report.impression|linebreaks }}</strong>
+    </div>
+  </div>
 {% else %}
-<div class="section muted">No report yet.</div>
+  <div class="section keep muted">
+    No report yet.
+  </div>
 {% endif %}
+
 {% endblock %}
+
+
