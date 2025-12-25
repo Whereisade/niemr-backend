@@ -1,7 +1,7 @@
 # reports/views.py
 from django.utils import timezone
 from django.http import HttpResponse
-
+from rest_framework_simplejwt.authentication import JWTAuthentication
 from rest_framework.views import APIView
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
@@ -28,6 +28,7 @@ class GenerateReportView(APIView):
       "save_as_attachment": true
     }
     """
+    authentication_classes = [JWTAuthentication]
     permission_classes = [IsAuthenticated]
 
     def post(self, request, *args, **kwargs):
@@ -39,9 +40,11 @@ class GenerateReportView(APIView):
         ref_id = data["ref_id"]
         as_pdf = data["as_pdf"]
         save_as_attachment_flag = data["save_as_attachment"]
+        start = data.get("start")
+        end = data.get("end")
 
         obj, cfg = get_report_object(report_type, ref_id)
-        html = render_report_html(report_type, obj, cfg)
+        html = render_report_html(report_type, obj, cfg, start=start, end=end)
 
         # Build filename like encounter-42-20251205-120000.pdf
         timestamp = timezone.now().strftime("%Y%m%d-%H%M%S")

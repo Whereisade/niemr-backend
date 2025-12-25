@@ -4,26 +4,152 @@
   <meta charset="utf-8">
   <title>{{ title|default:"Report" }}</title>
   <style>
-    body { font-family: Inter, Arial, sans-serif; font-size: 12px; color: #111; }
-    .header { border-bottom: 2px solid #222; padding-bottom: 6px; margin-bottom: 12px; }
-    .brand { font-size: 18px; font-weight: 600; }
-    .meta { font-size: 11px; color: #555; }
-    .section { margin: 18px 0; }
-    .section h3 { margin: 0 0 8px; border-bottom: 1px solid #ddd; padding-bottom: 4px; }
-    table { width: 100%; border-collapse: collapse; }
-    th, td { border: 1px solid #e5e5e5; padding: 6px 8px; text-align: left; }
-    .muted { color: #666; }
-    .right { text-align: right; }
+    @page {
+      size: A4;
+      margin: 16mm 14mm 18mm;
+      @bottom-center {
+        content: "Page " counter(page) " of " counter(pages);
+        font-size: 10px;
+        color: #777;
+      }
+    }
+
+    html, body {
+      font-family: Inter, Arial, sans-serif;
+      font-size: 12px;
+      color: #111;
+      line-height: 1.35;
+    }
+
+    h1, h2 {
+      margin: 0 0 8px;
+    }
+
+    h3 {
+      margin: 0 0 6px;
+    }
+
+    .header {
+      border-bottom: 2px solid #222;
+      padding-bottom: 8px;
+      margin-bottom: 12px;
+    }
+
+    .header .row {
+      display: table;
+      width: 100%;
+    }
+
+    .header .left,
+    .header .right {
+      display: table-cell;
+      vertical-align: top;
+    }
+
+    .header .right {
+      text-align: right;
+    }
+
+    .brand {
+      font-size: 18px;
+      font-weight: 700;
+    }
+
+    .title {
+      font-size: 12px;
+      font-weight: 600;
+      margin-top: 2px;
+      color: #333;
+    }
+
+    .meta {
+      font-size: 11px;
+      color: #555;
+      margin-top: 4px;
+    }
+
+    .section {
+      margin: 14px 0;
+    }
+
+    .section h3 {
+      font-size: 13px;
+      border-bottom: 1px solid #ddd;
+      padding-bottom: 3px;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+    }
+
+    th, td {
+      border: 1px solid #e5e5e5;
+      padding: 6px 8px;
+      text-align: left;
+      vertical-align: top;
+    }
+
+    .kv th, .kv td {
+      border: 0;
+      padding: 2px 0;
+    }
+
+    .kv .k {
+      width: 26%;
+      font-weight: 600;
+      color: #555;
+      padding-right: 10px;
+    }
+
+    .text {
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+
+    .muted {
+      color: #666;
+    }
+
+    .right {
+      text-align: right;
+    }
+
+    .keep {
+      page-break-inside: avoid;
+    }
+
+    ul {
+      margin: 0 0 0 18px;
+      padding: 0;
+    }
+
+    li {
+      margin: 0 0 3px 0;
+    }
+
+    .hr {
+      border-top: 1px solid #ddd;
+      margin: 10px 0;
+    }
   </style>
 </head>
 <body>
   <div class="header">
-    <div class="brand">{{ brand.name }}</div>
+    <div class="row">
+      <div class="left">
+        <div class="brand">{{ brand.name }}</div>
+        {% if title %}<div class="title">{{ title }}</div>{% endif %}
+      </div>
+      <div class="right meta">
+        Generated at: {{ generated_at }}
+      </div>
+    </div>
     <div class="meta">
-      {{ brand.address }} • {{ brand.phone }} • {{ brand.email }}<br>
-      Generated at: {{ generated_at }}
+      {{ brand.address }} • {{ brand.phone }} • {{ brand.email }}
     </div>
   </div>
+
   {% block content %}{% endblock %}
 </body>
 </html>

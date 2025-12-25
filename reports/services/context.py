@@ -1,73 +1,189 @@
-# reports/services/context.py
+from __future__ import annotations
+
+"""Report context builders.
+
+These functions produce template-ready context dictionaries for
+reports/templates/reports/*.html.
+
+Patch v3:
+- Fix ENCOUNTER report context to match encounters.Encounter model fields in this repo.
+  * Encounter has chief_complaint/hpi/ros/physical_exam + diagnoses/plan as TEXT.
+  * Previous code treated diagnoses as iterable -> scattered characters in PDF.
+  * Provide diagnoses_list/plan_list + raw text, plus structured clinical sections.
+
+Patch v2 (kept):
+- Fix LAB report: LabOrder uses related_name="items" (LabOrderItem), not "results".
+- Provide template-friendly results list with keys expected by reports/templates/reports/lab.html.
+- Add optional charge_id filtering to billing_context to support per-charge receipts.
+"""
+
 from decimal import Decimal
+
 from django.apps import apps
 from django.conf import settings
 from django.utils import timezone
+
 
 def _model(app_label: str, model_name: str):
     # Lazy model resolver to avoid import-time errors
     return apps.get_model(app_label, model_name)
 
+
 def brand():
     return getattr(settings, "REPORTS_BRAND", {})
 
+
+def _clean_text(v) -> str:
+    return (v or "").strip()
+
+
+def _split_bullets(text: str):
+    """Split a free-text field into bullet-like items.
+
+    - Prefer newline separation.
+    - If single-line, fall back to semicolon / comma separation.
+    """
+
+    t = _clean_text(text)
+    if not t:
+        return []
+
+    t = t.replace("\r", "\n")
+    lines = [ln.strip().lstrip("-•*\t ") for ln in t.split("\n")]
+    lines = [ln for ln in lines if ln]
+
+    if len(lines) == 1:
+        single = lines[0]
+        sep = ";" if ";" in single else ("," if "," in single else None)
+        if sep:
+            parts = [p.strip() for p in single.split(sep) if p.strip()]
+            if len(parts) > 1:
+                return parts
+
+    return lines
+
+
 def encounter_context(encounter_id: int) -> dict:
+    """Template context for reports/templates/reports/encounter.html."""
+
     Encounter = _model("encounters", "Encounter")
-    enc = (Encounter.objects
-           .select_related("patient", "facility", "created_by")
-           .get(id=encounter_id))
-    # Optional relateds – use getattr to avoid hard coupling
-    vitals = getattr(enc, "vitals_snapshot", None)
-    notes = getattr(enc, "notes", "")
-    diagnoses = getattr(enc, "diagnoses", []) or []
-    plans = getattr(enc, "plans", []) or []
-    prescriptions = getattr(enc, "prescriptions", None)
-    lab_orders = getattr(enc, "lab_orders", None)
-    imaging_requests = getattr(enc, "imaging_requests", None)
+
+    enc = (
+        Encounter.objects.select_related(
+            "patient",
+            "facility",
+            "created_by",
+            "nurse",
+            "provider",
+        ).get(id=encounter_id)
+    )
+
+    diagnoses_text = _clean_text(getattr(enc, "diagnoses", ""))
+    plan_text = _clean_text(getattr(enc, "plan", ""))
+
+    # The PDF template renders these lists as bullets.
+    diagnoses_list = _split_bullets(diagnoses_text)
+    plan_list = _split_bullets(plan_text)
 
     return {
         "brand": brand(),
         "generated_at": timezone.now(),
+        "title": f"Encounter #{enc.id}",
         "encounter": enc,
         "patient": enc.patient,
         "facility": enc.facility,
-        "author": enc.created_by,
-        "vitals": vitals,
-        "notes": notes,
-        "diagnoses": diagnoses,
-        "plans": plans,
-        "prescriptions": list(prescriptions.all()) if hasattr(prescriptions, "all") else [],
-        "labs": list(lab_orders.all()) if hasattr(lab_orders, "all") else [],
-        "imaging": list(imaging_requests.all()) if hasattr(imaging_requests, "all") else [],
+        # Best "author" for an encounter is the provider if set; else created_by.
+        "author": enc.provider or enc.created_by,
+        "created_by": enc.created_by,
+        "nurse": getattr(enc, "nurse", None),
+        "provider": getattr(enc, "provider", None),
+        # Clinical sections
+        "chief_complaint": _clean_text(getattr(enc, "chief_complaint", "")),
+        "hpi": _clean_text(getattr(enc, "hpi", "")),
+        "ros": _clean_text(getattr(enc, "ros", "")),
+        "physical_exam": _clean_text(getattr(enc, "physical_exam", "")),
+        # Assessment/Plan
+        "diagnoses_text": diagnoses_text,
+        "diagnoses_list": diagnoses_list,
+        "plan_text": plan_text,
+        "plan_list": plan_list,
     }
 
+
+def _format_ref_range(lo, hi) -> str:
+    if lo is None and hi is None:
+        return ""
+    if lo is None:
+        return f"≤ {hi}"
+    if hi is None:
+        return f"≥ {lo}"
+    return f"{lo} – {hi}"
+
+
 def lab_context(order_id: int) -> dict:
+    """Template context for reports/templates/reports/lab.html."""
+
     LabOrder = _model("labs", "LabOrder")
-    order = (LabOrder.objects
-             .select_related("patient", "facility", "ordered_by")
-             .prefetch_related("results")
-             .get(id=order_id))
-    # `results` may be a reverse relation with different name in your app.
-    results_rel = getattr(order, "results", None)
-    results = list(results_rel.all()) if hasattr(results_rel, "all") else []
+
+    order = (
+        LabOrder.objects.select_related("patient", "facility", "ordered_by")
+        .prefetch_related("items__test")
+        .get(id=order_id)
+    )
+
+    # Build template-friendly results. The template expects:
+    #   r.test_name, r.value, r.unit, r.ref_range, r.flag
+    results = []
+    for item in order.items.all():
+        test_name = getattr(item, "display_name", None) or getattr(item, "requested_name", "")
+        test_name = (test_name or "").strip() or "—"
+
+        # result value could be numeric or text
+        val = _clean_text(getattr(item, "result_text", ""))
+        if not val and getattr(item, "result_value", None) is not None:
+            val = str(item.result_value)
+        value = val or "—"
+
+        unit = _clean_text(getattr(item, "result_unit", ""))
+        if not unit and getattr(item, "test_id", None):
+            unit = _clean_text(getattr(item.test, "unit", ""))
+
+        lo = getattr(item, "ref_low", None)
+        hi = getattr(item, "ref_high", None)
+        ref_range = _format_ref_range(lo, hi)
+
+        results.append(
+            {
+                "test_name": test_name,
+                "value": value,
+                "unit": unit,
+                "ref_range": ref_range,
+                "flag": _clean_text(getattr(item, "flag", "")),
+            }
+        )
 
     return {
         "brand": brand(),
         "generated_at": timezone.now(),
+        "title": f"Lab Order #{order.id}",
         "order": order,
         "patient": order.patient,
         "facility": order.facility,
         "ordered_by": getattr(order, "ordered_by", None),
         "results": results,
         "status": getattr(order, "status", ""),
-        "indication": getattr(order, "indication", ""),
+        # this model uses `note`, template expects `indication`
+        "indication": _clean_text(getattr(order, "note", "")),
     }
+
 
 def imaging_context(request_id: int) -> dict:
     ImagingRequest = _model("imaging", "ImagingRequest")
-    req = (ImagingRequest.objects
-           .select_related("patient", "facility", "requested_by", "procedure", "report")
-           .get(id=request_id))
+    req = (
+        ImagingRequest.objects.select_related(
+            "patient", "facility", "requested_by", "procedure", "report"
+        ).get(id=request_id)
+    )
     report = getattr(req, "report", None)
     assets = getattr(report, "assets", None)
     images = list(assets.all()) if hasattr(assets, "all") else []
@@ -75,6 +191,7 @@ def imaging_context(request_id: int) -> dict:
     return {
         "brand": brand(),
         "generated_at": timezone.now(),
+        "title": f"Imaging Request #{req.id}",
         "request": req,
         "patient": req.patient,
         "facility": req.facility,
@@ -83,13 +200,27 @@ def imaging_context(request_id: int) -> dict:
         "images": images,
     }
 
-def billing_context(patient_id: int, *, start=None, end=None) -> dict:
+
+def billing_context(
+    patient_id: int,
+    *,
+    start=None,
+    end=None,
+    charge_id: int | None = None,
+) -> dict:
     Charge = _model("billing", "Charge")
     Payment = _model("billing", "Payment")
     Patient = _model("patients", "Patient")
 
-    charges = Charge.objects.select_related("service", "facility", "patient").filter(patient_id=patient_id)
-    payments = Payment.objects.select_related("facility", "patient").filter(patient_id=patient_id)
+    charges = Charge.objects.select_related("service", "facility", "patient").filter(
+        patient_id=patient_id
+    )
+    payments = Payment.objects.select_related("facility", "patient").filter(
+        patient_id=patient_id
+    )
+
+    if charge_id:
+        charges = charges.filter(id=charge_id)
 
     if start:
         charges = charges.filter(created_at__gte=start)
@@ -103,9 +234,11 @@ def billing_context(patient_id: int, *, start=None, end=None) -> dict:
     balance = total_charges - total_payments
 
     patient = Patient.objects.select_related("facility").get(id=patient_id)
+
     return {
         "brand": brand(),
         "generated_at": timezone.now(),
+        "title": f"Billing Statement — Patient #{patient.id}",
         "patient": patient,
         "facility": getattr(patient, "facility", None),
         "charges": charges.order_by("created_at"),
@@ -114,4 +247,5 @@ def billing_context(patient_id: int, *, start=None, end=None) -> dict:
         "total_payments": total_payments,
         "balance": balance,
         "period": {"start": start, "end": end},
+        "is_receipt": bool(charge_id),
     }
