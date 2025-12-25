@@ -48,6 +48,8 @@ class ProviderProfileSerializer(serializers.ModelSerializer):
     first_name = serializers.CharField(source="user.first_name", read_only=True)
     last_name = serializers.CharField(source="user.last_name", read_only=True)
     email = serializers.EmailField(source="user.email", read_only=True)
+    is_active = serializers.BooleanField(source="user.is_active", read_only=True)
+    created_by_facility = serializers.BooleanField(source="user.created_by_facility", read_only=True)
     role = serializers.SerializerMethodField(read_only=True)
     user_role = serializers.CharField(source="user.role", read_only=True)  # 🆕 Actual User.role from accounts
     facility_name = serializers.CharField(
@@ -324,6 +326,7 @@ class FacilityProviderCreateSerializer(serializers.Serializer):
             role=role,
             facility=facility,
             is_active=True,
+            created_by_facility=True,
         )
 
         # Create provider profile (auto-approved since facility admin created it)

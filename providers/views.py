@@ -32,7 +32,7 @@ from .serializers import (
 from .permissions import IsSelfProvider, IsAdmin
 from .enums import VerificationStatus
 
-from notifications.services.notify import notify_users
+from notifications.services.notify import notify_user, notify_users
 from notifications.enums import Topic, Priority
 
 
@@ -174,6 +174,159 @@ class ProviderViewSet(
         s.is_valid(raise_exception=True)
         doc = s.save(profile=prof)
         return Response(ProviderDocumentSerializer(doc).data, status=201)
+
+
+    @action(
+        detail=True,
+        methods=["post"],
+        permission_classes=[IsAuthenticated, IsAdmin],
+        url_path="suspend",
+    )
+    def suspend(self, request, pk=None):
+        """
+        Facility admin action: suspend a provider's account (user.is_active=False).
+        SUPER_ADMIN can suspend across facilities; ADMIN can only suspend within their facility.
+        """
+        prof = self.get_object()
+        actor = request.user
+
+        if actor.role != UserRole.SUPER_ADMIN:
+            if not getattr(actor, "facility_id", None):
+                return Response({"detail": "You must be attached to a facility."}, status=400)
+            if prof.user.facility_id != actor.facility_id:
+                return Response({"detail": "Not allowed"}, status=403)
+
+        if not prof.user.is_active:
+            return Response({"detail": "Provider is already suspended.", "is_active": False})
+
+        prof.user.is_active = False
+        prof.user.save(update_fields=["is_active"])
+
+        # Notify provider (best-effort)
+        try:
+            notify_user(
+                user=prof.user,
+                topic=Topic.ACCOUNT,
+                priority=Priority.HIGH,
+                title="Account suspended",
+                body="Your account has been suspended by your facility. Please contact your facility admin for details.",
+                facility_id=prof.user.facility_id,
+                action_url="/login/provider",
+                group_key=f"PROVIDER:{prof.id}:SUSPENDED",
+            )
+        except Exception:
+            pass
+
+        return Response({"detail": "Provider suspended.", "is_active": False})
+
+    @action(
+        detail=True,
+        methods=["post"],
+        permission_classes=[IsAuthenticated, IsAdmin],
+        url_path="unsuspend",
+    )
+    def unsuspend(self, request, pk=None):
+        """
+        Facility admin action: unsuspend a provider's account (user.is_active=True).
+        """
+        prof = self.get_object()
+        actor = request.user
+
+        if actor.role != UserRole.SUPER_ADMIN:
+            if not getattr(actor, "facility_id", None):
+                return Response({"detail": "You must be attached to a facility."}, status=400)
+            if prof.user.facility_id != actor.facility_id:
+                return Response({"detail": "Not allowed"}, status=403)
+
+        if prof.user.is_active:
+            return Response({"detail": "Provider is already active.", "is_active": True})
+
+        prof.user.is_active = True
+        prof.user.save(update_fields=["is_active"])
+
+        try:
+            notify_user(
+                user=prof.user,
+                topic=Topic.ACCOUNT,
+                priority=Priority.NORMAL,
+                title="Account re-activated",
+                body="Your account has been re-activated by your facility.",
+                facility_id=prof.user.facility_id,
+                action_url="/login/provider",
+                group_key=f"PROVIDER:{prof.id}:UNSUSPENDED",
+            )
+        except Exception:
+            pass
+
+        return Response({"detail": "Provider unsuspended.", "is_active": True})
+
+    @action(
+        detail=True,
+        methods=["post"],
+        permission_classes=[IsAuthenticated, IsAdmin],
+        url_path="remove-from-facility",
+    )
+    def remove_from_facility(self, request, pk=None):
+        """
+        Facility admin action: remove/sack a provider from the facility.
+        If the provider account was created by this facility (user.created_by_facility=True),
+        this will DELETE the user account.
+
+        Otherwise (e.g. independent providers that joined via application),
+        this will only detach the user from the facility (user.facility=None).
+        """
+        prof = self.get_object()
+        actor = request.user
+
+        # Only allow admins to remove from their facility (unless SUPER_ADMIN)
+        if actor.role != UserRole.SUPER_ADMIN:
+            if not getattr(actor, "facility_id", None):
+                return Response({"detail": "You must be attached to a facility."}, status=400)
+            if prof.user.facility_id != actor.facility_id:
+                return Response({"detail": "Not allowed"}, status=403)
+
+        old_facility_id = prof.user.facility_id
+        if old_facility_id is None:
+            return Response({"detail": "Provider is not attached to a facility."}, status=400)
+
+        # Safety: don't allow deleting/removing yourself
+        if prof.user_id == actor.id:
+            return Response({"detail": "You cannot remove your own account."}, status=400)
+
+        # If this was a facility-created account, delete it completely.
+        if getattr(prof.user, "created_by_facility", False):
+            deleted_email = prof.user.email
+            deleted_user_id = prof.user_id
+            prof.user.delete()
+            return Response(
+                {
+                    "detail": "Provider account deleted.",
+                    "deleted": True,
+                    "user_id": deleted_user_id,
+                    "email": deleted_email,
+                }
+            )
+
+        # Otherwise just detach from facility
+        prof.user.facility_id = None
+        prof.user.save(update_fields=["facility"])
+
+        try:
+            notify_user(
+                user=prof.user,
+                topic=Topic.ACCOUNT,
+                priority=Priority.HIGH,
+                title="Removed from facility",
+                body="You have been removed from your facility. If you think this is a mistake, please contact the facility admin.",
+                facility_id=old_facility_id,
+                action_url="/provider",
+                group_key=f"PROVIDER:{prof.id}:REMOVED",
+            )
+        except Exception:
+            pass
+
+        return Response({"detail": "Provider removed from facility.", "deleted": False, "facility_id": None})
+
 
 
 @api_view(["POST"])

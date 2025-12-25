@@ -41,6 +41,9 @@ class User(AbstractUser):
     role = models.CharField(max_length=20, choices=UserRole.choices, default=UserRole.PATIENT)
     email_verified = models.BooleanField(default=False)
     facility = models.ForeignKey("facilities.Facility", null=True, blank=True, on_delete=models.SET_NULL)
+    # True only when the account was created by a facility admin via /providers/facility-create/
+    # Used to decide whether "Remove/Sack" should delete the account or just detach it.
+    created_by_facility = models.BooleanField(default=False)
 
     USERNAME_FIELD = "email"
     REQUIRED_FIELDS = []
