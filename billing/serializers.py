@@ -1,5 +1,5 @@
 from decimal import Decimal
-from django.db import transaction
+from django.db import models, transaction
 from rest_framework import serializers
 from .models import Service, Price, Charge, Payment, PaymentAllocation
 from .enums import ChargeStatus, PaymentMethod
@@ -15,7 +15,7 @@ class ServiceSerializer(serializers.ModelSerializer):
 class PriceSerializer(serializers.ModelSerializer):
     class Meta:
         model = Price
-        fields = ["id","facility","service","amount","currency"]
+        fields = ["id","facility","owner","service","amount","currency"]
 
 # --- Charges ---
 class ChargeCreateSerializer(serializers.ModelSerializer):
@@ -38,12 +38,23 @@ class ChargeCreateSerializer(serializers.ModelSerializer):
     def create(self, validated):
         user = self.context["request"].user
         patient = validated["patient"]
-        facility = user.facility or patient.facility
-        unit_price = resolve_price(facility=facility, service=validated["service"])
+        # Billing scope:
+        # - Facility-linked users bill the facility.
+        # - Admins without a facility bill the patient's facility (if any).
+        # - Independent users bill themselves (owner billing).
+        facility = getattr(user, "facility", None) if getattr(user, "facility_id", None) else None
+        owner = None
+        role = (getattr(user, "role", "") or "").upper()
+        if not facility and role in {"ADMIN", "SUPER_ADMIN"} and getattr(patient, "facility_id", None):
+            facility = patient.facility
+        if not facility:
+            owner = user
+
+        unit_price = resolve_price(service=validated["service"], facility=facility, owner=owner)
         qty = validated.get("qty") or 1
         amount = unit_price * qty
         return Charge.objects.create(
-            patient=patient, facility=facility, service=validated["service"],
+            patient=patient, facility=facility, owner=owner, service=validated["service"],
             description=validated.get("description",""),
             unit_price=unit_price, qty=qty, amount=amount,
             created_by=user,
@@ -56,7 +67,7 @@ class ChargeCreateSerializer(serializers.ModelSerializer):
 class ChargeReadSerializer(serializers.ModelSerializer):
     class Meta:
         model = Charge
-        fields = ["id","patient","facility","service","description","unit_price","qty","amount","status",
+        fields = ["id","patient","facility","owner","service","description","unit_price","qty","amount","status",
                   "encounter_id","lab_order_id","imaging_request_id","prescription_id",
                   "created_by","created_at"]
 
@@ -65,7 +76,8 @@ class PaymentCreateSerializer(serializers.ModelSerializer):
     allocations = serializers.ListField(
         child=serializers.DictField(child=serializers.CharField()),
         write_only=True,
-        help_text="List of {charge_id, amount}"
+        required=False,
+        help_text="Optional list of {charge_id, amount}. If omitted, we'll auto-allocate to oldest unpaid charges."
     )
 
     class Meta:
@@ -77,9 +89,19 @@ class PaymentCreateSerializer(serializers.ModelSerializer):
         from .services.rollup import recompute_charge_status
         user = self.context["request"].user
         patient = validated["patient"]
+        role = (getattr(user, "role", "") or "").upper()
+
+        facility = getattr(user, "facility", None) if getattr(user, "facility_id", None) else None
+        owner = None
+        if not facility and role in {"ADMIN", "SUPER_ADMIN"} and getattr(patient, "facility_id", None):
+            facility = patient.facility
+        if not facility:
+            owner = user
+
         payment = Payment.objects.create(
             patient=patient,
-            facility=user.facility or patient.facility,
+            facility=facility,
+            owner=owner,
             amount=validated["amount"],
             method=validated.get("method") or PaymentMethod.CASH,
             reference=validated.get("reference",""),
@@ -87,17 +109,53 @@ class PaymentCreateSerializer(serializers.ModelSerializer):
             received_by=user,
         )
         total_alloc = Decimal("0.00")
-        for item in self.validated_data["allocations"]:
-            cid = int(item["charge_id"])
-            amt = Decimal(str(item["amount"]))
-            charge = Charge.objects.select_for_update().get(id=cid, patient=patient)
-            PaymentAllocation.objects.create(payment=payment, charge=charge, amount=amt)
-            total_alloc += amt
-            recompute_charge_status(charge)
+
+        allocations = self.validated_data.get("allocations")
+        # Explicit allocations
+        if allocations:
+            for item in allocations:
+                cid = int(item["charge_id"])
+                amt = Decimal(str(item["amount"]))
+                if amt <= 0:
+                    continue
+                charge = Charge.objects.select_for_update().get(
+                    id=cid,
+                    patient=patient,
+                    facility=facility,
+                    owner=owner,
+                )
+                PaymentAllocation.objects.create(payment=payment, charge=charge, amount=amt)
+                total_alloc += amt
+                recompute_charge_status(charge)
+            return payment
+
+        # Auto-allocation: oldest unpaid charges in this scope
+        remaining = Decimal(str(payment.amount))
+        charges = (
+            Charge.objects.select_for_update()
+            .filter(patient=patient, facility=facility, owner=owner)
+            .exclude(status=ChargeStatus.VOID)
+            .order_by("created_at", "id")
+        )
+
+        for ch in charges:
+            if remaining <= 0:
+                break
+            already = ch.allocations.aggregate(t=models.Sum("amount"))["t"] or Decimal("0.00")
+            due = Decimal(str(ch.amount)) - Decimal(str(already))
+            if due <= 0:
+                recompute_charge_status(ch)
+                continue
+            take = min(remaining, due)
+            PaymentAllocation.objects.create(payment=payment, charge=ch, amount=take)
+            remaining -= take
+            total_alloc += take
+            recompute_charge_status(ch)
+
         # (Optional) validate total_alloc == payment.amount; we allow under/over then reconcile later.
         return payment
 
 class PaymentReadSerializer(serializers.ModelSerializer):
     class Meta:
         model = Payment
-        fields = ["id","patient","facility","amount","method","reference","note","received_by","received_at"]
+        fields = ["id","patient","facility","owner","amount","method","reference","note","received_by","received_at"]

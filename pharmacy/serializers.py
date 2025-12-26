@@ -5,7 +5,7 @@ from django.db import models, transaction
 from rest_framework import serializers
 
 from accounts.enums import UserRole
-from billing.models import Service, Charge
+from billing.models import Service, Charge, Price
 from billing.services.pricing import resolve_price
 from notifications.services.notify import notify_user, notify_patient
 from notifications.enums import Topic, Priority
@@ -160,6 +160,21 @@ class PrescriptionItemWriteSerializer(serializers.ModelSerializer):
                     is_active=True,
                 ).first()
 
+            # If this is an outsourced prescription, allow resolving drug_code from the outsourced pharmacy catalog.
+            if not drug and request is not None:
+                try:
+                    outsourced_to = request.data.get("outsourced_to")
+                    if outsourced_to not in (None, "", 0):
+                        outsourced_to_id = int(outsourced_to)
+                        drug = Drug.objects.filter(
+                            code__iexact=code,
+                            facility__isnull=True,
+                            created_by_id=outsourced_to_id,
+                            is_active=True,
+                        ).first()
+                except Exception:
+                    drug = None
+
             if not drug:
                 raise serializers.ValidationError(
                     {"drug_code": f"Unknown/inactive drug_code: {code}"}
@@ -244,10 +259,14 @@ class PrescriptionCreateSerializer(serializers.ModelSerializer):
         # ✅ IMPORTANT: remove patient from validated so it isn't passed twice
         patient = validated.pop("patient")
 
-        facility = (
-            u.facility if getattr(u, "facility_id", None)
-            else getattr(patient, "facility", None)
-        )
+        # Facility assignment:
+        # - Facility-linked staff: always bind to their facility
+        # - Independent providers (including independent PHARMACY): facility stays NULL
+        # - System admins (no facility): may bind to patient's facility
+        facility = u.facility if getattr(u, "facility_id", None) else None
+        role = (getattr(u, "role", "") or "").upper()
+        if not facility and role in {UserRole.ADMIN, UserRole.SUPER_ADMIN} and getattr(patient, "facility_id", None):
+            facility = patient.facility
 
         rx = Prescription.objects.create(
             patient=patient,
@@ -350,6 +369,9 @@ class DispenseSerializer(serializers.Serializer):
                 stock_scope = {"facility": rx.facility}
             elif is_outsourced and role == UserRole.PHARMACY and (not getattr(user, "facility_id", None)) and rx.outsourced_to_id == getattr(user, "id", None):
                 stock_scope = {"owner": user}
+            elif (not is_outsourced) and role == UserRole.PHARMACY and (not getattr(user, "facility_id", None)) and (rx.prescribed_by_id == getattr(user, "id", None)):
+                # Independent pharmacy issuing + dispensing its own prescriptions
+                stock_scope = {"owner": user}
 
         stock_required = bool(stock_scope)
 
@@ -416,9 +438,22 @@ class DispenseSerializer(serializers.Serializer):
                 rx.status = RxStatus.DISPENSED
             rx.save(update_fields=["status"])
 
-            # billing only when facility exists AND catalog drug exists
-            facility = rx.facility or getattr(rx.patient, "facility", None)
-            if facility and rx.patient and item.drug_id:
+            # billing when catalog drug exists (facility billing OR owner billing)
+            billing_facility = rx.facility if rx.facility_id else None
+            billing_owner = None
+
+            # Independent pharmacy collects payment directly for:
+            # - outsourced prescriptions assigned to them
+            # - prescriptions they issued themselves (self-prescribed workflows)
+            if role == UserRole.PHARMACY and not getattr(user, "facility_id", None):
+                if rx.outsourced_to_id == getattr(user, "id", None):
+                    billing_owner = user
+                    billing_facility = None  # force owner-billing even if the Rx has a facility
+                elif rx.prescribed_by_id == getattr(user, "id", None) and not rx.outsourced_to_id:
+                    billing_owner = user
+                    billing_facility = None
+
+            if (billing_facility or billing_owner) and rx.patient and item.drug_id:
                 drug = item.drug
                 service_code = f"DRUG:{drug.code}"
 
@@ -429,12 +464,32 @@ class DispenseSerializer(serializers.Serializer):
                 }
                 service, _ = Service.objects.get_or_create(code=service_code, defaults=service_defaults)
 
-                unit_price = resolve_price(facility=facility, service=service)
+                # Ensure per-scope price exists for consistent independent pricing.
+                try:
+                    if billing_facility and not billing_owner:
+                        Price.objects.get_or_create(
+                            facility=billing_facility,
+                            owner=None,
+                            service=service,
+                            defaults={"amount": drug.unit_price, "currency": "NGN"},
+                        )
+                    if billing_owner and not billing_facility:
+                        Price.objects.get_or_create(
+                            facility=None,
+                            owner=billing_owner,
+                            service=service,
+                            defaults={"amount": drug.unit_price, "currency": "NGN"},
+                        )
+                except Exception:
+                    pass
+
+                unit_price = resolve_price(service=service, facility=billing_facility, owner=billing_owner)
                 amount = (unit_price or Decimal("0")) * Decimal(take)
 
                 charge = Charge.objects.create(
                     patient=rx.patient,
-                    facility=facility,
+                    facility=billing_facility,
+                    owner=billing_owner,
                     service=service,
                     description=f"{drug.name} x{take}",
                     unit_price=unit_price,
@@ -458,7 +513,7 @@ class DispenseSerializer(serializers.Serializer):
                                 "drug_id": drug.id,
                                 "qty": take,
                             },
-                            facility_id=facility.id,
+                            facility_id=(billing_facility.id if billing_facility else getattr(rx.patient, "facility_id", None)),
                             action_url="/patient/pharmacy",
                             group_key=f"RX:{rx.id}:DISPENSE",
                         )

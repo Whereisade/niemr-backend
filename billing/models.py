@@ -1,8 +1,9 @@
 from decimal import Decimal
+
 from django.conf import settings
 from django.core.validators import MinValueValidator
 from django.db import models
-from django.utils import timezone
+from django.db.models import Q
 
 from facilities.models import Facility
 from patients.models import Patient
@@ -21,22 +22,44 @@ class Service(models.Model):
 
 class Price(models.Model):
     """
-    Facility override for a Service price.
+    Price override for a Service.
+    - Facility-linked pricing: facility is set, owner is null
+    - Independent pricing: owner is set, facility is null
     """
-    facility = models.ForeignKey(Facility, on_delete=models.CASCADE, related_name="prices")
+    facility = models.ForeignKey(Facility, null=True, blank=True, on_delete=models.CASCADE, related_name="prices")
+    owner = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.CASCADE, related_name="prices")
     service  = models.ForeignKey(Service, on_delete=models.CASCADE, related_name="prices")
     amount   = models.DecimalField(max_digits=12, decimal_places=2, validators=[MinValueValidator(0)])
     currency = models.CharField(max_length=8, default="NGN")
 
     class Meta:
-        unique_together = ("facility","service")
+        constraints = [
+            models.CheckConstraint(
+                name="billing_price_scope_xor",
+                check=(
+                    (Q(facility__isnull=False) & Q(owner__isnull=True))
+                    | (Q(facility__isnull=True) & Q(owner__isnull=False))
+                ),
+            ),
+            models.UniqueConstraint(
+                name="billing_price_unique_facility_service",
+                fields=["facility", "service"],
+                condition=Q(facility__isnull=False, owner__isnull=True),
+            ),
+            models.UniqueConstraint(
+                name="billing_price_unique_owner_service",
+                fields=["owner", "service"],
+                condition=Q(owner__isnull=False, facility__isnull=True),
+            ),
+        ]
 
 class Charge(models.Model):
     """
     A line item charge against a patient (e.g., 'FBC test', 'CXR', 'Consultation', 'Paracetamol 10 tabs').
     """
     patient  = models.ForeignKey(Patient, on_delete=models.CASCADE, related_name="charges")
-    facility = models.ForeignKey(Facility, on_delete=models.CASCADE, related_name="charges")
+    facility = models.ForeignKey(Facility, null=True, blank=True, on_delete=models.CASCADE, related_name="charges")
+    owner = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.CASCADE, related_name="charges_owned")
     service  = models.ForeignKey(Service, on_delete=models.PROTECT)
     description = models.CharField(max_length=255, blank=True)
     unit_price = models.DecimalField(max_digits=12, decimal_places=2, validators=[MinValueValidator(0)])
@@ -57,7 +80,17 @@ class Charge(models.Model):
         indexes = [
             models.Index(fields=["patient","created_at"]),
             models.Index(fields=["facility","created_at"]),
+            models.Index(fields=["owner","created_at"]),
             models.Index(fields=["status"]),
+        ]
+        constraints = [
+            models.CheckConstraint(
+                name="billing_charge_scope_xor",
+                check=(
+                    (Q(facility__isnull=False) & Q(owner__isnull=True))
+                    | (Q(facility__isnull=True) & Q(owner__isnull=False))
+                ),
+            ),
         ]
         ordering = ["-created_at","-id"]
 
@@ -68,7 +101,8 @@ class Payment(models.Model):
     A payment (or credit) applied to a patient account; linked to one or more charges via PaymentAllocation.
     """
     patient  = models.ForeignKey(Patient, on_delete=models.CASCADE, related_name="payments")
-    facility = models.ForeignKey(Facility, on_delete=models.CASCADE, related_name="payments")
+    facility = models.ForeignKey(Facility, null=True, blank=True, on_delete=models.CASCADE, related_name="payments")
+    owner = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.CASCADE, related_name="payments_owned")
     amount   = models.DecimalField(max_digits=12, decimal_places=2, validators=[MinValueValidator(0.01)])
     method   = models.CharField(max_length=16, choices=PaymentMethod.choices, default=PaymentMethod.CASH)
     reference = models.CharField(max_length=64, blank=True)  # receipt, POS ref, bank ref, etc.
@@ -78,6 +112,15 @@ class Payment(models.Model):
 
     class Meta:
         ordering = ["-received_at","-id"]
+        constraints = [
+            models.CheckConstraint(
+                name="billing_payment_scope_xor",
+                check=(
+                    (Q(facility__isnull=False) & Q(owner__isnull=True))
+                    | (Q(facility__isnull=True) & Q(owner__isnull=False))
+                ),
+            ),
+        ]
 
 class PaymentAllocation(models.Model):
     """

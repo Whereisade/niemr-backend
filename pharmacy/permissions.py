@@ -12,7 +12,7 @@ STAFF = {
 }
 
 PHARMACY_ROLES = {UserRole.SUPER_ADMIN, UserRole.ADMIN, UserRole.PHARMACY}
-PRESCRIBER_ROLES = {UserRole.DOCTOR, UserRole.NURSE}
+PRESCRIBER_ROLES = {UserRole.DOCTOR, UserRole.NURSE, UserRole.PHARMACY}
 
 
 class IsStaff(BasePermission):

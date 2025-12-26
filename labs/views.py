@@ -176,7 +176,10 @@ class LabOrderViewSet(
             if role in {UserRole.ADMIN, UserRole.SUPER_ADMIN}:
                 pass
             elif role == UserRole.LAB:
-                q = q.filter(outsourced_to_id=u.id)
+                # Independent lab should see:
+                # - outsourced orders assigned to them
+                # - orders they created themselves
+                q = q.filter(Q(outsourced_to_id=u.id) | Q(ordered_by_id=u.id))
             else:
                 q = q.filter(ordered_by_id=u.id)
 
@@ -316,6 +319,15 @@ class LabOrderViewSet(
 
         order.status = OrderStatus.CANCELLED
         order.save(update_fields=["status"])
+
+        # Void any billing charges linked to this order (best-effort)
+        try:
+            from billing.models import Charge
+            from billing.enums import ChargeStatus as BillChargeStatus
+
+            Charge.objects.filter(lab_order_id=order.id).update(status=BillChargeStatus.VOID)
+        except Exception:
+            pass
 
         return Response({"detail": "Order cancelled.", "status": order.status}, status=status.HTTP_200_OK)
 

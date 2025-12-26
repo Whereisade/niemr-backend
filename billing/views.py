@@ -61,7 +61,50 @@ class PriceViewSet(viewsets.GenericViewSet, mixins.ListModelMixin, mixins.Create
     permission_classes = [IsAuthenticated, IsStaff]
 
     def get_queryset(self):
-        return Price.objects.filter(facility=self.request.user.facility).select_related("service")
+        u = self.request.user
+        role = (getattr(u, "role", "") or "").upper()
+
+        qs = Price.objects.select_related("service").all()
+
+        # Facility-linked pricing
+        if getattr(u, "facility_id", None):
+            return qs.filter(facility_id=u.facility_id, owner__isnull=True)
+
+        # Independent pricing (LAB/PHARMACY etc.)
+        if role in {"LAB", "PHARMACY", "DOCTOR", "NURSE", "FRONTDESK"}:
+            return qs.filter(owner=u, facility__isnull=True)
+
+        # System admins can view all
+        if role in {"ADMIN", "SUPER_ADMIN"}:
+            return qs
+
+        return Price.objects.none()
+
+    def create(self, request, *args, **kwargs):
+        # Staff-only price management
+        self.permission_classes = [IsAuthenticated, IsStaff]
+        self.check_permissions(request)
+        return super().create(request, *args, **kwargs)
+
+    def perform_create(self, serializer):
+        """Enforce scope on price overrides.
+
+        - Facility-linked users: can only create facility-scoped prices for their facility.
+        - Independent users: can only create owner-scoped prices for themselves.
+        - ADMIN/SUPER_ADMIN (no facility): may set either scope explicitly.
+        """
+        u = self.request.user
+        role = (getattr(u, "role", "") or "").upper()
+
+        if role in {"ADMIN", "SUPER_ADMIN"} and not getattr(u, "facility_id", None):
+            serializer.save()
+            return
+
+        if getattr(u, "facility_id", None):
+            serializer.save(facility_id=u.facility_id, owner=None)
+            return
+
+        serializer.save(owner=u, facility=None)
 
 # --- Charges ---
 class ChargeViewSet(viewsets.GenericViewSet, mixins.CreateModelMixin, mixins.RetrieveModelMixin, mixins.ListModelMixin):
@@ -77,10 +120,17 @@ class ChargeViewSet(viewsets.GenericViewSet, mixins.CreateModelMixin, mixins.Ret
     def get_queryset(self):
         q = self.queryset
         u = self.request.user
-        if u.role == "PATIENT":
+
+        role = (getattr(u, "role", "") or "").upper()
+        if role == "PATIENT":
             q = q.filter(patient__user_id=u.id)
-        elif u.facility_id:
+
+        elif getattr(u, "facility_id", None):
             q = q.filter(facility_id=u.facility_id)
+
+        elif role not in {"ADMIN", "SUPER_ADMIN"}:
+            # Independent staff should only see their own owner-scoped charges
+            q = q.filter(owner=u, facility__isnull=True)
 
         # filters
         patient_id = self.request.query_params.get("patient")
@@ -112,7 +162,7 @@ class ChargeViewSet(viewsets.GenericViewSet, mixins.CreateModelMixin, mixins.Ret
                     title="New charge added",
                     body=f"{charge.service.name} - {charge.amount}",
                     data={"charge_id": charge.id},
-                    facility_id=charge.facility_id,
+                    facility_id=charge.facility_id or getattr(charge.patient, "facility_id", None),
                     action_url="/patient/billing",
                     group_key=f"BILL:CHARGE:{charge.id}",
                 )
@@ -133,19 +183,47 @@ class ChargeViewSet(viewsets.GenericViewSet, mixins.CreateModelMixin, mixins.Ret
         """
         u = request.user
         patient_id = request.query_params.get("patient")
-        if u.role == "PATIENT":
+
+        role = (getattr(u, "role", "") or "").upper()
+        if role == "PATIENT":
             patient_id = u.patient.id if hasattr(u, "patient") and u.patient else None
         if not patient_id:
             return Response({"detail":"patient is required"}, status=400)
 
-        charges = Charge.objects.filter(patient_id=patient_id)
-        if u.role != "PATIENT" and u.facility_id:
-            charges = charges.filter(facility_id=u.facility_id)
+        charges = Charge.objects.filter(patient_id=patient_id).exclude(status=ChargeStatus.VOID)
+        payments = Payment.objects.filter(patient_id=patient_id)
 
-        ch_total = charges.aggregate(s=Sum("amount"))["s"] or 0
-        pay_total = Payment.objects.filter(patient_id=patient_id).aggregate(s=Sum("amount"))["s"] or 0
+        # Staff scope to facility or owner
+        if role != "PATIENT":
+            if getattr(u, "facility_id", None):
+                charges = charges.filter(facility_id=u.facility_id)
+                payments = payments.filter(facility_id=u.facility_id)
+            elif role not in {"ADMIN", "SUPER_ADMIN"}:
+                charges = charges.filter(owner=u, facility__isnull=True)
+                payments = payments.filter(owner=u, facility__isnull=True)
+
+        ch_total = charges.aggregate(s=Sum("amount"))["s"] or Decimal("0.00")
+        pay_total = payments.aggregate(s=Sum("amount"))["s"] or Decimal("0.00")
+
+        alloc_total = (
+            PaymentAllocation.objects.filter(charge__in=charges)
+            .aggregate(s=Sum("amount"))["s"]
+            or Decimal("0.00")
+        )
+
         balance = Decimal(ch_total) - Decimal(pay_total)
-        return Response({"patient_id": int(patient_id), "charges_total": ch_total, "payments_total": pay_total, "balance": balance})
+        outstanding = Decimal(ch_total) - Decimal(alloc_total)
+
+        return Response(
+            {
+                "patient_id": int(patient_id),
+                "charges_total": ch_total,
+                "payments_total": pay_total,
+                "allocated_total": alloc_total,
+                "balance": balance,
+                "outstanding": outstanding,
+            }
+        )
 
 # --- Payments ---
 class PaymentViewSet(viewsets.GenericViewSet, mixins.CreateModelMixin, mixins.RetrieveModelMixin, mixins.ListModelMixin):
@@ -161,10 +239,16 @@ class PaymentViewSet(viewsets.GenericViewSet, mixins.CreateModelMixin, mixins.Re
     def get_queryset(self):
         q = self.queryset
         u = self.request.user
-        if u.role == "PATIENT":
+
+        role = (getattr(u, "role", "") or "").upper()
+        if role == "PATIENT":
             q = q.filter(patient__user_id=u.id)
-        elif u.facility_id:
+
+        elif getattr(u, "facility_id", None):
             q = q.filter(facility_id=u.facility_id)
+
+        elif role not in {"ADMIN", "SUPER_ADMIN"}:
+            q = q.filter(owner=u, facility__isnull=True)
 
         patient_id = self.request.query_params.get("patient")
         start = self.request.query_params.get("start")
@@ -189,7 +273,7 @@ class PaymentViewSet(viewsets.GenericViewSet, mixins.CreateModelMixin, mixins.Re
                     title="Payment received",
                     body=f"Amount: {payment.amount} ({payment.method}) Ref: {payment.reference}",
                     data={"payment_id": payment.id},
-                    facility_id=payment.facility_id,
+                    facility_id=payment.facility_id or getattr(payment.patient, "facility_id", None),
                     action_url="/patient/billing",
                     group_key=f"BILL:PAY:{payment.id}",
                 )

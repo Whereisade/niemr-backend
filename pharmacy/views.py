@@ -251,7 +251,10 @@ class PrescriptionViewSet(
             if role in {UserRole.ADMIN, UserRole.SUPER_ADMIN}:
                 pass
             elif role == UserRole.PHARMACY:
-                q = q.filter(outsourced_to_id=u.id)
+                # Independent pharmacy should see:
+                # - outsourced prescriptions assigned to them
+                # - prescriptions they created themselves (self-prescribed workflows)
+                q = q.filter(Q(outsourced_to_id=u.id) | Q(prescribed_by_id=u.id))
             else:
                 q = q.filter(prescribed_by_id=u.id)
 
@@ -312,7 +315,11 @@ class PrescriptionViewSet(
             if u.facility_id and rx.facility_id != u.facility_id:
                 return Response({"detail": "Prescription is not in your facility."}, status=403)
             if not u.facility_id:
-                return Response({"detail": "Independent pharmacies can only dispense outsourced prescriptions."}, status=403)
+                # Independent pharmacies can dispense:
+                # - outsourced prescriptions assigned to them (handled above)
+                # - their own prescriptions they issued (self-prescribed workflows)
+                if role != UserRole.PHARMACY or rx.prescribed_by_id != u.id:
+                    return Response({"detail": "Independent pharmacies can only dispense outsourced prescriptions or their own prescriptions."}, status=403)
 
         s = DispenseSerializer(data=request.data)
         s.is_valid(raise_exception=True)

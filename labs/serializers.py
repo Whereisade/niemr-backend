@@ -127,6 +127,22 @@ class LabOrderItemWriteSerializer(serializers.ModelSerializer):
                     created_by__isnull=True,
                     is_active=True
                 ).first()
+
+            # If this is an outsourced order, allow resolving test_code from the outsourced lab's catalog.
+            # We read outsourced_to from the parent request payload to avoid coupling nested serializer context.
+            if not test and request is not None:
+                try:
+                    outsourced_to = request.data.get("outsourced_to")
+                    if outsourced_to not in (None, "", 0):
+                        outsourced_to_id = int(outsourced_to)
+                        test = LabTest.objects.filter(
+                            code__iexact=code,
+                            facility__isnull=True,
+                            created_by_id=outsourced_to_id,
+                            is_active=True,
+                        ).first()
+                except Exception:
+                    test = None
             
             if not test:
                 raise serializers.ValidationError({"test_code": f"Unknown or inactive test_code: {code}"})
@@ -217,7 +233,15 @@ class LabOrderCreateSerializer(serializers.ModelSerializer):
         outsourced_to_id = validated.pop("outsourced_to", None)
 
         patient = validated["patient"]
-        facility = user.facility if getattr(user, "facility_id", None) else getattr(patient, "facility", None)
+
+        # Facility linkage:
+        # - Facility staff: facility is the user's facility
+        # - Independent providers: facility remains NULL (avoid leaking orders into an unrelated facility scope)
+        # - System admins (no facility): can bill under patient's facility when applicable
+        facility = user.facility if getattr(user, "facility_id", None) else None
+        role = (getattr(user, "role", "") or "").upper()
+        if not facility and role in {UserRole.ADMIN, UserRole.SUPER_ADMIN} and getattr(patient, "facility_id", None):
+            facility = patient.facility
 
         order = LabOrder.objects.create(
             patient=patient,
@@ -232,6 +256,81 @@ class LabOrderCreateSerializer(serializers.ModelSerializer):
 
         for item in items:
             LabOrderItem.objects.create(order=order, **item)
+
+        # Billing: create charges for priced tests.
+        try:
+            from billing.models import Charge, Service, Price
+            from billing.services.pricing import resolve_price
+            from decimal import Decimal
+
+            # Avoid duplicates (idempotent-ish)
+            if not Charge.objects.filter(lab_order_id=order.id).exists():
+                billing_facility = order.facility if order.facility_id and not order.outsourced_to_id else None
+                billing_owner = None
+                if order.outsourced_to_id:
+                    billing_owner = User.objects.filter(id=order.outsourced_to_id).first()
+                elif not order.facility_id:
+                    # Independent LAB creating its own orders bills itself.
+                    actor_role = (getattr(user, "role", "") or "").upper()
+                    if actor_role == UserRole.LAB:
+                        billing_owner = user
+
+                if billing_facility or billing_owner:
+                    for it in order.items.select_related("test").all():
+                        if not getattr(it, "test_id", None):
+                            continue
+                        test = it.test
+                        if not test:
+                            continue
+
+                        code = f"LAB:{test.code}"
+                        service, _ = Service.objects.get_or_create(
+                            code=code,
+                            defaults={
+                                "name": test.name,
+                                "default_price": getattr(test, "price", 0) or 0,
+                                "is_active": True,
+                            },
+                        )
+
+                        # Ensure per-scope price exists so independent labs don't inherit someone else's defaults.
+                        try:
+                            if billing_facility and not billing_owner:
+                                Price.objects.get_or_create(
+                                    facility=billing_facility,
+                                    owner=None,
+                                    service=service,
+                                    defaults={"amount": getattr(test, "price", 0) or 0, "currency": "NGN"},
+                                )
+                            if billing_owner and not billing_facility:
+                                Price.objects.get_or_create(
+                                    facility=None,
+                                    owner=billing_owner,
+                                    service=service,
+                                    defaults={"amount": getattr(test, "price", 0) or 0, "currency": "NGN"},
+                                )
+                        except Exception:
+                            pass
+
+                        unit_price = resolve_price(service=service, facility=billing_facility, owner=billing_owner)
+                        qty = 1
+                        amount = (Decimal(str(unit_price)) * Decimal(qty)).quantize(Decimal("0.01"))
+                        Charge.objects.create(
+                            patient=order.patient,
+                            facility=billing_facility,
+                            owner=billing_owner,
+                            service=service,
+                            description=test.name,
+                            unit_price=unit_price,
+                            qty=qty,
+                            amount=amount,
+                            created_by=user,
+                            encounter_id=order.encounter_id,
+                            lab_order_id=order.id,
+                        )
+        except Exception:
+            # Billing is best-effort; lab workflow should still complete.
+            pass
 
         # Link to encounter (append order.id to encounter.lab_order_ids)
         if order.encounter_id:
