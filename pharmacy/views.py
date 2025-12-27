@@ -25,11 +25,20 @@ from .enums import RxStatus, TxnType
 class DrugViewSet(
     viewsets.GenericViewSet,
     mixins.ListModelMixin,
+    mixins.RetrieveModelMixin,
     mixins.CreateModelMixin,
+    mixins.UpdateModelMixin,
 ):
     serializer_class = DrugSerializer
     authentication_classes = [JWTAuthentication]
     permission_classes = [IsAuthenticated]
+
+    def get_permissions(self):
+        # Anyone authenticated can view the catalog within their scope.
+        # Only pharmacy staff (or admins) can modify items (create/update/import).
+        if self.action in {"create", "update", "partial_update", "import_csv"}:
+            return [IsPharmacyStaff()]
+        return [IsAuthenticated()]
 
     def get_queryset(self):
         """
