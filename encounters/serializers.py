@@ -266,6 +266,7 @@ class AmendmentSerializer(serializers.ModelSerializer):
             "id",
             "encounter",
             "section",
+            "amendment_type",  # ✅ ADDED THIS FIELD
             "added_by",
             "added_by_name",
             "reason",

@@ -46,3 +46,13 @@ class Priority(models.TextChoices):
     ROUTINE = "ROUTINE", "Routine"
     URGENT = "URGENT", "Urgent"
     STAT = "STAT", "Stat"
+
+
+class AmendmentType(models.TextChoices):
+    """
+    Type of amendment to a locked SOAP note:
+    - CORRECTION: Replaces/corrects wrong information (strikes through old)
+    - ADDITION: Supplements/adds to existing information (no strikethrough)
+    """
+    CORRECTION = "CORRECTION", "Correction"
+    ADDITION = "ADDITION", "Addition"
