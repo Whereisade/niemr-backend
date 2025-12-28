@@ -1,62 +1,184 @@
 {% extends "reports/base.html" %}
 
+{% block document_id %}IMG-{{ request.id }}{% endblock %}
+
 {% block content %}
 
+<!-- Patient Information -->
 <div class="section keep">
-  <div class="section-header-row">
-    <div class="left">
-      <h2>Imaging Report</h2>
-      <div class="section-subtitle">
-        Summary of requested imaging procedure and radiology findings.
-      </div>
-    </div>
-    <div class="right muted">
-      Request #{{ request.id }}
-      {% if procedure %}
-        • {{ procedure.modality }}{% if procedure.name %} – {{ procedure.name }}{% endif %}
+  <h3>Patient Information</h3>
+  
+  <table class="kv">
+    <tr>
+      <td class="k">Full Name</td>
+      <td class="v">{{ patient.first_name }} {{ patient.last_name }}</td>
+    </tr>
+    <tr>
+      <td class="k">Patient ID</td>
+      <td class="v">{{ patient.hospital_number|default:patient.id }}</td>
+    </tr>
+    {% if patient.gender %}
+    <tr>
+      <td class="k">Gender</td>
+      <td class="v">{{ patient.gender }}</td>
+    </tr>
+    {% endif %}
+    {% if patient.dob %}
+    <tr>
+      <td class="k">Date of Birth</td>
+      <td class="v">{{ patient.dob|date:"d M Y" }}</td>
+    </tr>
+    {% endif %}
+  </table>
+</div>
+
+<!-- Imaging Request Details -->
+<div class="section keep">
+  <h3>Imaging Study Details</h3>
+  
+  <table class="kv">
+    <tr>
+      <td class="k">Request ID</td>
+      <td class="v">#{{ request.id }}</td>
+    </tr>
+    {% if request.created_at %}
+    <tr>
+      <td class="k">Request Date</td>
+      <td class="v">{{ request.created_at|date:"d M Y, H:i" }}</td>
+    </tr>
+    {% endif %}
+    {% if procedure %}
+    <tr>
+      <td class="k">Modality</td>
+      <td class="v">
+        <span class="badge badge-info">{{ procedure.modality }}</span>
+      </td>
+    </tr>
+    <tr>
+      <td class="k">Procedure</td>
+      <td class="v"><strong>{{ procedure.name }}</strong></td>
+    </tr>
+    {% endif %}
+    {% if requested_by %}
+    <tr>
+      <td class="k">Requested By</td>
+      <td class="v">{{ requested_by.get_full_name|default:requested_by.email }}</td>
+    </tr>
+    {% endif %}
+    {% if request.status %}
+    <tr>
+      <td class="k">Status</td>
+      <td class="v">
+        <span class="badge {% if request.status == 'COMPLETED' %}badge-success{% elif request.status == 'PENDING' %}badge-warning{% else %}badge-info{% endif %}">
+          {{ request.status }}
+        </span>
+      </td>
+    </tr>
+    {% endif %}
+    {% if request.clinical_indication %}
+    <tr>
+      <td class="k">Clinical Indication</td>
+      <td class="v">{{ request.clinical_indication }}</td>
+    </tr>
+    {% endif %}
+  </table>
+</div>
+
+<div class="hr"></div>
+
+{% if report %}
+  <!-- Imaging Findings -->
+  <div class="section keep">
+    <h3>Radiological Findings</h3>
+    
+    {% if report.findings %}
+      <div class="text">{{ report.findings|linebreaks }}</div>
+    {% else %}
+      <div class="muted">No findings documented.</div>
+    {% endif %}
+  </div>
+
+  <!-- Impression -->
+  <div class="section keep">
+    <h3>Impression</h3>
+    
+    <div class="highlight-box" style="background-color: #FEF3C7; border-color: #F59E0B;">
+      {% if report.impression %}
+        <div class="text" style="color: #92400E; font-weight: 500;">
+          {{ report.impression|linebreaks }}
+        </div>
+      {% else %}
+        <div class="muted">No impression documented.</div>
       {% endif %}
     </div>
   </div>
 
-  <table class="kv">
-    <tr>
-      <td class="k">Patient</td>
-      <td class="v">
-        {{ patient.first_name }} {{ patient.last_name }} (ID: {{ patient.id }})
-      </td>
-    </tr>
-    <tr>
-      <td class="k">Request</td>
-      <td class="v">
-        #{{ request.id }}
-        {% if procedure %}
-          • Procedure: {{ procedure.name }} ({{ procedure.modality }})
-        {% endif %}
-      </td>
-    </tr>
-  </table>
-</div>
-
-{% if report %}
+  <!-- Recommendations -->
+  {% if report.recommendations %}
   <div class="section keep">
-    <h3>Findings</h3>
-    <div class="text">
-      {{ report.findings|linebreaks }}
+    <h3>Recommendations</h3>
+    <div class="text">{{ report.recommendations|linebreaks }}</div>
+  </div>
+  {% endif %}
+
+  <!-- Images -->
+  {% if images %}
+  <div class="section keep">
+    <h3>Images</h3>
+    <div class="muted" style="font-size: 10px;">
+      {{ images|length }} image(s) attached to this report
+    </div>
+  </div>
+  {% endif %}
+
+  <!-- Radiologist Signature -->
+  <div class="section keep" style="margin-top: 30px;">
+    <div class="highlight-box">
+      <h4>Report Verified By</h4>
+      <table class="kv">
+        <tr>
+          <td class="k">Radiologist</td>
+          <td class="v">
+            {% if report.reported_by %}
+              {{ report.reported_by.get_full_name|default:report.reported_by.email }}
+            {% else %}
+              <span class="muted">Pending verification</span>
+            {% endif %}
+          </td>
+        </tr>
+        <tr>
+          <td class="k">Date</td>
+          <td class="v">
+            {% if report.reported_at %}
+              {{ report.reported_at|date:"d M Y, H:i" }}
+            {% else %}
+              <span class="muted">—</span>
+            {% endif %}
+          </td>
+        </tr>
+      </table>
     </div>
   </div>
 
-  <div class="section keep">
-    <h3>Impression</h3>
-    <div class="text">
-      <strong>{{ report.impression|linebreaks }}</strong>
-    </div>
-  </div>
 {% else %}
-  <div class="section keep muted">
-    No report yet.
+  <!-- No Report Yet -->
+  <div class="section keep">
+    <div class="highlight-box" style="background-color: #FEF3C7; border-color: #F59E0B;">
+      <h4>Report Pending</h4>
+      <p style="margin: 4px 0 0 0; color: #92400E; font-size: 11px;">
+        This imaging study has been requested but the radiological report is not yet available.
+        Please check back later or contact the radiology department for more information.
+      </p>
+    </div>
   </div>
 {% endif %}
 
+<!-- Important Notice -->
+<div class="section keep">
+  <div style="padding: 8px; background-color: #EFF6FF; border-left: 3px solid #3B82F6; border-radius: 4px; font-size: 10px; color: #1E40AF;">
+    <strong>Important:</strong> This radiological report should be correlated with clinical findings and other diagnostic information. 
+    For any questions or clarifications, please consult with the referring physician or radiologist.
+  </div>
+</div>
+
 {% endblock %}
-
-

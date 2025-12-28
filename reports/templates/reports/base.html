@@ -6,161 +6,159 @@
   <style>
     @page {
       size: A4;
-      margin: 16mm 14mm 18mm;
+      margin: 20mm 16mm 22mm;
       @bottom-center {
         content: "Page " counter(page) " of " counter(pages);
-        font-size: 10px;
-        color: #777;
+        font-size: 9px;
+        color: #9CA3AF;
       }
     }
 
-
     html, body {
-      font-family: -apple-system, BlinkMacSystemFont, "Inter", system-ui, -sans-serif, Arial;
-      font-size: 12px;
-      color: #111827;
-      line-height: 1.4;
+      font-family: -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", system-ui, sans-serif;
+      font-size: 11.5px;
+      color: #1F2937;
+      line-height: 1.5;
+      margin: 0;
+      padding: 0;
     }
 
-
-    h1, h2, h3 {
+    h1, h2, h3, h4 {
       margin: 0;
       font-weight: 600;
       color: #111827;
     }
 
-
     h1 {
-      font-size: 18px;
+      font-size: 22px;
+      letter-spacing: -0.02em;
     }
-
 
     h2 {
-      font-size: 16px;
+      font-size: 17px;
+      letter-spacing: -0.01em;
     }
-
 
     h3 {
-      font-size: 13px;
+      font-size: 14px;
     }
 
+    h4 {
+      font-size: 12px;
+      font-weight: 500;
+      color: #374151;
+    }
 
-    /* ==== HEADER ===== */
-
-
+    /* ===== HEADER: Facility/Provider at top ===== */
     .header {
-      margin-bottom: 16px;
-      padding-bottom: 10px;
-      border-bottom: 1px solid #E5E7EB;
+      margin-bottom: 24px;
+      padding-bottom: 16px;
+      border-bottom: 2px solid #E5E7EB;
     }
 
-
-    .header-top {
+    .header-main {
       display: table;
       width: 100%;
-      margin-bottom: 6px;
+      margin-bottom: 12px;
     }
 
-
-    .header-top .left,
-    .header-top .right {
+    .header-main .left,
+    .header-main .right {
       display: table-cell;
       vertical-align: top;
     }
 
-
-    .header-top .right {
+    .header-main .right {
       text-align: right;
     }
 
-
-    .brand-block {
-      display: inline-block;
-      padding: 6px 10px;
-      border-radius: 6px;
-      border: 1px solid #E5E7EB;
-      background: linear-gradient(90deg, #EFF6FF, #ECFEFF);
-    }
-
-
-    .brand {
-      font-size: 18px;
+    /* Entity name (Facility or Provider) */
+    .entity-name {
+      font-size: 24px;
       font-weight: 700;
-      letter-spacing: 0.02em;
       color: #0F172A;
+      letter-spacing: -0.03em;
+      margin-bottom: 4px;
+      line-height: 1.2;
     }
 
-
-    .title {
-      font-size: 12px;
-      font-weight: 600;
-      margin-top: 3px;
-      color: #4B5563;
-    }
-
-
-    .meta {
-      font-size: 10.5px;
-      color: #6B7280;
-    }
-
-
-    .header-meta-row {
-      display: table;
-      width: 100%;
-      margin-top: 4px;
-      font-size: 10.5px;
-      color: #6B7280;
-    }
-
-
-    .header-meta-row .left,
-    .header-meta-row .right {
-      display: table-cell;
-      vertical-align: middle;
-    }
-
-
-    .header-meta-row .right {
-      text-align: right;
-      font-style: italic;
-    }
-
-
-    .pill-muted {
+    .entity-type {
       display: inline-block;
-      padding: 2px 6px;
-      border-radius: 999px;
+      padding: 3px 10px;
+      border-radius: 4px;
+      background: linear-gradient(135deg, #3B82F6 0%, #2563EB 100%);
+      color: white;
+      font-size: 10px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      margin-bottom: 8px;
+    }
+
+    .entity-contact {
+      font-size: 10px;
+      color: #6B7280;
+      line-height: 1.6;
+    }
+
+    .entity-contact div {
+      margin: 2px 0;
+    }
+
+    .entity-contact strong {
+      color: #374151;
+      font-weight: 500;
+    }
+
+    /* Report metadata on right */
+    .report-meta {
+      text-align: right;
+    }
+
+    .report-title {
+      font-size: 15px;
+      font-weight: 600;
+      color: #1F2937;
+      margin-bottom: 6px;
+    }
+
+    .meta-badge {
+      display: inline-block;
+      padding: 4px 10px;
+      border-radius: 6px;
       background-color: #F3F4F6;
       font-size: 10px;
       font-weight: 500;
       color: #4B5563;
+      margin: 2px 0;
     }
 
+    .meta-timestamp {
+      font-size: 10px;
+      color: #9CA3AF;
+      margin-top: 4px;
+    }
 
-    /* ==== SECTIONS / LAYOUT ===== */
-
-
+    /* ===== SECTIONS / CONTENT ===== */
     .section {
-      margin: 14px 0;
+      margin: 18px 0;
     }
-
 
     .section h3 {
-      font-size: 13px;
+      font-size: 14px;
       font-weight: 600;
-      padding-bottom: 4px;
-      border-bottom: 1px solid #E5E7EB;
+      padding: 8px 12px;
+      background: linear-gradient(135deg, #F9FAFB 0%, #F3F4F6 100%);
+      border-left: 3px solid #3B82F6;
       color: #111827;
+      margin-bottom: 10px;
     }
-
 
     .section-header-row {
       display: table;
       width: 100%;
-      margin-bottom: 4px;
+      margin-bottom: 8px;
     }
-
 
     .section-header-row .left,
     .section-header-row .right {
@@ -168,168 +166,262 @@
       vertical-align: middle;
     }
 
-
     .section-header-row .right {
       text-align: right;
       font-size: 10px;
       color: #6B7280;
     }
 
-
     .section-subtitle {
-      font-size: 11px;
+      font-size: 10.5px;
       color: #6B7280;
-      margin-top: 2px;
+      margin-top: 4px;
+      font-style: italic;
     }
-
 
     .keep {
       page-break-inside: avoid;
     }
 
-
     .hr {
+      border: 0;
       border-top: 1px dashed #D1D5DB;
-      margin: 10px 0;
+      margin: 14px 0;
     }
-
 
     .text {
       white-space: pre-wrap;
       word-break: break-word;
-      font-size: 11.5px;
-      color: #111827;
+      font-size: 11px;
+      color: #1F2937;
+      line-height: 1.6;
     }
-
 
     .muted {
-      color: #6B7280;
+      color: #9CA3AF;
     }
-
 
     .right {
       text-align: right;
     }
 
-
+    /* ===== LISTS ===== */
     ul {
-      margin: 0 0 0 18px;
+      margin: 8px 0 8px 20px;
       padding: 0;
-      font-size: 11.5px;
+      font-size: 11px;
     }
-
 
     li {
-      margin: 0 0 3px 0;
+      margin: 4px 0;
+      line-height: 1.5;
     }
 
-
-    /* ==== TABLES ===== */
-
-
+    /* ===== TABLES ===== */
     table {
       width: 100%;
       border-collapse: collapse;
       border-spacing: 0;
-      font-size: 11.5px;
+      font-size: 11px;
+      margin: 10px 0;
     }
-
 
     th, td {
       border: 1px solid #E5E7EB;
-      padding: 6px 8px;
+      padding: 8px 10px;
       text-align: left;
       vertical-align: top;
     }
 
-
     thead th {
-      font-size: 11px;
+      font-size: 10px;
       font-weight: 600;
       text-transform: uppercase;
-      letter-spacing: 0.04em;
-      color: #4B5563;
-      background-color: #F3F4F6;
+      letter-spacing: 0.05em;
+      color: #374151;
+      background: linear-gradient(180deg, #F9FAFB 0%, #F3F4F6 100%);
+      border-bottom: 2px solid #D1D5DB;
     }
-
 
     tbody tr:nth-child(even) td {
       background-color: #F9FAFB;
     }
 
-
     tbody tr:nth-child(odd) td {
       background-color: #FFFFFF;
     }
 
+    tbody tr:hover td {
+      background-color: #EFF6FF;
+    }
 
-    /* key–value table (details) */
+    /* Key-value table */
     .kv {
       width: 100%;
       border-collapse: collapse;
-      margin-top: 2px;
+      margin: 8px 0;
     }
-
 
     .kv th,
     .kv td {
       border: 0;
-      padding: 2px 0;
-      font-size: 11.5px;
+      padding: 4px 0;
+      font-size: 11px;
     }
 
-
     .kv .k {
-      width: 30%;
+      width: 28%;
       font-weight: 600;
       color: #4B5563;
-      padding-right: 10px;
+      padding-right: 12px;
       white-space: nowrap;
     }
 
-
     .kv .v {
-      color: #111827;
+      color: #1F2937;
     }
 
-
     .kv .muted {
+      color: #9CA3AF;
+    }
+
+    /* ===== FOOTER: Powered by NIEMR ===== */
+    .footer {
+      margin-top: 30px;
+      padding-top: 14px;
+      border-top: 1px solid #E5E7EB;
+      text-align: center;
+    }
+
+    .powered-by {
+      font-size: 9px;
+      color: #9CA3AF;
+      letter-spacing: 0.03em;
+    }
+
+    .powered-by-logo {
+      display: inline-block;
+      margin-left: 4px;
+      font-weight: 600;
+      color: #3B82F6;
+    }
+
+    /* ===== UTILITY CLASSES ===== */
+    .badge {
+      display: inline-block;
+      padding: 3px 8px;
+      border-radius: 4px;
+      font-size: 9px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+    }
+
+    .badge-success {
+      background-color: #D1FAE5;
+      color: #065F46;
+    }
+
+    .badge-warning {
+      background-color: #FEF3C7;
+      color: #92400E;
+    }
+
+    .badge-info {
+      background-color: #DBEAFE;
+      color: #1E40AF;
+    }
+
+    .badge-muted {
+      background-color: #F3F4F6;
       color: #6B7280;
+    }
+
+    /* Highlight boxes */
+    .highlight-box {
+      padding: 12px;
+      border-radius: 6px;
+      background-color: #F0F9FF;
+      border: 1px solid #BFDBFE;
+      margin: 10px 0;
+    }
+
+    .highlight-box h4 {
+      color: #1E40AF;
+      margin-bottom: 6px;
+    }
+
+    /* Print optimizations */
+    @media print {
+      body {
+        print-color-adjust: exact;
+        -webkit-print-color-adjust: exact;
+      }
     }
   </style>
 </head>
 <body>
+  <!-- HEADER: Facility/Provider Information -->
   <div class="header">
-    <div class="header-top">
+    <div class="header-main">
       <div class="left">
-        <div class="brand-block">
-          <div class="brand">{{ brand.name }}</div>
-          {% if title %}
-            <div class="title">{{ title }}</div>
+        <div class="entity-type">{{ header.entity_type }}</div>
+        <div class="entity-name">{{ header.entity_name }}</div>
+        
+        <div class="entity-contact">
+          {% if header.address %}
+            <div>
+              <strong>Address:</strong> {{ header.address }}{% if header.city %}, {{ header.city }}{% endif %}{% if header.state %}, {{ header.state }}{% endif %}
+            </div>
+          {% endif %}
+          
+          {% if header.phone %}
+            <div><strong>Phone:</strong> {{ header.phone }}</div>
+          {% endif %}
+          
+          {% if header.email %}
+            <div><strong>Email:</strong> {{ header.email }}</div>
+          {% endif %}
+          
+          <!-- {% if header.registration_number %}
+            <div><strong>Registration:</strong> {{ header.registration_number }}</div>
+          {% endif %} -->
+          
+          {% if header.provider_type %}
+            <div><strong>Specialty:</strong> {{ header.provider_type }}</div>
           {% endif %}
         </div>
       </div>
-      <div class="right meta">
-        <span class="pill-muted">Generated at</span>
-        &nbsp;{{ generated_at }}
-      </div>
-    </div>
 
-
-    <div class="header-meta-row">
-      <div class="left">
-        {{ brand.address }} • {{ brand.phone }} • {{ brand.email }}
-      </div>
       <div class="right">
-        <!-- Reserved for optional report-level tags/badges in child templates -->
+        <div class="report-meta">
+          {% if title %}
+            <div class="report-title">{{ title }}</div>
+          {% endif %}
+          
+          <div class="meta-badge">
+            {% if generated_at %}
+              Generated {{ generated_at|date:"d M Y, H:i" }}
+            {% endif %}
+          </div>
+          
+          <div class="meta-timestamp">
+            Document ID: {% block document_id %}{{ title|default:"Report" }}{% endblock %}
+          </div>
+        </div>
       </div>
     </div>
   </div>
 
-
+  <!-- CONTENT -->
   {% block content %}{% endblock %}
+
+  <!-- FOOTER: Powered by NIEMR -->
+  <div class="footer">
+    <div class="powered-by">
+      Powered by <span class="powered-by-logo">{{ brand.name }}</span>
+      {% if brand.tagline %} — {{ brand.tagline }}{% endif %}
+    </div>
+  </div>
 </body>
 </html>
-
-
-

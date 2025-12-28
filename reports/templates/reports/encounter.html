@@ -1,121 +1,136 @@
 {% extends "reports/base.html" %}
 
+{% block document_id %}EN-{{ encounter.id }}{% endblock %}
 
 {% block content %}
 
-
-<!-- Top summary section -->
+<!-- Patient Summary -->
 <div class="section keep">
-  <div class="section-header-row">
-    <div class="left">
-      <h2>Encounter Summary</h2>
-      <div class="section-subtitle">
-        Overview of the patient, facility, and care team for this encounter.
-      </div>
-    </div>
-    <div class="right muted">
-      Encounter #{{ encounter.id }}
-      {% if encounter.occurred_at %} • {{ encounter.occurred_at|date:"Y-m-d H:i" }}{% endif %}
-      {% if encounter.encounter_type %} • {{ encounter.encounter_type }}{% endif %}
-    </div>
-  </div>
-
-
+  <h3>Patient Information</h3>
+  
   <table class="kv">
     <tr>
-      <td class="k">Patient</td>
+      <td class="k">Full Name</td>
       <td class="v">
         {{ patient.last_name }}, {{ patient.first_name }}{% if patient.middle_name %} {{ patient.middle_name }}{% endif %}
-        (ID: {{ patient.id }})
-        {% if patient.gender %} • {{ patient.gender }}{% endif %}
-        {% if patient.dob %} • DOB: {{ patient.dob|date:"Y-m-d" }}{% endif %}
       </td>
     </tr>
     <tr>
-      <td class="k">Facility</td>
+      <td class="k">Patient ID</td>
       <td class="v">
-        {{ facility.name|default:"—" }}
+        {{ patient.hospital_number|default:patient.id }}
       </td>
     </tr>
+    {% if patient.gender %}
     <tr>
-      <td class="k">Encounter</td>
-      <td class="v">
-        #{{ encounter.id }}
-        {% if encounter.occurred_at %} • {{ encounter.occurred_at|date:"Y-m-d H:i" }}{% endif %}
-        {% if encounter.encounter_type %} • {{ encounter.encounter_type }}{% endif %}
-        {% if encounter.status %} • {{ encounter.status }}{% endif %}
-        {% if encounter.stage %} • {{ encounter.stage }}{% endif %}
-      </td>
+      <td class="k">Gender</td>
+      <td class="v">{{ patient.gender }}</td>
     </tr>
+    {% endif %}
+    {% if patient.dob %}
     <tr>
-      <td class="k">Provider</td>
+      <td class="k">Date of Birth</td>
       <td class="v">
-        {% if provider %}
-          {{ provider.get_full_name|default:provider.email }}
-        {% else %}
-          <span class="muted">—</span>
-        {% endif %}
+        {{ patient.dob|date:"d M Y" }}
+        {% if patient.age %} ({{ patient.age }} years){% endif %}
       </td>
     </tr>
+    {% endif %}
+    {% if patient.phone %}
     <tr>
-      <td class="k">Nurse</td>
-      <td class="v">
-        {% if nurse %}
-          {{ nurse.get_full_name|default:nurse.email }}
-        {% else %}
-          <span class="muted">—</span>
-        {% endif %}
-      </td>
+      <td class="k">Contact</td>
+      <td class="v">{{ patient.phone }}</td>
     </tr>
+    {% endif %}
   </table>
 </div>
 
+<!-- Encounter Details -->
+<div class="section keep">
+  <h3>Encounter Details</h3>
+  
+  <table class="kv">
+    <tr>
+      <td class="k">Encounter ID</td>
+      <td class="v">#{{ encounter.id }}</td>
+    </tr>
+    {% if encounter.occurred_at %}
+    <tr>
+      <td class="k">Date & Time</td>
+      <td class="v">{{ encounter.occurred_at|date:"d M Y, H:i" }}</td>
+    </tr>
+    {% endif %}
+    {% if encounter.encounter_type %}
+    <tr>
+      <td class="k">Type</td>
+      <td class="v">
+        <span class="badge badge-info">{{ encounter.encounter_type }}</span>
+      </td>
+    </tr>
+    {% endif %}
+    {% if encounter.status %}
+    <tr>
+      <td class="k">Status</td>
+      <td class="v">
+        <span class="badge {% if encounter.status == 'COMPLETED' %}badge-success{% else %}badge-warning{% endif %}">
+          {{ encounter.status }}
+        </span>
+      </td>
+    </tr>
+    {% endif %}
+    {% if provider %}
+    <tr>
+      <td class="k">Attending Provider</td>
+      <td class="v">{{ provider.get_full_name|default:provider.email }}</td>
+    </tr>
+    {% endif %}
+    {% if nurse %}
+    <tr>
+      <td class="k">Nurse</td>
+      <td class="v">{{ nurse.get_full_name|default:nurse.email }}</td>
+    </tr>
+    {% endif %}
+  </table>
+</div>
 
-<!-- SOAP-style sections -->
+<div class="hr"></div>
 
+<!-- SOAP Note Sections -->
 
+{% if chief_complaint %}
 <div class="section keep">
   <h3>Chief Complaint</h3>
-  {% if chief_complaint %}
-    <div class="text">{{ chief_complaint }}</div>
-  {% else %}
-    <div class="muted">—</div>
-  {% endif %}
+  <div class="text">{{ chief_complaint }}</div>
 </div>
+{% endif %}
 
-
+{% if hpi %}
 <div class="section keep">
   <h3>History of Present Illness (HPI)</h3>
-  {% if hpi %}
-    <div class="text">{{ hpi }}</div>
-  {% else %}
-    <div class="muted">—</div>
-  {% endif %}
+  <div class="text">{{ hpi }}</div>
 </div>
+{% endif %}
 
-
+{% if ros %}
 <div class="section keep">
   <h3>Review of Systems (ROS)</h3>
-  {% if ros %}
-    <div class="text">{{ ros }}</div>
-  {% else %}
-    <div class="muted">—</div>
-  {% endif %}
+  <div class="text">{{ ros }}</div>
 </div>
+{% endif %}
 
-
+{% if physical_exam %}
 <div class="section keep">
   <h3>Physical Examination</h3>
-  {% if physical_exam %}
-    <div class="text">{{ physical_exam }}</div>
-  {% else %}
-    <div class="muted">—</div>
-  {% endif %}
+  <div class="text">{{ physical_exam }}</div>
 </div>
+{% endif %}
 
+<div class="hr"></div>
+
+<!-- Assessment & Plan -->
 
 <div class="section keep">
-  <h3>Diagnoses</h3>
+  <h3>Assessment (Diagnoses)</h3>
   {% if diagnoses_list and diagnoses_list|length > 0 %}
     <ul>
       {% for d in diagnoses_list %}
@@ -125,10 +140,9 @@
   {% elif diagnoses_text %}
     <div class="text">{{ diagnoses_text }}</div>
   {% else %}
-    <div class="muted">—</div>
+    <div class="muted">No diagnoses recorded.</div>
   {% endif %}
 </div>
-
 
 <div class="section keep">
   <h3>Plan</h3>
@@ -141,12 +155,31 @@
   {% elif plan_text %}
     <div class="text">{{ plan_text }}</div>
   {% else %}
-    <div class="muted">—</div>
+    <div class="muted">No treatment plan recorded.</div>
   {% endif %}
 </div>
 
+<!-- Signature Section -->
+<div class="section keep" style="margin-top: 30px;">
+  <div class="highlight-box">
+    <h4>Provider Signature</h4>
+    <table class="kv">
+      <tr>
+        <td class="k">Provider</td>
+        <td class="v">
+          {% if provider %}
+            {{ provider.get_full_name|default:provider.email }}
+          {% else %}
+            {{ created_by.get_full_name|default:created_by.email }}
+          {% endif %}
+        </td>
+      </tr>
+      <tr>
+        <td class="k">Date</td>
+        <td class="v">{{ encounter.occurred_at|date:"d M Y" }}</td>
+      </tr>
+    </table>
+  </div>
+</div>
 
 {% endblock %}
-
-
-

@@ -1,77 +1,171 @@
 {% extends "reports/base.html" %}
 
+{% block document_id %}LAB-{{ order.id }}{% endblock %}
+
 {% block content %}
 
+<!-- Patient Information -->
 <div class="section keep">
-  <div class="section-header-row">
-    <div class="left">
-      <h2>Lab Result</h2>
-      <div class="section-subtitle">
-        Summary of ordered investigation and reported values for this patient.
-      </div>
-    </div>
-    <div class="right muted">
-      Order #{{ order.id }}{% if status %} • {{ status }}{% endif %}
-    </div>
-  </div>
-
+  <h3>Patient Information</h3>
+  
   <table class="kv">
     <tr>
-      <td class="k">Patient</td>
-      <td class="v">
-        {{ patient.first_name }} {{ patient.last_name }} (ID: {{ patient.id }})
-      </td>
+      <td class="k">Full Name</td>
+      <td class="v">{{ patient.first_name }} {{ patient.last_name }}</td>
     </tr>
     <tr>
-      <td class="k">Order</td>
-      <td class="v">
-        #{{ order.id }}
-        {% if status %} • Status: {{ status }}{% endif %}
-      </td>
+      <td class="k">Patient ID</td>
+      <td class="v">{{ patient.hospital_number|default:patient.id }}</td>
     </tr>
+    {% if patient.gender %}
     <tr>
-      <td class="k">Indication</td>
-      <td class="v">
-        {% if indication %}
-          {{ indication }}
-        {% else %}
-          <span class="muted">—</span>
-        {% endif %}
-      </td>
+      <td class="k">Gender</td>
+      <td class="v">{{ patient.gender }}</td>
     </tr>
+    {% endif %}
+    {% if patient.dob %}
+    <tr>
+      <td class="k">Date of Birth</td>
+      <td class="v">{{ patient.dob|date:"d M Y" }}</td>
+    </tr>
+    {% endif %}
   </table>
 </div>
 
+<!-- Order Details -->
 <div class="section keep">
-  <h3>Results</h3>
-  <table>
-    <thead>
-      <tr>
-        <th>Test</th>
-        <th>Value</th>
-        <th>Unit</th>
-        <th>Reference</th>
-        <th>Flag</th>
-      </tr>
-    </thead>
-    <tbody>
-      {% for r in results %}
-        <tr>
-          <td>{{ r.test_name }}</td>
-          <td>{{ r.value }}</td>
-          <td>{{ r.unit }}</td>
-          <td class="muted">{{ r.ref_range }}</td>
-          <td>{% if r.flag %}{{ r.flag }}{% endif %}</td>
-        </tr>
-      {% empty %}
-        <tr>
-          <td colspan="5" class="muted">No results yet.</td>
-        </tr>
-      {% endfor %}
-    </tbody>
+  <h3>Laboratory Order Details</h3>
+  
+  <table class="kv">
+    <tr>
+      <td class="k">Order ID</td>
+      <td class="v">#{{ order.id }}</td>
+    </tr>
+    {% if order.created_at %}
+    <tr>
+      <td class="k">Order Date</td>
+      <td class="v">{{ order.created_at|date:"d M Y, H:i" }}</td>
+    </tr>
+    {% endif %}
+    {% if status %}
+    <tr>
+      <td class="k">Status</td>
+      <td class="v">
+        <span class="badge {% if status == 'COMPLETED' %}badge-success{% elif status == 'PENDING' %}badge-warning{% else %}badge-info{% endif %}">
+          {{ status }}
+        </span>
+      </td>
+    </tr>
+    {% endif %}
+    {% if ordered_by %}
+    <tr>
+      <td class="k">Ordered By</td>
+      <td class="v">{{ ordered_by.get_full_name|default:ordered_by.email }}</td>
+    </tr>
+    {% endif %}
+    {% if indication %}
+    <tr>
+      <td class="k">Clinical Indication</td>
+      <td class="v">{{ indication }}</td>
+    </tr>
+    {% endif %}
   </table>
+</div>
+
+<div class="hr"></div>
+
+<!-- Lab Results -->
+<div class="section keep">
+  <h3>Laboratory Results</h3>
+  
+  {% if results %}
+    <table>
+      <thead>
+        <tr>
+          <th style="width: 35%;">Test Name</th>
+          <th style="width: 20%;">Result</th>
+          <th style="width: 15%;">Unit</th>
+          <th style="width: 20%;">Reference Range</th>
+          <th style="width: 10%; text-align: center;">Flag</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for r in results %}
+          <tr>
+            <td><strong>{{ r.test_name }}</strong></td>
+            <td>
+              <strong>{{ r.value }}</strong>
+            </td>
+            <td class="muted">{{ r.unit }}</td>
+            <td class="muted" style="font-size: 10px;">{{ r.ref_range }}</td>
+            <td style="text-align: center;">
+              {% if r.flag %}
+                <span class="badge {% if r.flag == 'HIGH' or r.flag == 'H' %}badge-warning{% elif r.flag == 'LOW' or r.flag == 'L' %}badge-info{% else %}badge-muted{% endif %}">
+                  {{ r.flag }}
+                </span>
+              {% endif %}
+            </td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  {% else %}
+    <div class="muted">No results available yet.</div>
+  {% endif %}
+</div>
+
+<!-- Notes Section -->
+{% if order.note or order.internal_notes %}
+<div class="section keep">
+  <h3>Notes</h3>
+  <div class="highlight-box">
+    {% if order.note %}
+      <div class="text">{{ order.note }}</div>
+    {% endif %}
+    {% if order.internal_notes %}
+      <div class="text muted" style="margin-top: 8px; font-size: 10px;">
+        <strong>Internal Notes:</strong> {{ order.internal_notes }}
+      </div>
+    {% endif %}
+  </div>
+</div>
+{% endif %}
+
+<!-- Signature -->
+<div class="section keep" style="margin-top: 30px;">
+  <div class="highlight-box">
+    <h4>Verified By</h4>
+    <table class="kv">
+      <tr>
+        <td class="k">Lab Scientist</td>
+        <td class="v">
+          {% if order.verified_by %}
+            {{ order.verified_by.get_full_name|default:order.verified_by.email }}
+          {% else %}
+            <span class="muted">Pending verification</span>
+          {% endif %}
+        </td>
+      </tr>
+      <tr>
+        <td class="k">Date</td>
+        <td class="v">
+          {% if order.verified_at %}
+            {{ order.verified_at|date:"d M Y, H:i" }}
+          {% else %}
+            <span class="muted">—</span>
+          {% endif %}
+        </td>
+      </tr>
+    </table>
+  </div>
+</div>
+
+<!-- Important Notice -->
+<div class="section keep">
+  <div style="padding: 8px; background-color: #FEF3C7; border-left: 3px solid #F59E0B; border-radius: 4px; font-size: 10px; color: #92400E;">
+    <strong>Important:</strong> These results should be interpreted in conjunction with clinical findings and other diagnostic information. 
+    Consult with the ordering physician for any questions regarding these results.
+  </div>
 </div>
 
 {% endblock %}
-
-

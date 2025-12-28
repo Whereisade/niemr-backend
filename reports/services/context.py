@@ -2,19 +2,7 @@ from __future__ import annotations
 
 """Report context builders.
 
-These functions produce template-ready context dictionaries for
-reports/templates/reports/*.html.
-
-Patch v3:
-- Fix ENCOUNTER report context to match encounters.Encounter model fields in this repo.
-  * Encounter has chief_complaint/hpi/ros/physical_exam + diagnoses/plan as TEXT.
-  * Previous code treated diagnoses as iterable -> scattered characters in PDF.
-  * Provide diagnoses_list/plan_list + raw text, plus structured clinical sections.
-
-Patch v2 (kept):
-- Fix LAB report: LabOrder uses related_name="items" (LabOrderItem), not "results".
-- Provide template-friendly results list with keys expected by reports/templates/reports/lab.html.
-- Add optional charge_id filtering to billing_context to support per-charge receipts.
+Enhanced to provide facility/provider information for report headers.
 """
 
 from decimal import Decimal
@@ -30,7 +18,11 @@ def _model(app_label: str, model_name: str):
 
 
 def brand():
-    return getattr(settings, "REPORTS_BRAND", {})
+    """Legacy brand info - now used for 'powered by' footer only"""
+    return getattr(settings, "REPORTS_BRAND", {
+        "name": "NIEMR",
+        "tagline": "Healthcare Management System"
+    })
 
 
 def _clean_text(v) -> str:
@@ -63,6 +55,61 @@ def _split_bullets(text: str):
     return lines
 
 
+def _get_header_info(facility=None, provider=None):
+    """Build header information for reports.
+    
+    Returns dict with:
+    - entity_name: Name of facility or provider
+    - entity_type: "Facility" or "Provider"
+    - address: Full address if available
+    - phone: Contact phone
+    - email: Contact email
+    - registration_number: Facility registration or provider license
+    """
+    if facility:
+        return {
+            "entity_name": facility.name,
+            "entity_type": "Facility",
+            "address": _clean_text(getattr(facility, "address", "")),
+            "city": _clean_text(getattr(facility, "city", "")),
+            "state": facility.get_state_display() if hasattr(facility, "get_state_display") else getattr(facility, "state", ""),
+            "phone": _clean_text(getattr(facility, "phone", "")),
+            "email": _clean_text(getattr(facility, "email", "")),
+            "registration_number": _clean_text(getattr(facility, "registration_number", "")),
+        }
+    elif provider:
+        # Provider from ProviderProfile
+        user = getattr(provider, "user", None)
+        name = ""
+        email = ""
+        if user:
+            name = user.get_full_name() if hasattr(user, "get_full_name") else f"{user.first_name} {user.last_name}".strip()
+            email = user.email
+        
+        return {
+            "entity_name": name or "Independent Provider",
+            "entity_type": "Provider",
+            "provider_type": provider.get_provider_type_display() if hasattr(provider, "get_provider_type_display") else "",
+            "address": _clean_text(getattr(provider, "address", "")),
+            "city": "",
+            "state": _clean_text(getattr(provider, "state", "")),
+            "phone": _clean_text(getattr(provider, "phone", "")),
+            "email": email,
+            "registration_number": f"{getattr(provider, 'license_council', '')} {getattr(provider, 'license_number', '')}".strip(),
+        }
+    
+    return {
+        "entity_name": "Healthcare Provider",
+        "entity_type": "Facility",
+        "address": "",
+        "city": "",
+        "state": "",
+        "phone": "",
+        "email": "",
+        "registration_number": "",
+    }
+
+
 def encounter_context(encounter_id: int) -> dict:
     """Template context for reports/templates/reports/encounter.html."""
 
@@ -85,8 +132,15 @@ def encounter_context(encounter_id: int) -> dict:
     diagnoses_list = _split_bullets(diagnoses_text)
     plan_list = _split_bullets(plan_text)
 
+    # Determine if this is facility-based or independent provider
+    header_info = _get_header_info(
+        facility=enc.facility,
+        provider=None  # Could enhance to check if provider is independent
+    )
+
     return {
         "brand": brand(),
+        "header": header_info,
         "generated_at": timezone.now(),
         "title": f"Encounter #{enc.id}",
         "encounter": enc,
@@ -162,8 +216,11 @@ def lab_context(order_id: int) -> dict:
             }
         )
 
+    header_info = _get_header_info(facility=order.facility)
+
     return {
         "brand": brand(),
+        "header": header_info,
         "generated_at": timezone.now(),
         "title": f"Lab Order #{order.id}",
         "order": order,
@@ -188,8 +245,11 @@ def imaging_context(request_id: int) -> dict:
     assets = getattr(report, "assets", None)
     images = list(assets.all()) if hasattr(assets, "all") else []
 
+    header_info = _get_header_info(facility=req.facility)
+
     return {
         "brand": brand(),
+        "header": header_info,
         "generated_at": timezone.now(),
         "title": f"Imaging Request #{req.id}",
         "request": req,
@@ -234,9 +294,12 @@ def billing_context(
     balance = total_charges - total_payments
 
     patient = Patient.objects.select_related("facility").get(id=patient_id)
+    
+    header_info = _get_header_info(facility=getattr(patient, "facility", None))
 
     return {
         "brand": brand(),
+        "header": header_info,
         "generated_at": timezone.now(),
         "title": f"Billing Statement — Patient #{patient.id}",
         "patient": patient,
