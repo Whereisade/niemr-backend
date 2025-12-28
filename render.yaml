@@ -3,13 +3,18 @@ services:
     name: niemr-api
     env: python
     plan: free
-    region: frankfurt  # or any region near you/users
+    region: frankfurt
+
+    # Build: install deps + collect static (Whitenoise serves them at runtime)
     buildCommand: |
       pip install -r requirements.txt
       python manage.py collectstatic --noinput
-      python manage.py migrate
-    startCommand: gunicorn config.wsgi:application --bind 0.0.0.0:10000
+
+    # Start: run migrations, then start gunicorn on Render's provided $PORT
+    startCommand: python manage.py migrate --noinput && gunicorn config.wsgi:application --bind 0.0.0.0:$PORT
+
     autoDeploy: true
+
     envVars:
       - key: PYTHON_VERSION
         value: 3.12.3
@@ -21,6 +26,10 @@ services:
         generateValue: true
       - key: ALLOWED_HOSTS
         value: niemr-api.onrender.com,api.niemr.africa,localhost,127.0.0.1
+      - key: CSRF_TRUSTED_ORIGINS
+        sync: false
+      - key: DJANGO_SECURE_SSL_REDIRECT
+        value: "True"
       - key: TZ
         value: Africa/Lagos
 
@@ -31,6 +40,10 @@ services:
       # Email (Resend)
       - key: RESEND_API_KEY
         sync: false
+      - key: RESEND_FROM
+        sync: false
+      - key: DEFAULT_FROM_EMAIL
+        sync: false
 
       # Supabase Storage (S3 protocol)
       - key: SUPABASE_PROJECT_REF
@@ -39,9 +52,15 @@ services:
         sync: false
       - key: SUPABASE_S3_SECRET_ACCESS_KEY
         sync: false
+      - key: SUPABASE_S3_REGION
+        sync: false
       - key: SUPABASE_BUCKET
         value: media
 
       # Optional: make signed URLs if your bucket is private
       - key: SUPABASE_MEDIA_SIGNED
         value: "True"
+
+      # Reports (WeasyPrint): disabled by default on Render's non-Docker runtime
+      - key: REPORTS_ENABLE_PDF
+        value: "False"

@@ -7,6 +7,98 @@ from django.conf import settings
 from django.db import migrations, models
 
 
+def _convert_patientdocument_pk_bigint_to_uuid(apps, schema_editor):
+    """Safely convert patients_patientdocument.id from bigint -> uuid on PostgreSQL.
+
+    Django's default AlterField for bigint->uuid attempts `USING id::uuid`, which
+    fails on PostgreSQL (cannot cast bigint to uuid).
+
+    Strategy:
+      - Add a temporary uuid column
+      - Populate it (gen_random_uuid/uuid_generate_v4 or Python fallback)
+      - Drop the existing PK constraint + old bigint id
+      - Rename temp column to `id` and recreate PK
+
+    Notes:
+      - This assumes no other tables have FK constraints to PatientDocument.id.
+      - We only run this on PostgreSQL.
+    """
+
+    if schema_editor.connection.vendor != "postgresql":
+        return
+
+    table = "patients_patientdocument"
+
+    with schema_editor.connection.cursor() as cursor:
+        # If the column is already uuid, do nothing (idempotent).
+        cursor.execute(
+            """
+            SELECT data_type
+            FROM information_schema.columns
+            WHERE table_name = %s AND column_name = 'id'
+            """,
+            [table],
+        )
+        row = cursor.fetchone()
+        if row and row[0] == "uuid":
+            return
+
+    # Try to make a SQL uuid generator available.
+    uuid_sql = None
+    try:
+        schema_editor.execute("CREATE EXTENSION IF NOT EXISTS pgcrypto;")
+        uuid_sql = "gen_random_uuid()"
+    except Exception:
+        try:
+            schema_editor.execute('CREATE EXTENSION IF NOT EXISTS "uuid-ossp";')
+            uuid_sql = "uuid_generate_v4()"
+        except Exception:
+            uuid_sql = None
+
+    # 1) Add temp uuid column if missing.
+    schema_editor.execute(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS id_uuid uuid;")
+
+    # 2) Populate temp column.
+    if uuid_sql:
+        schema_editor.execute(
+            f"UPDATE {table} SET id_uuid = {uuid_sql} WHERE id_uuid IS NULL;"
+        )
+    else:
+        # Fallback: generate UUIDs in Python.
+        import uuid as _uuid
+
+        with schema_editor.connection.cursor() as cursor:
+            cursor.execute(f"SELECT id FROM {table} WHERE id_uuid IS NULL;")
+            ids = [r[0] for r in cursor.fetchall()]
+            for old_id in ids:
+                cursor.execute(
+                    f"UPDATE {table} SET id_uuid = %s WHERE id = %s;",
+                    [str(_uuid.uuid4()), old_id],
+                )
+
+    # 3) Drop PK constraint (whatever it's named) and swap columns.
+    schema_editor.execute(
+        f"""
+        DO $$
+        DECLARE
+          pkey text;
+        BEGIN
+          SELECT conname INTO pkey
+          FROM pg_constraint
+          WHERE conrelid = '{table}'::regclass AND contype = 'p';
+          IF pkey IS NOT NULL THEN
+            EXECUTE 'ALTER TABLE {table} DROP CONSTRAINT ' || quote_ident(pkey);
+          END IF;
+        END $$;
+        """
+    )
+    # Drop old bigint id and replace with uuid
+    schema_editor.execute(f"ALTER TABLE {table} DROP COLUMN IF EXISTS id;")
+    schema_editor.execute(f"ALTER TABLE {table} RENAME COLUMN id_uuid TO id;")
+    schema_editor.execute(f"ALTER TABLE {table} ALTER COLUMN id SET NOT NULL;")
+    schema_editor.execute(f"ALTER TABLE {table} ADD PRIMARY KEY (id);")
+
+
 class Migration(migrations.Migration):
 
     dependencies = [
@@ -62,9 +154,24 @@ class Migration(migrations.Migration):
             name='file',
             field=models.FileField(upload_to=patients.models.patient_document_upload_path),
         ),
-        migrations.AlterField(
-            model_name='patientdocument',
-            name='id',
-            field=models.UUIDField(default=uuid.uuid4, editable=False, primary_key=True, serialize=False),
+        migrations.SeparateDatabaseAndState(
+            database_operations=[
+                migrations.RunPython(
+                    _convert_patientdocument_pk_bigint_to_uuid,
+                    reverse_code=migrations.RunPython.noop,
+                )
+            ],
+            state_operations=[
+                migrations.AlterField(
+                    model_name='patientdocument',
+                    name='id',
+                    field=models.UUIDField(
+                        default=uuid.uuid4,
+                        editable=False,
+                        primary_key=True,
+                        serialize=False,
+                    ),
+                )
+            ],
         ),
     ]
