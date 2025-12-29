@@ -8,7 +8,9 @@ class ChargeStatus(models.TextChoices):
 
 class PaymentMethod(models.TextChoices):
     CASH = "CASH","Cash"
+    CARD = "CARD","Card"
     POS  = "POS","POS"
     TRANSFER = "TRANSFER","Bank Transfer"
+    CHEQUE = "CHEQUE","Cheque"
     INSURANCE = "INSURANCE","Insurance"
     OTHER = "OTHER","Other"

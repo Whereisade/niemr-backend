@@ -32,3 +32,19 @@ class LoginSerializer(serializers.Serializer):
 
 class GoogleAuthSerializer(serializers.Serializer):
     id_token = serializers.CharField()
+
+class UserProfileUpdateSerializer(serializers.ModelSerializer):
+    """Serializer for updating user profile information."""
+    class Meta:
+        model = User
+        fields = ["first_name", "last_name"]
+    
+    def validate_first_name(self, value):
+        if not value or not value.strip():
+            raise serializers.ValidationError("First name cannot be empty.")
+        return value.strip()
+    
+    def validate_last_name(self, value):
+        if not value or not value.strip():
+            raise serializers.ValidationError("Last name cannot be empty.")
+        return value.strip()

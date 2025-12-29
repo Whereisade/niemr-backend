@@ -4,7 +4,7 @@ from rest_framework.response import Response
 from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework_simplejwt.authentication import JWTAuthentication
 
-from .serializers import RegisterSerializer, LoginSerializer, GoogleAuthSerializer
+from .serializers import RegisterSerializer, LoginSerializer, GoogleAuthSerializer, UserProfileUpdateSerializer
 from .models import User
 from .services.email import send_email
 from .services.google import verify_google_id_token
@@ -13,15 +13,25 @@ def _jwt_pair_for(user: User) -> dict:
     refresh = RefreshToken.for_user(user)
     return {"access": str(refresh.access_token), "refresh": str(refresh)}
 
-@api_view(["GET"])
+@api_view(["GET", "PATCH"])
 @authentication_classes([JWTAuthentication])  
 @permission_classes([permissions.IsAuthenticated])
 def me(request):
     """
-    Return basic info about the currently authenticated user.
-    Used by the frontend dashboards for greetings, etc.
+    Return or update basic info about the currently authenticated user.
+    
+    GET: Return user profile
+    PATCH: Update user profile (first_name, last_name)
     """
     user = request.user
+    
+    if request.method == "PATCH":
+        serializer = UserProfileUpdateSerializer(user, data=request.data, partial=True)
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+        # After update, continue to return the updated user data below
+    
+    # Return user data (for both GET and PATCH)
     facility = getattr(user, "facility", None)
 
     data = {

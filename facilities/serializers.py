@@ -94,9 +94,12 @@ class BedAssignmentSerializer(serializers.ModelSerializer):
     is_active = serializers.SerializerMethodField(read_only=True)
     ward = serializers.SerializerMethodField(read_only=True)
     facility = serializers.SerializerMethodField(read_only=True)
-    status = serializers.SerializerMethodField(read_only=True)  # <-- NEW
-    patient_display = serializers.SerializerMethodField(read_only=True)  # <-- NEW
-    bed_display = serializers.SerializerMethodField(read_only=True)      # <-- NEW
+    status = serializers.SerializerMethodField(read_only=True)
+    patient_display = serializers.SerializerMethodField(read_only=True)
+    bed_display = serializers.SerializerMethodField(read_only=True)
+    # 🆕 NEW FIELDS for provider names
+    assigned_by_name = serializers.SerializerMethodField(read_only=True)
+    discharged_by_name = serializers.SerializerMethodField(read_only=True)
 
     class Meta:
         model = BedAssignment
@@ -110,7 +113,9 @@ class BedAssignmentSerializer(serializers.ModelSerializer):
             "assigned_at",
             "discharged_at",
             "assigned_by",
+            "assigned_by_name",  # 🆕 NEW
             "discharged_by",
+            "discharged_by_name",  # 🆕 NEW
             "notes",
             "is_active",
             "status",
@@ -122,7 +127,9 @@ class BedAssignmentSerializer(serializers.ModelSerializer):
             "assigned_at",
             "discharged_at",
             "assigned_by",
+            "assigned_by_name",  # 🆕 NEW
             "discharged_by",
+            "discharged_by_name",  # 🆕 NEW
             "is_active",
             "status",
             "ward",
@@ -154,6 +161,24 @@ class BedAssignmentSerializer(serializers.ModelSerializer):
         b = obj.bed
         return f"{b.ward.name} – {b.number}"
 
+    # 🆕 NEW METHOD: Get the name of the user who assigned this bed
+    def get_assigned_by_name(self, obj):
+        """Return the name of the user who assigned this bed"""
+        if not obj.assigned_by:
+            return None
+        user = obj.assigned_by
+        name = " ".join(filter(None, [user.first_name, user.last_name]))
+        return name or user.email or f"User #{user.id}"
+
+    # 🆕 NEW METHOD: Get the name of the user who discharged this bed
+    def get_discharged_by_name(self, obj):
+        """Return the name of the user who discharged this bed"""
+        if not obj.discharged_by:
+            return None
+        user = obj.discharged_by
+        name = " ".join(filter(None, [user.first_name, user.last_name]))
+        return name or user.email or f"User #{user.id}"
+
     def validate(self, attrs):
         request = self.context.get("request")
         user = getattr(request, "user", None)
@@ -183,10 +208,24 @@ class BedAssignmentSerializer(serializers.ModelSerializer):
                 "Selected bed is not available for assignment."
             )
 
-        # Ensure no active assignment
+        # Ensure no active assignment on this bed
         if bed.assignments.filter(discharged_at__isnull=True).exists():
             raise serializers.ValidationError(
                 "This bed already has an active assignment."
+            )
+
+        # 🆕 CRITICAL: Prevent patient from having multiple active bed assignments
+        # A patient should only be in ONE bed at a time
+        existing_assignment = BedAssignment.objects.filter(
+            patient=patient,
+            discharged_at__isnull=True
+        ).select_related("bed", "bed__ward").first()
+
+        if existing_assignment:
+            bed_info = f"{existing_assignment.bed.ward.name}, Bed {existing_assignment.bed.number}"
+            raise serializers.ValidationError(
+                f"Patient already has an active bed assignment in {bed_info}. "
+                f"Please discharge them first before assigning to a new bed."
             )
 
         # Optional: validate patient facility if your model has it
