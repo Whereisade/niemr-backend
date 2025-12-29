@@ -461,15 +461,23 @@ class EncounterViewSet(
     @action(detail=True, methods=["post"])
     def close(self, request, pk=None):
         """
-        Close the encounter.
+        Close the encounter and immediately lock clinical fields.
         Also updates linked appointment status to COMPLETED.
         """
         enc = self.get_object()
         self.permission_classes = [IsAuthenticated, IsStaff]
         self.check_permissions(request)
 
+        # Update status to CLOSED
         enc.status = EncounterStatus.CLOSED
-        enc.save(update_fields=["status", "updated_at"])
+        
+        # IMMEDIATE LOCK: Set locked_at to now when closing
+        # This prevents any further edits to clinical fields (chief_complaint, hpi, ros, etc.)
+        if not enc.locked_at:
+            enc.locked_at = timezone.now()
+        
+        # Save with both fields updated
+        enc.save(update_fields=["status", "locked_at", "updated_at"])
 
         # Sync linked appointment to COMPLETED
         if enc.appointment_id:
@@ -504,8 +512,10 @@ class EncounterViewSet(
 
         return Response(
             {
-                "detail": "Encounter closed.",
+                "detail": "Encounter closed and clinical note locked.",
                 "status": enc.status,
+                "locked": True,
+                "locked_at": enc.locked_at,
             }
         )
 
