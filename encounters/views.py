@@ -40,7 +40,18 @@ class EncounterViewSet(
         if u.role == "PATIENT":
             q = q.filter(patient__user_id=u.id)
         elif u.facility_id:
-            q = q.filter(facility_id=u.facility_id)
+            # Facility-based users
+            role = (getattr(u, "role", "") or "").upper()
+            
+            # Doctors should only see encounters assigned to them (as provider)
+            if role == "DOCTOR":
+                q = q.filter(facility_id=u.facility_id, provider_id=u.id)
+            # Admins and super admins see all facility encounters
+            elif role in {"ADMIN", "SUPER_ADMIN"}:
+                q = q.filter(facility_id=u.facility_id)
+            # Other facility staff (nurses, lab, pharmacy, frontdesk) see all facility encounters
+            else:
+                q = q.filter(facility_id=u.facility_id)
         else:
             # Independent staff (no facility) should still see encounters they are involved in.
             # This includes encounters they created, were assigned to (provider), or participated in (nurse).
