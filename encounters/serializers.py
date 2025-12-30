@@ -132,6 +132,12 @@ class EncounterSerializer(serializers.ModelSerializer):
     created_by_name = serializers.SerializerMethodField(read_only=True)
     created_by_first_name = serializers.SerializerMethodField(read_only=True)
     created_by_last_name = serializers.SerializerMethodField(read_only=True)
+    
+    # Timeline event names
+    paused_by_name = serializers.SerializerMethodField(read_only=True)
+    resumed_by_name = serializers.SerializerMethodField(read_only=True)
+    labs_skipped_by_name = serializers.SerializerMethodField(read_only=True)
+    clinical_finalized_by_name = serializers.SerializerMethodField(read_only=True)
 
     class Meta:
         model = Encounter
@@ -221,6 +227,19 @@ class EncounterSerializer(serializers.ModelSerializer):
         if not obj.created_by:
             return None
         return getattr(obj.created_by, "last_name", None)
+
+    # Timeline event names
+    def get_paused_by_name(self, obj):
+        return _get_user_name(obj.paused_by)
+
+    def get_resumed_by_name(self, obj):
+        return _get_user_name(obj.resumed_by)
+
+    def get_labs_skipped_by_name(self, obj):
+        return _get_user_name(obj.labs_skipped_by)
+
+    def get_clinical_finalized_by_name(self, obj):
+        return _get_user_name(obj.clinical_finalized_by)
 
     def create(self, validated):
         req = self.context.get("request")

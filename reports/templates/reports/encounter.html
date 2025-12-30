@@ -60,11 +60,27 @@
       <td class="v">{{ encounter.occurred_at|date:"d M Y, H:i" }}</td>
     </tr>
     {% endif %}
+    {% if duration_display %}
+    <tr>
+      <td class="k">Duration</td>
+      <td class="v">{{ duration_display }}</td>
+    </tr>
+    {% endif %}
     {% if encounter.encounter_type %}
     <tr>
       <td class="k">Type</td>
       <td class="v">
         <span class="badge badge-info">{{ encounter.encounter_type }}</span>
+      </td>
+    </tr>
+    {% endif %}
+    {% if encounter.priority %}
+    <tr>
+      <td class="k">Priority</td>
+      <td class="v">
+        <span class="badge {% if encounter.priority == 'URGENT' %}badge-warning{% else %}badge-muted{% endif %}">
+          {{ encounter.priority }}
+        </span>
       </td>
     </tr>
     {% endif %}
@@ -159,6 +175,182 @@
   {% endif %}
 </div>
 
+<div class="hr"></div>
+
+<!-- Lab Orders -->
+{% if lab_orders %}
+<div class="section keep">
+  <h3>Laboratory Orders & Results</h3>
+  
+  {% for order in lab_orders %}
+    <div style="margin-bottom: 16px; page-break-inside: avoid;">
+      <!-- Order Header -->
+      <div style="background-color: #F9FAFB; padding: 8px 12px; border-left: 3px solid #3B82F6; margin-bottom: 8px;">
+        <div style="display: table; width: 100%;">
+          <div style="display: table-cell; vertical-align: middle;">
+            <strong>Lab Order #{{ order.id }}</strong>
+            {% if order.status %}
+              <span class="badge {% if order.status == 'COMPLETED' %}badge-success{% elif order.status == 'PENDING' %}badge-warning{% else %}badge-info{% endif %}" style="margin-left: 8px;">
+                {{ order.status }}
+              </span>
+            {% endif %}
+            {% if order.priority %}
+              <span class="badge {% if order.priority == 'URGENT' %}badge-warning{% else %}badge-muted{% endif %}" style="margin-left: 4px;">
+                {{ order.priority }}
+              </span>
+            {% endif %}
+          </div>
+          <div style="display: table-cell; vertical-align: middle; text-align: right; font-size: 10px; color: #6B7280;">
+            {% if order.ordered_by %}
+              Ordered by {{ order.ordered_by }}
+            {% endif %}
+            {% if order.ordered_at %}
+              <span style="margin-left: 6px;">{{ order.ordered_at|date:"d M Y, H:i" }}</span>
+            {% endif %}
+          </div>
+        </div>
+      </div>
+
+      <!-- Test Results Table -->
+      {% if order.items %}
+        <table style="font-size: 10px;">
+          <thead>
+            <tr>
+              <th style="width: 35%;">Test Name</th>
+              <th style="width: 20%;">Result</th>
+              <th style="width: 12%;">Unit</th>
+              <th style="width: 20%;">Reference Range</th>
+              <th style="width: 13%; text-align: center;">Flag</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for item in order.items %}
+              <tr>
+                <td><strong>{{ item.test_name }}</strong></td>
+                <td><strong>{{ item.value }}</strong></td>
+                <td class="muted">{{ item.unit }}</td>
+                <td class="muted" style="font-size: 9px;">{{ item.ref_range }}</td>
+                <td style="text-align: center;">
+                  {% if item.flag %}
+                    <span class="badge {% if item.flag == 'HIGH' or item.flag == 'H' %}badge-warning{% elif item.flag == 'LOW' or item.flag == 'L' %}badge-info{% else %}badge-muted{% endif %}">
+                      {{ item.flag }}
+                    </span>
+                  {% else %}
+                    <span class="muted">—</span>
+                  {% endif %}
+                </td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      {% else %}
+        <div class="muted" style="padding: 8px;">No test results available yet.</div>
+      {% endif %}
+
+      {% if order.note %}
+        <div style="margin-top: 8px; padding: 8px; background-color: #F0F9FF; border-left: 2px solid #3B82F6; font-size: 10px;">
+          <strong>Note:</strong> {{ order.note }}
+        </div>
+      {% endif %}
+    </div>
+  {% endfor %}
+</div>
+
+<div class="hr"></div>
+{% endif %}
+
+<!-- Prescriptions -->
+{% if prescriptions %}
+<div class="section keep">
+  <h3>Prescriptions</h3>
+  
+  {% for rx in prescriptions %}
+    <div style="margin-bottom: 16px; page-break-inside: avoid;">
+      <!-- Prescription Header -->
+      <div style="background-color: #F0FDF4; padding: 8px 12px; border-left: 3px solid #10B981; margin-bottom: 8px;">
+        <div style="display: table; width: 100%;">
+          <div style="display: table-cell; vertical-align: middle;">
+            <strong>Prescription #{{ rx.id }}</strong>
+            {% if rx.status %}
+              <span class="badge {% if rx.status == 'COMPLETED' %}badge-success{% elif rx.status == 'PENDING' %}badge-warning{% else %}badge-info{% endif %}" style="margin-left: 8px;">
+                {{ rx.status }}
+              </span>
+            {% endif %}
+          </div>
+          <div style="display: table-cell; vertical-align: middle; text-align: right; font-size: 10px; color: #6B7280;">
+            {% if rx.prescriber %}
+              Prescribed by {{ rx.prescriber }}
+            {% endif %}
+            {% if rx.timestamp %}
+              <span style="margin-left: 6px;">{{ rx.timestamp|date:"d M Y, H:i" }}</span>
+            {% endif %}
+          </div>
+        </div>
+      </div>
+
+      <!-- Medication Table -->
+      {% if rx.items %}
+        <table style="font-size: 10px;">
+          <thead>
+            <tr>
+              <th style="width: 28%;">Medication</th>
+              <th style="width: 18%;">Dose</th>
+              <th style="width: 18%;">Frequency</th>
+              <th style="width: 12%;">Duration</th>
+              <th style="width: 24%;">Instructions</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for item in rx.items %}
+              <tr>
+                <td><strong>{{ item.drug_name }}</strong></td>
+                <td>{{ item.dose|default:"—" }}</td>
+                <td>{{ item.frequency|default:"—" }}</td>
+                <td>{% if item.duration_days %}{{ item.duration_days }} days{% else %}—{% endif %}</td>
+                <td class="muted" style="font-size: 9px;">{{ item.instruction|default:"—" }}</td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      {% else %}
+        <div class="muted" style="padding: 8px;">No medication items.</div>
+      {% endif %}
+
+      {% if rx.note %}
+        <div style="margin-top: 8px; padding: 8px; background-color: #FFFBEB; border-left: 2px solid #F59E0B; font-size: 10px;">
+          <strong>Prescription Note:</strong> {{ rx.note }}
+        </div>
+      {% endif %}
+    </div>
+  {% endfor %}
+</div>
+
+<div class="hr"></div>
+{% endif %}
+
+<!-- Encounter Timeline -->
+{% if timeline_events %}
+<div class="section keep">
+  <h3>Encounter Timeline</h3>
+  
+  <table class="kv" style="font-size: 10px;">
+    {% for event in timeline_events %}
+      <tr>
+        <td class="k" style="width: 35%;">{{ event.title }}</td>
+        <td class="v">
+          <strong>{{ event.timestamp|date:"d M Y, H:i" }}</strong>
+          {% if event.actor %}
+            <span class="muted" style="margin-left: 8px;">— {{ event.actor }}</span>
+          {% endif %}
+        </td>
+      </tr>
+    {% endfor %}
+  </table>
+</div>
+
+<div class="hr"></div>
+{% endif %}
+
 <!-- Signature Section -->
 <div class="section keep" style="margin-top: 30px;">
   <div class="highlight-box">
@@ -178,7 +370,21 @@
         <td class="k">Date</td>
         <td class="v">{{ encounter.occurred_at|date:"d M Y" }}</td>
       </tr>
+      {% if encounter.locked_at %}
+      <tr>
+        <td class="k">Documentation locked</td>
+        <td class="v">{{ encounter.locked_at|date:"d M Y, H:i" }}</td>
+      </tr>
+      {% endif %}
     </table>
+  </div>
+</div>
+
+<!-- Confidentiality Notice -->
+<div class="section keep">
+  <div style="padding: 8px; background-color: #FEF3C7; border-left: 3px solid #F59E0B; border-radius: 4px; font-size: 9px; color: #92400E;">
+    <strong>Confidentiality Notice:</strong> This document contains confidential patient health information protected by law. 
+    Unauthorized disclosure or use of this information is strictly prohibited and may be subject to civil and criminal penalties.
   </div>
 </div>
 
