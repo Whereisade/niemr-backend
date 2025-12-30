@@ -37,31 +37,45 @@ class EncounterViewSet(
         q = self.queryset
         u = self.request.user
 
+        # Check if querying for a specific patient
+        patient_id = self.request.query_params.get("patient")
+
         if u.role == "PATIENT":
             q = q.filter(patient__user_id=u.id)
         elif u.facility_id:
             # Facility-based users
             role = (getattr(u, "role", "") or "").upper()
             
-            # Doctors should only see encounters assigned to them (as provider)
-            if role == "DOCTOR":
-                q = q.filter(facility_id=u.facility_id, provider_id=u.id)
-            # Admins and super admins see all facility encounters
-            elif role in {"ADMIN", "SUPER_ADMIN"}:
-                q = q.filter(facility_id=u.facility_id)
-            # Other facility staff (nurses, lab, pharmacy, frontdesk) see all facility encounters
+            # When querying for a specific patient, show all encounters for that patient in the facility
+            if patient_id:
+                q = q.filter(facility_id=u.facility_id, patient_id=patient_id)
             else:
-                q = q.filter(facility_id=u.facility_id)
+                # Normal filtering when not querying a specific patient
+                # Doctors should only see encounters assigned to them (as provider)
+                if role == "DOCTOR":
+                    q = q.filter(facility_id=u.facility_id, provider_id=u.id)
+                # Admins and super admins see all facility encounters
+                elif role in {"ADMIN", "SUPER_ADMIN"}:
+                    q = q.filter(facility_id=u.facility_id)
+                # Other facility staff (nurses, lab, pharmacy, frontdesk) see all facility encounters
+                else:
+                    q = q.filter(facility_id=u.facility_id)
         else:
             # Independent staff (no facility) should still see encounters they are involved in.
             # This includes encounters they created, were assigned to (provider), or participated in (nurse).
             role = (getattr(u, "role", "") or "").upper()
             if role not in {"ADMIN", "SUPER_ADMIN"}:
-                q = q.filter(Q(created_by_id=u.id) | Q(provider_id=u.id) | Q(nurse_id=u.id))
+                if patient_id:
+                    # When querying specific patient, show encounters they're involved in for that patient
+                    q = q.filter(
+                        Q(patient_id=patient_id) &
+                        (Q(created_by_id=u.id) | Q(provider_id=u.id) | Q(nurse_id=u.id))
+                    )
+                else:
+                    q = q.filter(Q(created_by_id=u.id) | Q(provider_id=u.id) | Q(nurse_id=u.id))
 
-        patient_id = self.request.query_params.get("patient")
-        if patient_id:
-            q = q.filter(patient_id=patient_id)
+        # Note: patient_id filter already applied above in context-aware manner
+        # Remove redundant filter that was applying after role-based filtering
 
         status_ = self.request.query_params.get("status")
         if status_:
@@ -159,7 +173,7 @@ class EncounterViewSet(
                 nurse=request.user,
                 provider=None,  # Will be set when doctor takes over
                 status=EncounterStatus.IN_PROGRESS,
-                stage=EncounterStage.LABS,  # Actually starts at nurse assessment, but kept for compatibility
+                stage=EncounterStage.LABS,
                 occurred_at=timezone.now(),
                 appointment_id=appt.id,
                 chief_complaint=getattr(appt, "reason", "") or "",

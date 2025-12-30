@@ -1,5 +1,6 @@
 import csv
 import io
+import math
 
 from django.db.models import Q
 from django.utils import timezone
@@ -90,9 +91,14 @@ class LabTestViewSet(viewsets.GenericViewSet, mixins.ListModelMixin, mixins.Crea
             serializer.save(facility=None, created_by=u)
 
     @action(detail=False, methods=["post"], permission_classes=[IsAuthenticated, IsStaff])
-    def import_csv(self, request):
+    def import_file(self, request):
         """
-        CSV columns: code,name,unit,ref_low,ref_high,price
+        Import lab tests from CSV or Excel file.
+        
+        Required columns: code, name, unit, ref_low, ref_high, price
+        Optional columns: is_active (defaults to true)
+        
+        Supported formats: CSV (.csv), Excel (.xlsx, .xls)
         
         Tests are scoped to the user's facility or to the user (for independent labs).
         """
@@ -103,44 +109,141 @@ class LabTestViewSet(viewsets.GenericViewSet, mixins.ListModelMixin, mixins.Crea
         u = request.user
         facility_id = getattr(u, "facility_id", None)
 
-        buf = io.StringIO(f.read().decode("utf-8"))
-        reader = csv.DictReader(buf)
+        filename = f.name.lower()
         created, updated = 0, 0
+        errors = []
 
-        for row in reader:
-            code = (row.get("code") or "").strip()
-            if not code:
-                continue
-
-            defaults = {
-                "name": (row.get("name") or "").strip(),
-                "unit": (row.get("unit") or "").strip(),
-                "ref_low": (row.get("ref_low") or None),
-                "ref_high": (row.get("ref_high") or None),
-                "price": (row.get("price") or 0),
-                "is_active": True,
-            }
-
-            if facility_id:
-                # Facility staff: scope to facility
-                _, is_created = LabTest.objects.update_or_create(
-                    code=code,
-                    facility_id=facility_id,
-                    defaults={**defaults, "created_by": u}
-                )
+        try:
+            # Determine file type and read data
+            if filename.endswith('.csv'):
+                # CSV import
+                buf = io.StringIO(f.read().decode("utf-8"))
+                reader = csv.DictReader(buf)
+                rows = list(reader)
+            elif filename.endswith(('.xlsx', '.xls')):
+                # Excel import
+                try:
+                    import pandas as pd
+                except ImportError:
+                    return Response(
+                        {"detail": "Excel support not available. Please install pandas and openpyxl."},
+                        status=400
+                    )
+                
+                engine = 'openpyxl' if filename.endswith('.xlsx') else None
+                df = pd.read_excel(f, engine=engine)
+                # Convert DataFrame to list of dicts (similar to csv.DictReader)
+                rows = df.to_dict('records')
             else:
-                # Independent lab: scope to user
-                _, is_created = LabTest.objects.update_or_create(
-                    code=code,
-                    facility=None,
-                    created_by=u,
-                    defaults=defaults
+                return Response(
+                    {"detail": "Unsupported file format. Please upload CSV or Excel (.xlsx, .xls) file."},
+                    status=400
                 )
 
-            created += int(is_created)
-            updated += int(not is_created)
+            # Validate required columns
+            if not rows:
+                return Response(
+                    {"detail": "File is empty or has no data rows."},
+                    status=400
+                )
+            
+            required_columns = ['code', 'name']
+            first_row_keys = [k.lower() for k in rows[0].keys()]
+            missing_columns = [col for col in required_columns if col not in first_row_keys]
+            
+            if missing_columns:
+                return Response(
+                    {"detail": f"Missing required columns: {', '.join(missing_columns)}. Required: code, name"},
+                    status=400
+                )
 
-        return Response({"created": created, "updated": updated})
+            # Process rows
+            for idx, row in enumerate(rows, start=2):  # Start at 2 to account for header row
+                try:
+                    # Normalize column names (case-insensitive)
+                    row = {k.lower(): v for k, v in row.items()}
+                    
+                    code = str(row.get("code") or "").strip()
+                    if not code:
+                        errors.append(f"Row {idx}: Missing code, skipping")
+                        continue
+                    
+                    name = str(row.get("name") or "").strip()
+                    if not name:
+                        errors.append(f"Row {idx}: Missing name, skipping")
+                        continue
+
+                    # Handle pandas NaN values and type conversions
+                    def clean_value(val):
+                        """Convert pandas NaN to None, handle empty strings"""
+                        if val is None or val == '':
+                            return None
+                        if isinstance(val, float) and math.isnan(val):
+                            return None
+                        return val
+                    
+                    ref_low = clean_value(row.get("ref_low"))
+                    ref_high = clean_value(row.get("ref_high"))
+                    price = clean_value(row.get("price"))
+                    unit = str(row.get("unit") or "").strip()
+                    
+                    # Convert price to decimal, default to 0
+                    try:
+                        price = float(price) if price is not None else 0
+                    except (ValueError, TypeError):
+                        price = 0
+
+                    defaults = {
+                        "name": name,
+                        "unit": unit,
+                        "ref_low": ref_low,
+                        "ref_high": ref_high,
+                        "price": price,
+                        "is_active": True,
+                    }
+
+                    if facility_id:
+                        # Facility staff: scope to facility
+                        _, is_created = LabTest.objects.update_or_create(
+                            code=code,
+                            facility_id=facility_id,
+                            defaults={**defaults, "created_by": u}
+                        )
+                    else:
+                        # Independent lab: scope to user
+                        _, is_created = LabTest.objects.update_or_create(
+                            code=code,
+                            facility=None,
+                            created_by=u,
+                            defaults=defaults
+                        )
+
+                    created += int(is_created)
+                    updated += int(not is_created)
+                    
+                except Exception as e:
+                    errors.append(f"Row {idx}: {str(e)}")
+
+        except Exception as e:
+            return Response(
+                {"detail": f"Failed to process file: {str(e)}"},
+                status=400
+            )
+
+        response_data = {
+            "created": created,
+            "updated": updated,
+            "total_processed": created + updated,
+            "message": f"Successfully imported {created + updated} tests ({created} new, {updated} updated)"
+        }
+        
+        if errors:
+            response_data["errors"] = errors[:20]  # Limit to first 20 errors
+            response_data["error_count"] = len(errors)
+            if len(errors) > 20:
+                response_data["message"] += f". Note: {len(errors) - 20} more errors not shown."
+
+        return Response(response_data)
 
 
 class LabOrderViewSet(

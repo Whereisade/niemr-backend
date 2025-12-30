@@ -299,20 +299,23 @@ class PrescriptionCreateSerializer(serializers.ModelSerializer):
         return rx
 
 
-
-
-
 class PrescriptionReadSerializer(serializers.ModelSerializer):
     items = PrescriptionItemReadSerializer(many=True)
     outsourced_to_name = serializers.SerializerMethodField()
+    patient_name = serializers.SerializerMethodField()
+    facility_name = serializers.SerializerMethodField()
+    prescribed_by_name = serializers.SerializerMethodField()
 
     class Meta:
         model = Prescription
         fields = [
             "id",
             "patient",
+            "patient_name",
             "facility",
+            "facility_name",
             "prescribed_by",
+            "prescribed_by_name",
             "encounter_id",
             "status",
             "note",
@@ -322,12 +325,47 @@ class PrescriptionReadSerializer(serializers.ModelSerializer):
             "items",
         ]
 
+    def get_patient_name(self, obj):
+        p = getattr(obj, "patient", None)
+        if not p:
+            return None
+        # Patient model has first_name and last_name fields
+        first = getattr(p, "first_name", "") or ""
+        last = getattr(p, "last_name", "") or ""
+        full = f"{first} {last}".strip()
+        return full or f"Patient #{p.id}"
+
+    def get_facility_name(self, obj):
+        f = getattr(obj, "facility", None)
+        if not f:
+            return None
+        return f.name or f"Facility #{f.id}"
+
+    def get_prescribed_by_name(self, obj):
+        u = getattr(obj, "prescribed_by", None)
+        if not u:
+            return None
+        # Try get_full_name if available, otherwise construct from fields
+        if hasattr(u, "get_full_name"):
+            full = (u.get_full_name() or "").strip()
+        else:
+            first = getattr(u, "first_name", "") or ""
+            last = getattr(u, "last_name", "") or ""
+            full = f"{first} {last}".strip()
+        return full or getattr(u, "email", None) or f"User #{u.id}"
+
     def get_outsourced_to_name(self, obj):
         u = getattr(obj, "outsourced_to", None)
         if not u:
             return None
-        full = (u.get_full_name() or "").strip()
-        return full or u.email
+        # Try get_full_name if available, otherwise construct from fields
+        if hasattr(u, "get_full_name"):
+            full = (u.get_full_name() or "").strip()
+        else:
+            first = getattr(u, "first_name", "") or ""
+            last = getattr(u, "last_name", "") or ""
+            full = f"{first} {last}".strip()
+        return full or getattr(u, "email", None)
 
 
 class DispenseSerializer(serializers.Serializer):
@@ -521,5 +559,3 @@ class DispenseSerializer(serializers.Serializer):
                     pass
 
         return item
-
-

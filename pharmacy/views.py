@@ -1,4 +1,7 @@
-import csv, io
+import csv
+import io
+import math
+
 from django.utils.dateparse import parse_datetime
 from django.db.models import Q
 from rest_framework import viewsets, mixins, status
@@ -36,7 +39,7 @@ class DrugViewSet(
     def get_permissions(self):
         # Anyone authenticated can view the catalog within their scope.
         # Only pharmacy staff (or admins) can modify items (create/update/import).
-        if self.action in {"create", "update", "partial_update", "import_csv"}:
+        if self.action in {"create", "update", "partial_update", "import_file"}:
             return [IsPharmacyStaff()]
         return [IsAuthenticated()]
 
@@ -93,9 +96,14 @@ class DrugViewSet(
             serializer.save(facility=None, created_by=u)
 
     @action(detail=False, methods=["post"], permission_classes=[IsAuthenticated, IsPharmacyStaff])
-    def import_csv(self, request):
+    def import_file(self, request):
         """
-        CSV columns: code,name,strength,form,route,qty_per_unit,unit_price
+        Import drugs from CSV or Excel file.
+        
+        Required columns: code, name
+        Optional columns: strength, form, route, qty_per_unit, unit_price, is_active
+        
+        Supported formats: CSV (.csv), Excel (.xlsx, .xls)
         
         Drugs are scoped to the user's facility or to the user (for independent pharmacies).
         """
@@ -106,45 +114,157 @@ class DrugViewSet(
         u = request.user
         facility_id = getattr(u, "facility_id", None)
         
-        buf = io.StringIO(f.read().decode("utf-8"))
-        reader = csv.DictReader(buf)
+        filename = f.name.lower()
         created, updated = 0, 0
+        errors = []
         
-        for row in reader:
-            code = (row.get("code") or "").strip()
-            if not code:
-                continue
-            
-            defaults = {
-                "name": (row.get("name") or "").strip(),
-                "strength": (row.get("strength") or "").strip(),
-                "form": (row.get("form") or "").strip(),
-                "route": (row.get("route") or "").strip(),
-                "qty_per_unit": int(row.get("qty_per_unit") or 1),
-                "unit_price": (row.get("unit_price") or 0),
-                "is_active": True,
-            }
-            
-            if facility_id:
-                # Facility staff: scope to facility
-                _, is_created = Drug.objects.update_or_create(
-                    code=code,
-                    facility_id=facility_id,
-                    defaults={**defaults, "created_by": u}
-                )
+        try:
+            # Determine file type and read data
+            if filename.endswith('.csv'):
+                # CSV import
+                buf = io.StringIO(f.read().decode("utf-8"))
+                reader = csv.DictReader(buf)
+                rows = list(reader)
+            elif filename.endswith(('.xlsx', '.xls')):
+                # Excel import
+                try:
+                    import pandas as pd
+                except ImportError:
+                    return Response(
+                        {"detail": "Excel support not available. Please install pandas and openpyxl."},
+                        status=400
+                    )
+                
+                engine = 'openpyxl' if filename.endswith('.xlsx') else None
+                df = pd.read_excel(f, engine=engine)
+                # Convert DataFrame to list of dicts (similar to csv.DictReader)
+                rows = df.to_dict('records')
             else:
-                # Independent pharmacy: scope to user
-                _, is_created = Drug.objects.update_or_create(
-                    code=code,
-                    facility=None,
-                    created_by=u,
-                    defaults=defaults
+                return Response(
+                    {"detail": "Unsupported file format. Please upload CSV or Excel (.xlsx, .xls) file."},
+                    status=400
                 )
             
-            created += int(is_created)
-            updated += int(not is_created)
+            # Validate required columns
+            if not rows:
+                return Response(
+                    {"detail": "File is empty or has no data rows."},
+                    status=400
+                )
+            
+            required_columns = ['code', 'name']
+            first_row_keys = [k.lower() for k in rows[0].keys()]
+            missing_columns = [col for col in required_columns if col not in first_row_keys]
+            
+            if missing_columns:
+                return Response(
+                    {"detail": f"Missing required columns: {', '.join(missing_columns)}. Required: code, name"},
+                    status=400
+                )
+            
+            # Process rows
+            for idx, row in enumerate(rows, start=2):  # Start at 2 to account for header row
+                try:
+                    # Normalize column names (case-insensitive)
+                    row = {k.lower(): v for k, v in row.items()}
+                    
+                    code = str(row.get("code") or "").strip()
+                    if not code:
+                        errors.append(f"Row {idx}: Missing code, skipping")
+                        continue
+                    
+                    name = str(row.get("name") or "").strip()
+                    if not name:
+                        errors.append(f"Row {idx}: Missing name, skipping")
+                        continue
+                    
+                    # Handle pandas NaN values and type conversions
+                    def clean_value(val, default=''):
+                        """Convert pandas NaN to default, handle empty strings"""
+                        if val is None or val == '':
+                            return default
+                        if isinstance(val, float) and math.isnan(val):
+                            return default
+                        return str(val).strip()
+                    
+                    strength = clean_value(row.get("strength"))
+                    form = clean_value(row.get("form"))
+                    route = clean_value(row.get("route"))
+                    
+                    # Handle qty_per_unit
+                    qty_per_unit = row.get("qty_per_unit")
+                    try:
+                        if qty_per_unit is None or qty_per_unit == '' or (isinstance(qty_per_unit, float) and math.isnan(qty_per_unit)):
+                            qty_per_unit = 1
+                        else:
+                            qty_per_unit = int(float(qty_per_unit))
+                            if qty_per_unit <= 0:
+                                qty_per_unit = 1
+                    except (ValueError, TypeError):
+                        qty_per_unit = 1
+                    
+                    # Handle unit_price
+                    unit_price = row.get("unit_price")
+                    try:
+                        if unit_price is None or unit_price == '' or (isinstance(unit_price, float) and math.isnan(unit_price)):
+                            unit_price = 0
+                        else:
+                            unit_price = float(unit_price)
+                    except (ValueError, TypeError):
+                        unit_price = 0
+                    
+                    defaults = {
+                        "name": name,
+                        "strength": strength,
+                        "form": form,
+                        "route": route,
+                        "qty_per_unit": qty_per_unit,
+                        "unit_price": unit_price,
+                        "is_active": True,
+                    }
+                    
+                    if facility_id:
+                        # Facility staff: scope to facility
+                        _, is_created = Drug.objects.update_or_create(
+                            code=code,
+                            facility_id=facility_id,
+                            defaults={**defaults, "created_by": u}
+                        )
+                    else:
+                        # Independent pharmacy: scope to user
+                        _, is_created = Drug.objects.update_or_create(
+                            code=code,
+                            facility=None,
+                            created_by=u,
+                            defaults=defaults
+                        )
+                    
+                    created += int(is_created)
+                    updated += int(not is_created)
+                    
+                except Exception as e:
+                    errors.append(f"Row {idx}: {str(e)}")
         
-        return Response({"created": created, "updated": updated})
+        except Exception as e:
+            return Response(
+                {"detail": f"Failed to process file: {str(e)}"},
+                status=400
+            )
+        
+        response_data = {
+            "created": created,
+            "updated": updated,
+            "total_processed": created + updated,
+            "message": f"Successfully imported {created + updated} drugs ({created} new, {updated} updated)"
+        }
+        
+        if errors:
+            response_data["errors"] = errors[:20]  # Limit to first 20 errors
+            response_data["error_count"] = len(errors)
+            if len(errors) > 20:
+                response_data["message"] += f". Note: {len(errors) - 20} more errors not shown."
+        
+        return Response(response_data)
 
 
 # --- Stock ---
