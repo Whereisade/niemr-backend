@@ -13,7 +13,7 @@ from patients.models import Patient
 from accounts.enums import UserRole
 from notifications.services.notify import notify_user, notify_patient, notify_facility_roles
 from notifications.enums import Topic, Priority
-from .enums import EncounterStage, EncounterStatus, SoapSection
+from .enums import EncounterStage, EncounterStatus, SoapSection, AmendmentType
 from .models import Encounter, EncounterAmendment
 from .permissions import CanViewEncounter, IsStaff
 from .serializers import AmendmentSerializer, EncounterListSerializer, EncounterSerializer
@@ -559,7 +559,7 @@ class EncounterViewSet(
 
     @action(detail=True, methods=["post"])
     def amend(self, request, pk=None):
-        """Add a per-section correction to a locked encounter."""
+        """Add a per-section correction or addition to a locked encounter."""
         enc = self.get_object()
         self.permission_classes = [IsAuthenticated, IsStaff]
         self.check_permissions(request)
@@ -585,10 +585,16 @@ class EncounterViewSet(
         if not reason or not content:
             return Response({"detail": "reason and content are required"}, status=400)
 
+        # ✅ FIX: Get amendment_type from request (defaults to CORRECTION if not provided)
+        amendment_type = (request.data.get("amendment_type") or "CORRECTION").strip().upper()
+        if amendment_type not in {c[0] for c in AmendmentType.choices}:
+            amendment_type = AmendmentType.CORRECTION
+
         a = EncounterAmendment.objects.create(
             encounter=enc,
             added_by=request.user,
             section=section,
+            amendment_type=amendment_type,
             reason=reason,
             content=content,
         )
