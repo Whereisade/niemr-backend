@@ -12,6 +12,7 @@ from notifications.enums import Topic, Priority
 
 from .models import Drug, StockItem, StockTxn, Prescription, PrescriptionItem, DispenseEvent
 from .enums import RxStatus, TxnType
+from .services.stock_alerts import check_and_notify_low_stock
 
 
 User = get_user_model()
@@ -82,11 +83,36 @@ class StockItemSerializer(serializers.ModelSerializer):
         queryset=Drug.objects.filter(is_active=True),
         write_only=True,
     )
+    # Add computed fields for low stock information
+    reorder_threshold = serializers.SerializerMethodField()
+    is_low_stock = serializers.SerializerMethodField()
+    is_out_of_stock = serializers.SerializerMethodField()
 
     class Meta:
         model = StockItem
-        fields = ["id", "facility", "owner", "drug", "drug_id", "current_qty"]
-        read_only_fields = ["facility", "owner"]
+        fields = [
+            "id", 
+            "facility", 
+            "owner", 
+            "drug", 
+            "drug_id", 
+            "current_qty",
+            "reorder_level",
+            "max_stock_level",
+            "reorder_threshold",
+            "is_low_stock",
+            "is_out_of_stock",
+        ]
+        read_only_fields = ["facility", "owner", "reorder_threshold", "is_low_stock", "is_out_of_stock"]
+
+    def get_reorder_threshold(self, obj):
+        return obj.get_reorder_threshold()
+
+    def get_is_low_stock(self, obj):
+        return obj.is_low_stock()
+
+    def get_is_out_of_stock(self, obj):
+        return obj.is_out_of_stock()
 
 
 class StockTxnSerializer(serializers.ModelSerializer):
@@ -414,29 +440,31 @@ class DispenseSerializer(serializers.Serializer):
         stock_required = bool(stock_scope)
 
         with transaction.atomic():
+            stock_item = None
+            
             if stock_required:
                 if "facility" in stock_scope:
-                    stock, _ = StockItem.objects.select_for_update().get_or_create(
+                    stock_item, _ = StockItem.objects.select_for_update().get_or_create(
                         facility=stock_scope["facility"],
                         owner=None,
                         drug=item.drug,
                         defaults={"current_qty": 0},
                     )
                 else:
-                    stock, _ = StockItem.objects.select_for_update().get_or_create(
+                    stock_item, _ = StockItem.objects.select_for_update().get_or_create(
                         facility=None,
                         owner=stock_scope["owner"],
                         drug=item.drug,
                         defaults={"current_qty": 0},
                     )
 
-                if stock.current_qty < take:
+                if stock_item.current_qty < take:
                     raise serializers.ValidationError(
-                        f"Insufficient stock for {item.drug.name}. In stock: {stock.current_qty}"
+                        f"Insufficient stock for {item.drug.name}. In stock: {stock_item.current_qty}"
                     )
 
-                stock.current_qty -= take
-                stock.save(update_fields=["current_qty"])
+                stock_item.current_qty -= take
+                stock_item.save(update_fields=["current_qty"])
 
                 StockTxn.objects.create(
                     facility=stock_scope.get("facility"),
@@ -557,5 +585,13 @@ class DispenseSerializer(serializers.Serializer):
                         )
                 except Exception:
                     pass
+
+            # Check for low stock after dispensing and send notification if needed
+            if stock_item is not None:
+                try:
+                    check_and_notify_low_stock(stock_item)
+                except Exception as e:
+                    # Log but don't fail the dispense
+                    print(f"Failed to check low stock after dispense: {e}")
 
         return item

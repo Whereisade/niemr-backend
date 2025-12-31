@@ -95,6 +95,16 @@ class StockItem(models.Model):
     )
     drug = models.ForeignKey(Drug, on_delete=models.CASCADE, related_name="stock_items")
     current_qty = models.PositiveIntegerField(default=0)  # base unit (e.g., tablets)
+    
+    # Low stock tracking
+    reorder_level = models.PositiveIntegerField(
+        default=0,
+        help_text="Minimum stock level before reorder alert (0 means auto-calculate at 20% of max historical stock)"
+    )
+    max_stock_level = models.PositiveIntegerField(
+        default=0,
+        help_text="Maximum stock level ever recorded (used for auto-calculating reorder level)"
+    )
 
     class Meta:
         constraints = [
@@ -109,6 +119,36 @@ class StockItem(models.Model):
                 condition=models.Q(owner__isnull=False),
             ),
         ]
+
+    def update_max_stock_level(self):
+        """Update max_stock_level if current_qty exceeds it."""
+        if self.current_qty > self.max_stock_level:
+            self.max_stock_level = self.current_qty
+
+    def get_reorder_threshold(self):
+        """
+        Get the reorder threshold (20% of max stock or manual reorder_level).
+        Returns the quantity below which stock is considered low.
+        """
+        if self.reorder_level > 0:
+            # Manual reorder level set
+            return self.reorder_level
+        
+        # Auto-calculate: 20% of max_stock_level
+        if self.max_stock_level > 0:
+            return int(self.max_stock_level * 0.2)
+        
+        # Fallback: if no max stock recorded, use 10 as default threshold
+        return 10
+
+    def is_low_stock(self):
+        """Check if current stock is at or below the reorder threshold."""
+        threshold = self.get_reorder_threshold()
+        return self.current_qty <= threshold
+
+    def is_out_of_stock(self):
+        """Check if stock is completely depleted."""
+        return self.current_qty == 0
 
 
 class StockTxn(models.Model):

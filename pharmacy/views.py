@@ -22,6 +22,7 @@ from .serializers import (
 )
 from .permissions import IsStaff, CanViewRx, IsPharmacyStaff, CanPrescribe
 from .enums import RxStatus, TxnType
+from .services.stock_alerts import check_and_notify_low_stock
 
 
 # --- Catalog ---
@@ -401,8 +402,15 @@ class StockViewSet(viewsets.GenericViewSet, mixins.ListModelMixin):
             drug_id=drug_id,
             defaults={"current_qty": 0},
         )
+        
+        # Update stock quantity
         stock.current_qty = max(stock.current_qty + qty, 0)
-        stock.save(update_fields=["current_qty"])
+        
+        # Update max stock level if this is a stock increase
+        if qty > 0:
+            stock.update_max_stock_level()
+        
+        stock.save(update_fields=["current_qty", "max_stock_level"])
 
         StockTxn.objects.create(
             facility=scope["facility"],
@@ -413,6 +421,14 @@ class StockViewSet(viewsets.GenericViewSet, mixins.ListModelMixin):
             note=request.data.get("note", ""),
             created_by=u,
         )
+        
+        # Check for low stock and send notification if needed
+        try:
+            check_and_notify_low_stock(stock)
+        except Exception as e:
+            # Log but don't fail the request
+            print(f"Failed to check low stock: {e}")
+        
         return Response(StockItemSerializer(stock).data, status=201)
 
     @action(detail=False, methods=["get"], permission_classes=[IsAuthenticated, IsPharmacyStaff])
@@ -429,6 +445,29 @@ class StockViewSet(viewsets.GenericViewSet, mixins.ListModelMixin):
 
         qs = qs.select_related("drug", "created_by").order_by("-created_at")
         return Response(StockTxnSerializer(qs, many=True).data)
+    
+    @action(detail=False, methods=["get"], permission_classes=[IsAuthenticated, IsPharmacyStaff])
+    def low_stock_items(self, request):
+        """
+        Get all items that are currently at or below their reorder threshold.
+        """
+        scope = self._scope(request.user)
+        if not scope:
+            return Response({"detail": "You do not have access to pharmacy stock."}, status=403)
+
+        qs = StockItem.objects.select_related("drug")
+        if scope["facility"]:
+            qs = qs.filter(facility=scope["facility"])
+        else:
+            qs = qs.filter(owner=scope["owner"])
+
+        # Filter for low stock items
+        low_stock = []
+        for stock_item in qs:
+            if stock_item.is_low_stock():
+                low_stock.append(stock_item)
+
+        return Response(StockItemSerializer(low_stock, many=True).data)
 
 
 # --- Prescriptions ---
