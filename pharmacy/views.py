@@ -50,6 +50,7 @@ class DrugViewSet(
         - Facility staff: see drugs belonging to their facility
         - Independent pharmacy (no facility): see drugs they created
         - Admins without facility: see all (for admin dashboards)
+        - Patients: see all active drugs (for appointment booking)
         """
         u = self.request.user
         role = (getattr(u, "role", "") or "").upper()
@@ -66,6 +67,10 @@ class DrugViewSet(
         
         # Admins/Super Admins without facility: can see all for admin purposes
         if role in {UserRole.ADMIN, UserRole.SUPER_ADMIN}:
+            return base_qs
+        
+        # Patients: can see all active drugs for appointment booking
+        if role == UserRole.PATIENT:
             return base_qs
         
         # Other independent providers: see drugs they created (if any)

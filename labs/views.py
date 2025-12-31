@@ -39,6 +39,7 @@ class LabTestViewSet(viewsets.GenericViewSet, mixins.ListModelMixin, mixins.Crea
         - Facility staff: see tests belonging to their facility
         - Independent lab (no facility): see tests they created
         - Admins without facility: see all (for admin dashboards)
+        - Patients: see all active tests (for appointment booking)
         """
         u = self.request.user
         role = (getattr(u, "role", "") or "").upper()
@@ -47,16 +48,22 @@ class LabTestViewSet(viewsets.GenericViewSet, mixins.ListModelMixin, mixins.Crea
         
         # Facility staff: see their facility's tests
         if getattr(u, "facility_id", None):
-            qs = base_qs.filter(facility_id=u.facility_id)
+            return base_qs.filter(facility_id=u.facility_id)
+        
         # Independent lab (no facility): see their own tests
-        elif role == UserRole.LAB:
-            qs = base_qs.filter(created_by_id=u.id)
+        if role == UserRole.LAB:
+            return base_qs.filter(created_by_id=u.id)
+        
         # Admins/Super Admins without facility: can see all for admin purposes
-        elif role in {UserRole.ADMIN, UserRole.SUPER_ADMIN}:
-            qs = base_qs
+        if role in {UserRole.ADMIN, UserRole.SUPER_ADMIN}:
+            return base_qs
+        
+        # Patients: can see all active tests for appointment booking
+        if role == UserRole.PATIENT:
+            return base_qs
+        
         # Other independent providers: see tests they created (if any)
-        else:
-            qs = base_qs.filter(created_by_id=u.id)
+        return base_qs.filter(created_by_id=u.id)
         
         # Apply search filter
         s = self.request.query_params.get("s")
