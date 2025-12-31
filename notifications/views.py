@@ -402,6 +402,7 @@ class FacilityAnnouncementViewSet(
     def list(self, request, *args, **kwargs):
         user = request.user
         role = (getattr(user, "role", "") or "").upper()
+        user_id = getattr(user, "id", None)
 
         qs = self.get_queryset()
 
@@ -416,9 +417,28 @@ class FacilityAnnouncementViewSet(
             current_only = True
 
         # Role scoping: announcements that target specific roles should not be visible
-        # to other roles.
+        # to other roles UNLESS:
+        # 1. The user is the creator of the announcement (can always see own announcements)
+        # 2. The user is SUPER_ADMIN or ADMIN (can see all for audit/management)
+        is_admin = role in {UserRole.SUPER_ADMIN, UserRole.ADMIN}
+        
         items = []
         for ann in qs:
+            # Always show to creator
+            if getattr(ann, "created_by_id", None) == user_id:
+                if current_only and not ann.is_current:
+                    continue
+                items.append(ann)
+                continue
+            
+            # Always show to admins
+            if is_admin:
+                if current_only and not ann.is_current:
+                    continue
+                items.append(ann)
+                continue
+            
+            # For other users, apply role scoping
             roles = list(getattr(ann, "audience_roles", []) or [])
             if roles and role not in roles:
                 continue

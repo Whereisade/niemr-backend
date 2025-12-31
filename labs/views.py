@@ -28,7 +28,7 @@ from .serializers import (
 from .services.notify import notify_result_ready
 
 
-class LabTestViewSet(viewsets.GenericViewSet, mixins.ListModelMixin, mixins.CreateModelMixin):
+class LabTestViewSet(viewsets.GenericViewSet, mixins.ListModelMixin, mixins.CreateModelMixin, mixins.DestroyModelMixin):
     serializer_class = LabTestSerializer
     authentication_classes = [JWTAuthentication]
     permission_classes = [IsAuthenticated]
@@ -74,6 +74,39 @@ class LabTestViewSet(viewsets.GenericViewSet, mixins.ListModelMixin, mixins.Crea
         self.permission_classes = [IsAuthenticated, IsStaff]
         self.check_permissions(request)
         return super().create(request, *args, **kwargs)
+    
+    def destroy(self, request, *args, **kwargs):
+        """Delete a single lab test"""
+        self.permission_classes = [IsAuthenticated, IsStaff]
+        self.check_permissions(request)
+        
+        instance = self.get_object()
+        
+        # Check ownership
+        u = request.user
+        if getattr(u, "facility_id", None):
+            if instance.facility_id != u.facility_id:
+                return Response(
+                    {"detail": "You can only delete tests from your facility."},
+                    status=status.HTTP_403_FORBIDDEN
+                )
+        else:
+            role = (getattr(u, "role", "") or "").upper()
+            if role not in {UserRole.ADMIN, UserRole.SUPER_ADMIN}:
+                if instance.created_by_id != u.id:
+                    return Response(
+                        {"detail": "You can only delete tests you created."},
+                        status=status.HTTP_403_FORBIDDEN
+                    )
+        
+        # Soft delete by setting is_active to False
+        instance.is_active = False
+        instance.save(update_fields=["is_active"])
+        
+        return Response(
+            {"detail": "Lab test deleted successfully."},
+            status=status.HTTP_200_OK
+        )
 
     def perform_create(self, serializer):
         """
@@ -244,6 +277,49 @@ class LabTestViewSet(viewsets.GenericViewSet, mixins.ListModelMixin, mixins.Crea
                 response_data["message"] += f". Note: {len(errors) - 20} more errors not shown."
 
         return Response(response_data)
+
+    @action(detail=False, methods=["delete"], permission_classes=[IsAuthenticated, IsStaff])
+    def clear_catalog(self, request):
+        """
+        Delete all lab tests in the user's scope (facility or user-created).
+        This is a soft delete (sets is_active=False).
+        """
+        u = request.user
+        role = (getattr(u, "role", "") or "").upper()
+        
+        # Build queryset based on user scope
+        if getattr(u, "facility_id", None):
+            # Facility staff: clear their facility's catalog
+            qs = LabTest.objects.filter(facility_id=u.facility_id, is_active=True)
+        elif role == UserRole.LAB:
+            # Independent lab: clear their own catalog
+            qs = LabTest.objects.filter(created_by_id=u.id, is_active=True)
+        elif role in {UserRole.ADMIN, UserRole.SUPER_ADMIN}:
+            return Response(
+                {"detail": "Admins cannot clear the entire catalog. Please specify a facility or user scope."},
+                status=status.HTTP_403_FORBIDDEN
+            )
+        else:
+            # Other independent providers: clear tests they created
+            qs = LabTest.objects.filter(created_by_id=u.id, is_active=True)
+        
+        count = qs.count()
+        if count == 0:
+            return Response(
+                {"detail": "No active tests found in your catalog."},
+                status=status.HTTP_200_OK
+            )
+        
+        # Soft delete
+        qs.update(is_active=False)
+        
+        return Response(
+            {
+                "detail": f"Successfully deleted {count} lab test(s) from your catalog.",
+                "deleted_count": count
+            },
+            status=status.HTTP_200_OK
+        )
 
 
 class LabOrderViewSet(

@@ -39,6 +39,9 @@ class EncounterViewSet(
 
         # Check if querying for a specific patient
         patient_id = self.request.query_params.get("patient")
+        
+        # Check if doctor wants to see all facility encounters (not just their own)
+        view_all = self.request.query_params.get("view") == "all"
 
         if u.role == "PATIENT":
             q = q.filter(patient__user_id=u.id)
@@ -51,9 +54,14 @@ class EncounterViewSet(
                 q = q.filter(facility_id=u.facility_id, patient_id=patient_id)
             else:
                 # Normal filtering when not querying a specific patient
-                # Doctors should only see encounters assigned to them (as provider)
+                # Doctors can toggle between personal view (only their encounters) and facility-wide view
                 if role == "DOCTOR":
-                    q = q.filter(facility_id=u.facility_id, provider_id=u.id)
+                    if view_all:
+                        # Show all facility encounters
+                        q = q.filter(facility_id=u.facility_id)
+                    else:
+                        # Show only encounters assigned to this doctor (as provider)
+                        q = q.filter(facility_id=u.facility_id, provider_id=u.id)
                 # Admins and super admins see all facility encounters
                 elif role in {"ADMIN", "SUPER_ADMIN"}:
                     q = q.filter(facility_id=u.facility_id)

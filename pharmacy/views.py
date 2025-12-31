@@ -31,6 +31,7 @@ class DrugViewSet(
     mixins.RetrieveModelMixin,
     mixins.CreateModelMixin,
     mixins.UpdateModelMixin,
+    mixins.DestroyModelMixin,
 ):
     serializer_class = DrugSerializer
     authentication_classes = [JWTAuthentication]
@@ -38,8 +39,8 @@ class DrugViewSet(
 
     def get_permissions(self):
         # Anyone authenticated can view the catalog within their scope.
-        # Only pharmacy staff (or admins) can modify items (create/update/import).
-        if self.action in {"create", "update", "partial_update", "import_file"}:
+        # Only pharmacy staff (or admins) can modify items (create/update/delete/import).
+        if self.action in {"create", "update", "partial_update", "destroy", "import_file", "clear_catalog"}:
             return [IsPharmacyStaff()]
         return [IsAuthenticated()]
 
@@ -94,6 +95,85 @@ class DrugViewSet(
         else:
             # Independent pharmacy: link drug to user only
             serializer.save(facility=None, created_by=u)
+
+    def destroy(self, request, *args, **kwargs):
+        """
+        Soft delete a drug by setting is_active=False.
+        Only allow deletion if user owns the drug (facility or created_by match).
+        """
+        instance = self.get_object()
+        u = request.user
+        role = (getattr(u, "role", "") or "").upper()
+        
+        # Check ownership
+        can_delete = False
+        
+        if role in {UserRole.ADMIN, UserRole.SUPER_ADMIN}:
+            can_delete = True
+        elif getattr(u, "facility_id", None) and instance.facility_id == u.facility_id:
+            can_delete = True
+        elif not instance.facility_id and instance.created_by_id == u.id:
+            can_delete = True
+        
+        if not can_delete:
+            return Response(
+                {"detail": "You do not have permission to delete this drug."},
+                status=status.HTTP_403_FORBIDDEN
+            )
+        
+        # Soft delete
+        instance.is_active = False
+        instance.save(update_fields=["is_active"])
+        
+        return Response(
+            {"detail": "Drug deleted successfully."},
+            status=status.HTTP_200_OK
+        )
+
+    @action(detail=False, methods=["delete"], permission_classes=[IsAuthenticated, IsPharmacyStaff])
+    def clear_catalog(self, request):
+        """
+        Clear entire drug catalog by soft deleting all drugs in user's scope.
+        - Facility staff: clear their facility's drugs
+        - Independent pharmacy: clear their own drugs
+        - Admins: must specify scope (not allowed to clear all)
+        """
+        u = request.user
+        role = (getattr(u, "role", "") or "").upper()
+        
+        # Prevent admins from accidentally clearing everything
+        if role in {UserRole.ADMIN, UserRole.SUPER_ADMIN} and not getattr(u, "facility_id", None):
+            return Response(
+                {"detail": "Admins must be scoped to a facility to clear catalog. This prevents accidental deletion of all drugs."},
+                status=status.HTTP_403_FORBIDDEN
+            )
+        
+        # Determine scope and clear
+        if getattr(u, "facility_id", None):
+            # Facility staff: clear facility's drugs
+            count = Drug.objects.filter(
+                facility_id=u.facility_id,
+                is_active=True
+            ).update(is_active=False)
+        elif role == UserRole.PHARMACY:
+            # Independent pharmacy: clear their drugs
+            count = Drug.objects.filter(
+                created_by_id=u.id,
+                is_active=True
+            ).update(is_active=False)
+        else:
+            return Response(
+                {"detail": "You do not have permission to clear the catalog."},
+                status=status.HTTP_403_FORBIDDEN
+            )
+        
+        return Response(
+            {
+                "detail": f"Catalog cleared successfully. {count} drug(s) deleted.",
+                "count": count
+            },
+            status=status.HTTP_200_OK
+        )
 
     @action(detail=False, methods=["post"], permission_classes=[IsAuthenticated, IsPharmacyStaff])
     def import_file(self, request):
