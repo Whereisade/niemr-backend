@@ -130,7 +130,7 @@ class EncounterViewSet(
     # Start flows
     # ─────────────────────────────────────────────────────────────
 
-    @action(detail=False, methods=["post"], url_path="start-from-appointment")
+    @action(detail=False, methods=["post"], url_path="start_from_appointment")
     def start_from_appointment(self, request):
         """
         Start an encounter from an appointment.

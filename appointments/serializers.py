@@ -203,7 +203,7 @@ class AppointmentSerializer(serializers.ModelSerializer):
     def validate(self, attrs):
         """
         Validate appointment data:
-        - Infer facility from user/patient
+        - Infer facility from user/patient (optional for independent providers)
         - Check for overlapping appointments
         - Validate time range
         """
@@ -214,7 +214,7 @@ class AppointmentSerializer(serializers.ModelSerializer):
         # 1) Start from the staff user's facility (most restrictive & safe)
         facility = getattr(user, "facility", None)
 
-        # 2) If user has no facility (PATIENT or SUPER_ADMIN), try payload
+        # 2) If user has no facility (PATIENT, SUPER_ADMIN, or independent provider), try payload
         if facility is None:
             facility_val = attrs.get("facility", None)
 
@@ -236,9 +236,12 @@ class AppointmentSerializer(serializers.ModelSerializer):
         if facility is None and getattr(self, "instance", None) is not None:
             facility = getattr(self.instance, "facility", None)
 
-        # 5) Final safety check
-        if facility is None:
-            raise serializers.ValidationError("Facility is required for appointments.")
+        # 5) ✅ FIX: Only require facility if user has facility_id (facility-based staff)
+        user_has_facility = getattr(user, "facility_id", None) is not None
+        if facility is None and user_has_facility:
+            raise serializers.ValidationError(
+                "Facility is required for facility-based appointments."
+            )
 
         start_at = attrs.get("start_at")
         end_at = attrs.get("end_at")
@@ -249,16 +252,22 @@ class AppointmentSerializer(serializers.ModelSerializer):
         # Store inferred facility for create()
         self._facility = facility
 
-        # Prevent overlaps for the same provider in the same facility
+        # ✅ FIX: Prevent overlaps for the same provider (facility-scoped or global)
         provider = attrs.get("provider")
         if provider:
+            # Base query: filter by provider and active statuses
             qs = Appointment.objects.filter(
-                facility=facility,
                 provider=provider,
                 status__in=[ApptStatus.SCHEDULED, ApptStatus.CHECKED_IN],
             )
+            
+            # Only filter by facility if one exists (facility-based vs independent)
+            if facility:
+                qs = qs.filter(facility=facility)
+            
             if self.instance:
                 qs = qs.exclude(id=self.instance.id)
+            
             # Overlap if (start < other.end) and (end > other.start)
             if qs.filter(start_at__lt=end_at, end_at__gt=start_at).exists():
                 raise serializers.ValidationError(
