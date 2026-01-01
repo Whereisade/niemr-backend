@@ -28,7 +28,11 @@ from .serializers import (
 from .services.notify import notify_result_ready
 
 
-class LabTestViewSet(viewsets.GenericViewSet, mixins.ListModelMixin, mixins.CreateModelMixin, mixins.DestroyModelMixin):
+class LabTestViewSet(viewsets.GenericViewSet, mixins.ListModelMixin, mixins.CreateModelMixin, mixins.UpdateModelMixin, mixins.DestroyModelMixin):
+    """
+    ViewSet for managing lab test catalog.
+    Now includes update capability for editing test details like price.
+    """
     serializer_class = LabTestSerializer
     authentication_classes = [JWTAuthentication]
     permission_classes = [IsAuthenticated]
@@ -64,13 +68,6 @@ class LabTestViewSet(viewsets.GenericViewSet, mixins.ListModelMixin, mixins.Crea
         
         # Other independent providers: see tests they created (if any)
         return base_qs.filter(created_by_id=u.id)
-        
-        # Apply search filter
-        s = self.request.query_params.get("s")
-        if s:
-            qs = qs.filter(Q(name__icontains=s) | Q(code__icontains=s))
-        
-        return qs
 
     def get_serializer_context(self):
         ctx = super().get_serializer_context()
@@ -81,6 +78,58 @@ class LabTestViewSet(viewsets.GenericViewSet, mixins.ListModelMixin, mixins.Crea
         self.permission_classes = [IsAuthenticated, IsStaff]
         self.check_permissions(request)
         return super().create(request, *args, **kwargs)
+    
+    def update(self, request, *args, **kwargs):
+        """Update a lab test (full update)"""
+        self.permission_classes = [IsAuthenticated, IsStaff]
+        self.check_permissions(request)
+        
+        instance = self.get_object()
+        
+        # Check ownership
+        u = request.user
+        if getattr(u, "facility_id", None):
+            if instance.facility_id != u.facility_id:
+                return Response(
+                    {"detail": "You can only update tests from your facility."},
+                    status=status.HTTP_403_FORBIDDEN
+                )
+        else:
+            role = (getattr(u, "role", "") or "").upper()
+            if role not in {UserRole.ADMIN, UserRole.SUPER_ADMIN}:
+                if instance.created_by_id != u.id:
+                    return Response(
+                        {"detail": "You can only update tests you created."},
+                        status=status.HTTP_403_FORBIDDEN
+                    )
+        
+        return super().update(request, *args, **kwargs)
+    
+    def partial_update(self, request, *args, **kwargs):
+        """Update a lab test (partial update)"""
+        self.permission_classes = [IsAuthenticated, IsStaff]
+        self.check_permissions(request)
+        
+        instance = self.get_object()
+        
+        # Check ownership
+        u = request.user
+        if getattr(u, "facility_id", None):
+            if instance.facility_id != u.facility_id:
+                return Response(
+                    {"detail": "You can only update tests from your facility."},
+                    status=status.HTTP_403_FORBIDDEN
+                )
+        else:
+            role = (getattr(u, "role", "") or "").upper()
+            if role not in {UserRole.ADMIN, UserRole.SUPER_ADMIN}:
+                if instance.created_by_id != u.id:
+                    return Response(
+                        {"detail": "You can only update tests you created."},
+                        status=status.HTTP_403_FORBIDDEN
+                    )
+        
+        return super().partial_update(request, *args, **kwargs)
     
     def destroy(self, request, *args, **kwargs):
         """Delete a single lab test"""
@@ -329,6 +378,7 @@ class LabTestViewSet(viewsets.GenericViewSet, mixins.ListModelMixin, mixins.Crea
         )
 
 
+# LabOrderViewSet remains the same...
 class LabOrderViewSet(
     viewsets.GenericViewSet,
     mixins.CreateModelMixin,

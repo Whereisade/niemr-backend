@@ -498,7 +498,13 @@ class PrescriptionViewSet(
         if role == UserRole.PATIENT:
             q = q.filter(patient__user_id=u.id)
         elif getattr(u, "facility_id", None):
+            # Facility staff
             q = q.filter(facility_id=u.facility_id)
+            
+            # Doctors only see prescriptions they created
+            if role == UserRole.DOCTOR:
+                q = q.filter(prescribed_by_id=u.id)
+            # PHARMACY, NURSE, ADMIN, SUPER_ADMIN see all facility prescriptions
         else:
             # independent (no facility)
             if role in {UserRole.ADMIN, UserRole.SUPER_ADMIN}:

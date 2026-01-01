@@ -40,6 +40,7 @@ class DrugSerializer(serializers.ModelSerializer):
     def validate_code(self, value):
         """
         Validate that the code is unique within the user's scope (facility or user).
+        During updates, exclude the current instance from the uniqueness check.
         """
         request = self.context.get("request")
         if not request or not request.user:
@@ -48,26 +49,37 @@ class DrugSerializer(serializers.ModelSerializer):
         u = request.user
         code = (value or "").strip().upper()
 
+        # Get the instance being updated (if this is an update operation)
+        instance = getattr(self, 'instance', None)
+
         if getattr(u, "facility_id", None):
             # Facility staff: check uniqueness within facility
-            exists = Drug.objects.filter(
+            qs = Drug.objects.filter(
                 code__iexact=code,
                 facility_id=u.facility_id,
                 is_active=True,
-            ).exists()
-            if exists:
+            )
+            # Exclude the current instance if updating
+            if instance:
+                qs = qs.exclude(pk=instance.pk)
+            
+            if qs.exists():
                 raise serializers.ValidationError(
                     f"A drug with code '{code}' already exists in your facility catalog."
                 )
         else:
             # Independent pharmacy: check uniqueness within user's drugs
-            exists = Drug.objects.filter(
+            qs = Drug.objects.filter(
                 code__iexact=code,
                 facility__isnull=True,
                 created_by_id=u.id,
                 is_active=True,
-            ).exists()
-            if exists:
+            )
+            # Exclude the current instance if updating
+            if instance:
+                qs = qs.exclude(pk=instance.pk)
+            
+            if qs.exists():
                 raise serializers.ValidationError(
                     f"A drug with code '{code}' already exists in your catalog."
                 )
