@@ -1,6 +1,6 @@
 from datetime import datetime
 from django.utils.dateparse import parse_datetime
-from django.db.models import Count
+from django.db.models import Count, Q
 from rest_framework import viewsets, mixins, status
 from rest_framework.decorators import action
 from rest_framework.permissions import IsAuthenticated
@@ -38,9 +38,17 @@ class VitalSignViewSet(viewsets.GenericViewSet,
         if u.is_authenticated and u.role == "PATIENT":
             return q.filter(patient__user_id=u.id)
 
-        # Staff: scope to facility
+        # Facility staff: scope to facility
         if u.is_authenticated and u.facility_id:
             q = q.filter(facility_id=u.facility_id)
+        # Independent providers: only vitals they recorded OR for patients they're treating
+        elif u.is_authenticated and u.role in {"DOCTOR", "NURSE"}:
+            q = q.filter(
+                Q(recorded_by=u) |  # Vitals they recorded
+                Q(patient__encounters__provider=u) |  # Patients where they are the encounter provider
+                Q(patient__encounters__nurse=u) |  # Patients where they are the encounter nurse
+                Q(patient__provider_links__provider=u)  # Patients explicitly linked to them
+            ).distinct()
 
         # Filters
         patient_id = self.request.query_params.get("patient")
