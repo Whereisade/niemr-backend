@@ -128,6 +128,10 @@ class StockItemSerializer(serializers.ModelSerializer):
 
 
 class StockTxnSerializer(serializers.ModelSerializer):
+    drug_name = serializers.SerializerMethodField()
+    drug_code = serializers.SerializerMethodField()
+    created_by_name = serializers.SerializerMethodField()
+    
     class Meta:
         model = StockTxn
         fields = [
@@ -135,13 +139,34 @@ class StockTxnSerializer(serializers.ModelSerializer):
             "facility",
             "owner",
             "drug",
+            "drug_name",
+            "drug_code",
             "txn_type",
             "qty",
             "note",
             "created_by",
+            "created_by_name",
             "created_at",
         ]
         read_only_fields = ["facility", "owner", "created_by", "created_at"]
+    
+    def get_drug_name(self, obj):
+        return obj.drug.name if obj.drug else None
+    
+    def get_drug_code(self, obj):
+        return obj.drug.code if obj.drug else None
+    
+    def get_created_by_name(self, obj):
+        if not obj.created_by:
+            return None
+        # Try get_full_name if available, otherwise construct from fields
+        if hasattr(obj.created_by, "get_full_name"):
+            full = (obj.created_by.get_full_name() or "").strip()
+        else:
+            first = getattr(obj.created_by, "first_name", "") or ""
+            last = getattr(obj.created_by, "last_name", "") or ""
+            full = f"{first} {last}".strip()
+        return full or getattr(obj.created_by, "email", None)
 
 
 # --- Prescriptions ---
