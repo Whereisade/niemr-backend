@@ -408,23 +408,8 @@ class EncounterViewSet(
                         group_key=f"ENC:{enc.id}:ASSIGNED",
                     )
 
-                    # Direct email (best-effort) to ensure providers receive assignment alerts.
-                    try:
-                        if getattr(enc.provider, "email", None):
-                            from emails.services.router import send_email
+                    
 
-                            send_email(
-                                to=enc.provider.email,
-                                subject="You have been assigned an encounter",
-                                html=(
-                                    "<p>You have been assigned to a new encounter.</p>"
-                                    + (f"<p><b>Patient:</b> {patient_name}</p>" if patient_name else "")
-                                    + f"<p><b>Encounter ID:</b> {enc.id}</p>"
-                                ),
-                                tags=["staff.encounter_assigned"],
-                            )
-                    except Exception:
-                        pass
             except Exception:
                 pass
             logger.info(f"Encounter {enc.id} saved with provider {enc.provider_id}")
@@ -554,19 +539,8 @@ class EncounterViewSet(
                     action_url="/patient/encounters",
                     group_key=f"ENC:{enc.id}:CLOSED",
                 )
-                # Direct email fallback (best-effort)
-                try:
-                    if getattr(enc.patient, "email", None):
-                        from emails.services.router import send_email
+                
 
-                        send_email(
-                            to=enc.patient.email,
-                            subject="Visit completed",
-                            html=f"<p>Your visit (encounter #{enc.id}) has been completed.</p>",
-                            tags=["encounter.completed"],
-                        )
-                except Exception:
-                    pass
         except Exception:
             pass
 

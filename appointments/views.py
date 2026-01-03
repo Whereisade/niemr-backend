@@ -786,6 +786,7 @@ class AppointmentViewSet(
                     body=f"Reminder: appointment at {appt.start_at}.",
                     data={"appointment_id": appt.id},
                     facility_id=appt.facility_id,
+                    allow_email=getattr(appt, "notify_email", False),
                 )
             n += 1
 

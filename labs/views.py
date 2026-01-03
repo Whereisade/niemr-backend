@@ -25,7 +25,6 @@ from .serializers import (
     LabTestSerializer,
     ResultEntrySerializer,
 )
-from .services.notify import notify_result_ready
 
 
 class LabTestViewSet(viewsets.GenericViewSet, mixins.ListModelMixin, mixins.CreateModelMixin, mixins.UpdateModelMixin, mixins.DestroyModelMixin):
@@ -499,9 +498,6 @@ class LabOrderViewSet(
         item = s.save(item=item, user=request.user)
 
         if order.status == OrderStatus.COMPLETED:
-            if order.patient and getattr(order.patient, "email", None):
-                notify_result_ready(order.patient.email, order.id)
-
             if order.patient:
                 notify_patient(
                     patient=order.patient,

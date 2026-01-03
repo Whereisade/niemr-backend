@@ -15,7 +15,6 @@ from .serializers import (
 )
 from .permissions import IsStaff, CanViewRequest
 from .enums import RequestStatus
-from .services.notify import notify_report_ready
 from notifications.services.notify import notify_user, notify_patient
 from notifications.enums import Topic, Priority
 
@@ -166,9 +165,6 @@ class ImagingRequestViewSet(viewsets.GenericViewSet,
         req.save(update_fields=["status"])
 
         # notify patient (non-blocking)
-        if req.patient and req.patient.email:
-            notify_report_ready(req.patient.email, req.id)
-        
         if req.patient:
             notify_patient(
                 patient=req.patient,

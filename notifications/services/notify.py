@@ -35,6 +35,86 @@ def _send_email_if_enabled(user: User, topic: str, title: str, body: str):
     except Exception:
         pass
 
+
+def send_email_if_enabled(
+    *,
+    user: User,
+    topic: str,
+    subject: str,
+    html: str,
+    text: str = "",
+    tags: list[str] | None = None,
+    allow_email: bool = True,
+) -> bool:
+    """Send an email to a user only if EMAIL is enabled for the topic."""
+    if not allow_email:
+        return False
+    if not user or not getattr(user, "email", None):
+        return False
+    if not _is_enabled(user, topic, Channel.EMAIL):
+        return False
+    try:
+        from emails.services.router import send_email
+        send_email(
+            to=user.email,
+            subject=subject,
+            html=html,
+            text=text or "",
+            tags=tags or [(topic or "").lower()],
+        )
+        return True
+    except Exception:
+        return False
+
+
+def send_patient_email_if_enabled(
+    *,
+    patient,
+    topic: str,
+    subject: str,
+    html: str,
+    text: str = "",
+    tags: list[str] | None = None,
+    allow_email: bool = True,
+) -> int:
+    """Send an email to patient user/guardian users if enabled; fallback to patient.email if no users exist."""
+    if not allow_email:
+        return 0
+    sent = 0
+    try:
+        users = get_patient_notification_users(patient) if patient else []
+    except Exception:
+        users = []
+    if users:
+        for u in users:
+            if send_email_if_enabled(
+                user=u,
+                topic=topic,
+                subject=subject,
+                html=html,
+                text=text,
+                tags=tags,
+                allow_email=True,
+            ):
+                sent += 1
+        return sent
+
+    # No user account attached; best-effort fallback.
+    try:
+        email = getattr(patient, "email", None)
+        if email:
+            from emails.services.router import send_email
+            send_email(
+                to=email,
+                subject=subject,
+                html=html,
+                text=text or "",
+                tags=tags or [(topic or "").lower()],
+            )
+            return 1
+    except Exception:
+        pass
+    return 0
 @transaction.atomic
 def notify_user(
     *,
@@ -48,10 +128,9 @@ def notify_user(
     action_url: str = "",
     group_key: str | None = None,
     expires_at=None,
+    allow_email: bool = True,
 ):
-    """
-    Create an in-app notification (always if enabled) and optionally send email if enabled.
-    """
+    """Create an in-app notification (if enabled) and optionally send email (if enabled)."""
     if _is_enabled(user, topic, Channel.IN_APP):
         Notification.objects.create(
             user=user,
@@ -65,7 +144,8 @@ def notify_user(
             group_key=group_key,
             expires_at=expires_at,
         )
-    _send_email_if_enabled(user, topic, title, body)
+    if allow_email:
+        _send_email_if_enabled(user, topic, title, body)
 
 def notify_users(
     *,
@@ -79,6 +159,7 @@ def notify_users(
     action_url: str = "",
     group_key: str | None = None,
     expires_at=None,
+    allow_email: bool = True,
 ):
     for u in users:
         notify_user(
@@ -92,11 +173,11 @@ def notify_users(
             action_url=action_url,
             group_key=group_key,
             expires_at=expires_at,
+            allow_email=allow_email,
         )
 
-
 def facility_staff_roles() -> list[str]:
-    """Default roles considered "facility staff" for announcements."""
+    """Default roles considered facility staff for broadcasts/alerts."""
     return [
         UserRole.SUPER_ADMIN,
         UserRole.ADMIN,
@@ -111,8 +192,7 @@ def facility_staff_roles() -> list[str]:
 def get_facility_users_for_roles(facility_id: int, roles: list[str] | None = None):
     qs = User.objects.filter(facility_id=facility_id, is_active=True)
     use_roles = roles or facility_staff_roles()
-    qs = qs.filter(role__in=use_roles)
-    return qs
+    return qs.filter(role__in=use_roles)
 
 
 def notify_facility_roles(
@@ -127,7 +207,8 @@ def notify_facility_roles(
     action_url: str = "",
     group_key: str | None = None,
     expires_at=None,
-):
+    allow_email: bool = True,
+) -> int:
     """Send the same notification to all facility users in the given roles."""
     users = get_facility_users_for_roles(facility_id, roles)
     notify_users(
@@ -141,15 +222,39 @@ def notify_facility_roles(
         action_url=action_url,
         group_key=group_key,
         expires_at=expires_at,
+        allow_email=allow_email,
     )
     try:
         return users.count()
     except Exception:
         return 0
 
-# ─────────────────────────────────────────────────────────────
-# Patient-scoped helpers
-# ─────────────────────────────────────────────────────────────
+
+def get_facility_patient_users(facility_id: int):
+    """Return patient/guardian users attached to patients in a facility."""
+    try:
+        from patients.models import Patient
+    except Exception:
+        return []
+
+    qs = Patient.objects.filter(facility_id=facility_id).select_related(
+        "user",
+        "guardian_user",
+        "parent_patient__user",
+        "parent_patient__guardian_user",
+    )
+
+    uniq = {}
+    for p in qs.iterator():
+        for u in get_patient_notification_users(p):
+            try:
+                uniq[getattr(u, "id", None)] = u
+            except Exception:
+                pass
+
+    return [u for k, u in uniq.items() if k]
+
+
 
 def get_patient_notification_users(patient):
     """Return users to notify for a patient event.
@@ -199,13 +304,14 @@ def notify_patient(
     patient,
     topic: str,
     title: str,
-    body: str = '',
+    body: str = "",
     data: dict | None = None,
     facility_id: int | None = None,
     priority: str = Priority.NORMAL,
-    action_url: str = '',
+    action_url: str = "",
     group_key: str | None = None,
     expires_at=None,
+    allow_email: bool = True,
 ):
     """Notify a patient and their guardian (if applicable)."""
     for u in get_patient_notification_users(patient):
@@ -220,46 +326,21 @@ def notify_patient(
             action_url=action_url,
             group_key=group_key,
             expires_at=expires_at,
+            allow_email=allow_email,
         )
-
-
-def get_facility_patient_users(facility_id: int):
-    """Return a unique list of patient/guardian users attached to patients in a facility.
-
-    Note: patients are not attached to facility_id on the User model; they are attached
-    via Patient.facility_id, so we have to traverse Patient records.
-    """
-    try:
-        from patients.models import Patient
-    except Exception:
-        return []
-
-    qs = (
-        Patient.objects.filter(facility_id=facility_id)
-        .select_related('user', 'guardian_user', 'parent_patient__user', 'parent_patient__guardian_user')
-    )
-
-    uniq = {}
-    for p in qs.iterator():
-        for u in get_patient_notification_users(p):
-            try:
-                uniq[getattr(u, 'id', None)] = u
-            except Exception:
-                pass
-    return [u for k, u in uniq.items() if k]
-
 
 def notify_facility_patients(
     *,
     facility_id: int,
     topic: str,
     title: str,
-    body: str = '',
+    body: str = "",
     data: dict | None = None,
     priority: str = Priority.NORMAL,
-    action_url: str = '',
+    action_url: str = "",
     group_key: str | None = None,
     expires_at=None,
+    allow_email: bool = True,
 ):
     """Send the same notification to all patients (and guardians) in a facility."""
     users = get_facility_patient_users(facility_id)
@@ -274,5 +355,6 @@ def notify_facility_patients(
         action_url=action_url,
         group_key=group_key,
         expires_at=expires_at,
+        allow_email=allow_email,
     )
     return len(users)
