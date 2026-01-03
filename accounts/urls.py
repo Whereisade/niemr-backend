@@ -18,6 +18,10 @@ urlpatterns = [
     path("token/refresh/", TokenRefreshView.as_view()),
     path("me/", views.me),
 
+    # Password reset
+    path("password/reset/", views.password_reset_request),
+    path("password/reset/confirm/", views.password_reset_confirm),
+
     # Facility staff management (SUPER_ADMIN only)
     path("facility-staff/", list_facility_staff, name="facility-staff-list"),
     path("facility-staff/create/", create_facility_staff, name="facility-staff-create"),

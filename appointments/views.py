@@ -16,7 +16,14 @@ from .serializers import (
 )
 from .permissions import IsStaff, CanViewAppointment
 from .enums import ApptStatus
-from .services.notify import send_confirmation, send_reminder
+from .services.notify import (
+    send_confirmation,
+    send_reminder,
+    send_provider_assignment,
+    send_completed,
+    send_cancelled,
+    send_no_show,
+)
 from notifications.services.notify import notify_user, notify_users, notify_facility_roles, notify_patient
 from notifications.enums import Topic, Priority
 from accounts.enums import UserRole
@@ -252,9 +259,10 @@ class AppointmentViewSet(
         try:
             appt = Appointment.objects.get(id=resp.data["id"])
             send_confirmation(appt)
+            # Provider assignment email (doctor/nurse/etc)
+            send_provider_assignment(appt)
         except Exception:
             pass
-
         # In-app notifications (facility staff + provider + patient)
         try:
             appt = Appointment.objects.select_related(
@@ -379,7 +387,7 @@ class AppointmentViewSet(
                 if changed_provider and appt.provider_id:
                     notify_user(
                         user=appt.provider,
-                        topic=Topic.STAFF_APPOINTMENT_ASSIGNED,
+                        topic=Topic.STAFF_ASSIGNED,
                         priority=Priority.NORMAL,
                         title="New appointment assigned",
                         body=f"You have been assigned an appointment for {new_when}.",
@@ -388,6 +396,11 @@ class AppointmentViewSet(
                         action_url="/facility/appointments",
                         group_key=group_key,
                     )
+                    # Provider email (best-effort)
+                    try:
+                        send_provider_assignment(appt)
+                    except Exception:
+                        pass
 
                 # Ops feed
                 if appt.facility_id:
@@ -474,6 +487,12 @@ class AppointmentViewSet(
         except Exception:
             pass
 
+        # Patient cancellation email (opt-in)
+        try:
+            send_cancelled(appt)
+        except Exception:
+            pass
+
         return Response(
             AppointmentSerializer(appt, context={"request": request}).data
         )
@@ -525,6 +544,12 @@ class AppointmentViewSet(
                     action_url="/patient/appointments",
                     group_key=group_key,
                 )
+        except Exception:
+            pass
+
+        # Patient completion email (opt-in)
+        try:
+            send_completed(appt)
         except Exception:
             pass
 
@@ -670,6 +695,24 @@ class AppointmentViewSet(
                     action_url="/facility/appointments",
                     group_key=group_key,
                 )
+            if appt.patient:
+                notify_patient(
+                    patient=appt.patient,
+                    topic=Topic.APPOINTMENT_NO_SHOW,
+                    priority=Priority.LOW,
+                    title="Missed appointment",
+                    body="You missed your scheduled appointment.",
+                    facility_id=appt.facility_id,
+                    data=payload,
+                    action_url="/patient/appointments",
+                    group_key=group_key,
+                )
+        except Exception:
+            pass
+
+        # Patient email (opt-in)
+        try:
+            send_no_show(appt)
         except Exception:
             pass
 

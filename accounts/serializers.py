@@ -48,3 +48,21 @@ class UserProfileUpdateSerializer(serializers.ModelSerializer):
         if not value or not value.strip():
             raise serializers.ValidationError("Last name cannot be empty.")
         return value.strip()
+
+
+class PasswordResetRequestSerializer(serializers.Serializer):
+    """Request a password reset email."""
+
+    email = serializers.EmailField()
+
+
+class PasswordResetConfirmSerializer(serializers.Serializer):
+    """Confirm password reset using uid + token."""
+
+    uid = serializers.CharField()
+    token = serializers.CharField()
+    new_password = serializers.CharField(write_only=True, min_length=8)
+
+    def validate_new_password(self, value):
+        validate_password(value)
+        return value

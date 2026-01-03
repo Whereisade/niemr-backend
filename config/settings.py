@@ -63,26 +63,56 @@ if not DEBUG and SECRET_KEY == "dev-secret":
 # ---------------------------------------------------------------------
 # Email (Resend SMTP)
 # ---------------------------------------------------------------------
+EMAILS_PROVIDER = (os.getenv("EMAILS_PROVIDER", "SMTP") or "SMTP").upper()
+
+# Optional Resend settings (only required if EMAILS_PROVIDER=RESEND)
 RESEND_API_KEY = os.getenv("RESEND_API_KEY", "")
 RESEND_FROM = os.getenv("RESEND_FROM", "no-reply@niemr.app")
+if EMAILS_PROVIDER == "SMTP" and not RESEND_API_KEY:
+    raise RuntimeError("RESEND_API_KEY is required when EMAILS_PROVIDER=RESEND.")
 
-# Optional Resend webhook signature secret
-EMAILS_WEBHOOK_SECRET = os.getenv("EMAILS_WEBHOOK_SECRET", "")
+EMAILS_WEBHOOK_SECRET = os.getenv("EMAILS_WEBHOOK_SECRET", "")  # optional Resend webhook signature secret
 EMAILS_MAX_RETRIES = int(os.getenv("EMAILS_MAX_RETRIES", "6"))
 EMAILS_RETRY_BACKOFF_SEC = int(os.getenv("EMAILS_RETRY_BACKOFF_SEC", "120"))
 
-# Fail fast on Render if email config is missing (local dev can proceed)
-if IS_RENDER and not RESEND_API_KEY:
-    raise RuntimeError("RESEND_API_KEY is required on Render. Set RESEND_API_KEY.")
+# Frontend base URL used for links (e.g., password reset)
+FRONTEND_BASE_URL = (os.getenv("FRONTEND_BASE_URL") or os.getenv("FRONTEND_URL") or "http://localhost:3000").rstrip("/")
 
-EMAIL_BACKEND = "django.core.mail.backends.smtp.EmailBackend"
-EMAIL_HOST = "smtp.resend.com"
-EMAIL_PORT = 465
-EMAIL_USE_SSL = True
-EMAIL_USE_TLS = False
-EMAIL_HOST_USER = "resend"
-EMAIL_HOST_PASSWORD = RESEND_API_KEY
-DEFAULT_FROM_EMAIL = os.getenv("DEFAULT_FROM_EMAIL", f"NIEMR <{RESEND_FROM}>")
+# Email transport (Google SMTP by default)
+EMAIL_BACKEND = os.getenv("EMAIL_BACKEND", "django.core.mail.backends.smtp.EmailBackend")
+EMAIL_HOST = os.getenv("SMTP_HOST", "smtp.gmail.com")
+EMAIL_PORT = int(os.getenv("SMTP_PORT", "587"))
+EMAIL_USE_TLS = (os.getenv("SMTP_USE_TLS", "1").lower() in {"1", "true", "yes", "on"})
+EMAIL_USE_SSL = (os.getenv("SMTP_USE_SSL", "0").lower() in {"1", "true", "yes", "on"})
+if EMAIL_USE_SSL:
+    EMAIL_USE_TLS = False
+
+EMAIL_HOST_USER = os.getenv("SMTP_USER", "")
+EMAIL_HOST_PASSWORD = os.getenv("SMTP_PASSWORD", "")
+DEFAULT_FROM_EMAIL = os.getenv("SMTP_FROM_EMAIL", os.getenv("DEFAULT_FROM_EMAIL", "Niemr <no-reply@mail.niemr.africa>"))
+
+# Default topics that should send email notifications even if the user hasn't
+# explicitly enabled email in preferences (in-app remains enabled by default).
+NOTIFICATIONS_EMAIL_DEFAULT_TOPICS = [
+    # Appointments / encounters
+    "APPT_REMINDER",
+    "APPOINTMENT_REMINDER",
+    "APPOINTMENT_CONFIRMED",
+    "APPOINTMENT_RESCHEDULED",
+    "APPOINTMENT_CANCELLED",
+    "APPOINTMENT_NO_SHOW",
+    "APPOINTMENT_COMPLETED",
+    "ENCOUNTER_COMPLETED",
+    "STAFF_ASSIGNED",
+    # Labs / imaging / pharmacy
+    "LAB_RESULT_READY",
+    "IMAGING_REPORT_READY",
+    "PRESCRIPTION_READY",
+    # Operations / alerts
+    "VITAL_ALERT",
+    "SYSTEM_ANNOUNCEMENT",
+]
+
 
 # ---------------------------------------------------------------------
 # Application definition
@@ -186,7 +216,7 @@ TEMPLATES = [
 
 WSGI_APPLICATION = "config.wsgi.application"
 
-EMAILS_PROVIDER = "RESEND"
+
 
 # ---------------------------------------------------------------------
 # Database (Supabase Postgres)

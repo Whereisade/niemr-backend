@@ -1,4 +1,6 @@
 from typing import Iterable
+
+from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.db import transaction
 from notifications.models import Notification, Preference
@@ -10,8 +12,15 @@ User = get_user_model()
 def _is_enabled(user: User, topic: str, channel: str) -> bool:
     pref = Preference.objects.filter(user=user, topic=topic, channel=channel).first()
     if pref is None:
-        # defaults: IN_APP enabled; EMAIL disabled
-        return channel == Channel.IN_APP
+        # Defaults:
+        # - IN_APP enabled
+        # - EMAIL enabled only for a configured allow-list of topics
+        if channel == Channel.IN_APP:
+            return True
+        if channel == Channel.EMAIL:
+            defaults = set(getattr(settings, "NOTIFICATIONS_EMAIL_DEFAULT_TOPICS", []) or [])
+            return (topic or "").upper() in defaults
+        return False
     return pref.enabled
 
 def _send_email_if_enabled(user: User, topic: str, title: str, body: str):

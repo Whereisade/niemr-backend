@@ -4,7 +4,7 @@ from emails.models import Outbox, EmailStatus
 from emails.services.router import _attempt_send
 
 class Command(BaseCommand):
-    help = "Send/retry queued emails via Resend"
+    help = "Send/retry queued emails via configured provider (SMTP/Resend)"
 
     def handle(self, *args, **opts):
         now = timezone.now()

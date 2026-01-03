@@ -1,15 +1,33 @@
 from django.conf import settings
 from django.utils import timezone
+
 from emails.models import Outbox, EmailStatus
 from emails.services.render import render_template
-from .providers.resend_provider import send_via_resend
 
-def send_email(*, to: str, subject: str = "", html: str = "", text: str = "",
-               tags=None, template_code: str | None = None, template_data: dict | None = None,
-               from_email: str | None = None, cc=None, bcc=None, reply_to=None,
-               attachment_file_ids=None, queue_if_failed: bool = True) -> int:
-    """
-    Single entry point for all system emails (Resend-only).
+from .providers.resend_provider import send_via_resend
+from .providers.smtp_provider import send_via_smtp
+
+def send_email(
+    *,
+    to: str,
+    subject: str = "",
+    html: str = "",
+    text: str = "",
+    tags=None,
+    template_code: str | None = None,
+    template_data: dict | None = None,
+    from_email: str | None = None,
+    cc=None,
+    bcc=None,
+    reply_to=None,
+    attachment_file_ids=None,
+    queue_if_failed: bool = True,
+) -> int:
+    """Single entry point for all system emails.
+
+    Provider is selected via settings.EMAILS_PROVIDER:
+    - SMTP (default): Django SMTP backend (supports Google SMTP)
+    - RESEND: Resend REST API
     """
     if template_code:
         sub, h, t = render_template(template_code, template_data or {})
@@ -35,7 +53,13 @@ def _attempt_send(outbox: Outbox, *, queue_if_failed: bool):
     outbox.status = EmailStatus.SENDING
     outbox.save(update_fields=["status"])
 
-    mid, err = send_via_resend(outbox=outbox)
+    provider = (getattr(settings, "EMAILS_PROVIDER", "SMTP") or "SMTP").upper()
+
+    if provider == "RESEND":
+        mid, err = send_via_resend(outbox=outbox)
+    else:
+        # Default to SMTP
+        mid, err = send_via_smtp(outbox=outbox)
 
     if err:
         outbox.status = EmailStatus.FAILED if not queue_if_failed else EmailStatus.QUEUED

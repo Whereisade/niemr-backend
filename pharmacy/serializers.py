@@ -342,11 +342,31 @@ class PrescriptionCreateSerializer(serializers.ModelSerializer):
         for it in items:
             PrescriptionItem.objects.create(prescription=rx, **it)
 
+        # Notify patient (and guardian/dependents fanout via notify_patient)
+        try:
+            notify_patient(
+                patient=patient,
+                topic=Topic.PRESCRIPTION_READY,
+                priority=Priority.NORMAL,
+                title="New prescription",
+                body=f"A new prescription (#{rx.id}) has been created for you.",
+                facility_id=getattr(facility, "id", None),
+                data={"prescription_id": rx.id},
+                action_url="/patient",
+                group_key=f"RX:{rx.id}:NEW",
+            )
+        except Exception:
+            pass
+
         # Notify outsourced pharmacy if applicable
         if outsourced_to_id:
             try:
+                outsourced_user = User.objects.filter(id=outsourced_to_id).first()
+                if not outsourced_user:
+                    raise ValueError("outsourced user not found")
+
                 notify_user(
-                    user_id=outsourced_to_id,
+                    user=outsourced_user,
                     topic=Topic.PRESCRIPTION_READY,
                     priority=Priority.NORMAL,
                     title="New outsourced prescription",
