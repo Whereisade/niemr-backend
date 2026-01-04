@@ -168,9 +168,11 @@ class PatientViewSet(viewsets.GenericViewSet,
             return Response({"detail": "Patient must belong to your facility."}, status=403)
 
         hmo_id = request.data.get("hmo_id")
-        insurance_number = request.data.get("insurance_number", "").strip()
-        insurance_expiry = request.data.get("insurance_expiry")
-        insurance_notes = request.data.get("insurance_notes", "").strip()
+        
+        # Handle None values from JSON - use "or" to convert None to empty string
+        insurance_number = (request.data.get("insurance_number") or "").strip()
+        insurance_expiry = request.data.get("insurance_expiry") or None
+        insurance_notes = (request.data.get("insurance_notes") or "").strip()
 
         if not hmo_id:
             return Response({"detail": "hmo_id is required"}, status=400)
@@ -180,7 +182,7 @@ class PatientViewSet(viewsets.GenericViewSet,
         patient.hmo = hmo
         patient.insurance_status = InsuranceStatus.INSURED
         patient.insurance_number = insurance_number
-        patient.insurance_expiry = insurance_expiry if insurance_expiry else None
+        patient.insurance_expiry = insurance_expiry
         patient.insurance_notes = insurance_notes
         
         patient.save(update_fields=[
