@@ -123,75 +123,103 @@ class PatientViewSet(viewsets.GenericViewSet,
         )
         return Response(PatientDocumentSerializer(obj).data, status=201)
 
+    @action(detail=False, methods=["get"], permission_classes=[IsAuthenticated, IsStaff])
+    def hmos(self, request):
+        """List active HMOs for the requester's facility."""
+        facility_id = getattr(request.user, "facility_id", None)
+        if not facility_id:
+            return Response([])
+        qs = HMO.objects.filter(facility_id=facility_id, is_active=True).order_by("name")
+        return Response(HMOSerializer(qs, many=True).data)
 
-@action(detail=False, methods=["get"], permission_classes=[IsAuthenticated, IsStaff])
-def hmos(self, request):
-    """List active HMOs for the requester's facility."""
-    facility_id = getattr(request.user, "facility_id", None)
-    if not facility_id:
-        return Response([])
-    qs = HMO.objects.filter(facility_id=facility_id, is_active=True).order_by("name")
-    return Response(HMOSerializer(qs, many=True).data)
+    @action(detail=False, methods=["post"], permission_classes=[IsAuthenticated, IsStaff])
+    def seed_hmos(self, request):
+        """Bulk-create HMOs for the requester's facility (SUPER_ADMIN only)."""
+        role = (getattr(request.user, "role", "") or "").upper()
+        if role != UserRole.SUPER_ADMIN:
+            return Response({"detail": "Only facility SUPER_ADMIN can create HMOs."}, status=403)
 
-@action(detail=False, methods=["post"], permission_classes=[IsAuthenticated, IsStaff])
-def seed_hmos(self, request):
-    """Bulk-create HMOs for the requester's facility (SUPER_ADMIN only)."""
-    role = (getattr(request.user, "role", "") or "").upper()
-    if role != UserRole.SUPER_ADMIN:
-        return Response({"detail": "Only facility SUPER_ADMIN can create HMOs."}, status=403)
+        facility_id = getattr(request.user, "facility_id", None)
+        if not facility_id:
+            return Response({"detail": "User must belong to a facility."}, status=400)
 
-    facility_id = getattr(request.user, "facility_id", None)
-    if not facility_id:
-        return Response({"detail": "User must belong to a facility."}, status=400)
+        names = request.data.get("names") or []
+        created = []
+        for n in names:
+            n = (n or "").strip()
+            if not n:
+                continue
+            obj, was_created = HMO.objects.get_or_create(
+                facility_id=facility_id,
+                name=n,
+                defaults={"is_active": True},
+            )
+            if was_created:
+                created.append(obj.name)
+        return Response({"created": created}, status=201)
 
-    names = request.data.get("names") or []
-    created = []
-    for n in names:
-        n = (n or "").strip()
-        if not n:
-            continue
-        obj, was_created = HMO.objects.get_or_create(
-            facility_id=facility_id,
-            name=n,
-            defaults={"is_active": True},
-        )
-        if was_created:
-            created.append(obj.name)
-    return Response({"created": created}, status=201)
+    @action(detail=True, methods=["post"], url_path="attach-hmo", permission_classes=[IsAuthenticated, IsStaff])
+    def attach_hmo(self, request, pk=None):
+        """Attach a patient to an HMO within the same facility."""
+        patient = self.get_object()
 
-@action(detail=True, methods=["post"], url_path="attach-hmo", permission_classes=[IsAuthenticated, IsStaff])
-def attach_hmo(self, request, pk=None):
-    """Attach a patient to an HMO within the same facility."""
-    patient = self.get_object()
+        user_facility_id = getattr(request.user, "facility_id", None)
+        if not user_facility_id or patient.facility_id != user_facility_id:
+            return Response({"detail": "Patient must belong to your facility."}, status=403)
 
-    user_facility_id = getattr(request.user, "facility_id", None)
-    if not user_facility_id or patient.facility_id != user_facility_id:
-        return Response({"detail": "Patient must belong to your facility."}, status=403)
+        hmo_id = request.data.get("hmo_id")
+        insurance_number = request.data.get("insurance_number", "").strip()
+        insurance_expiry = request.data.get("insurance_expiry")
+        insurance_notes = request.data.get("insurance_notes", "").strip()
 
-    hmo_id = request.data.get("hmo_id")
-    if not hmo_id:
-        return Response({"detail": "hmo_id is required"}, status=400)
+        if not hmo_id:
+            return Response({"detail": "hmo_id is required"}, status=400)
 
-    hmo = get_object_or_404(HMO, id=hmo_id, facility_id=user_facility_id, is_active=True)
+        hmo = get_object_or_404(HMO, id=hmo_id, facility_id=user_facility_id, is_active=True)
 
-    patient.hmo = hmo
-    patient.insurance_status = InsuranceStatus.INSURED
-    patient.save(update_fields=["hmo", "insurance_status", "updated_at"])
-    return Response(PatientSerializer(patient, context={"request": request}).data)
+        patient.hmo = hmo
+        patient.insurance_status = InsuranceStatus.INSURED
+        patient.insurance_number = insurance_number
+        patient.insurance_expiry = insurance_expiry if insurance_expiry else None
+        patient.insurance_notes = insurance_notes
+        
+        patient.save(update_fields=[
+            "hmo", 
+            "insurance_status", 
+            "insurance_number",
+            "insurance_expiry",
+            "insurance_notes",
+            "updated_at"
+        ])
+        
+        return Response(PatientSerializer(patient, context={"request": request}).data)
 
-@action(detail=True, methods=["post"], url_path="clear-hmo", permission_classes=[IsAuthenticated, IsStaff])
-def clear_hmo(self, request, pk=None):
-    """Remove a patient's HMO attachment (marks as uninsured)."""
-    patient = self.get_object()
+    @action(detail=True, methods=["post"], url_path="clear-hmo", permission_classes=[IsAuthenticated, IsStaff])
+    def clear_hmo(self, request, pk=None):
+        """Remove a patient's HMO attachment (marks as self-pay)."""
+        patient = self.get_object()
 
-    user_facility_id = getattr(request.user, "facility_id", None)
-    if not user_facility_id or patient.facility_id != user_facility_id:
-        return Response({"detail": "Patient must belong to your facility."}, status=403)
+        user_facility_id = getattr(request.user, "facility_id", None)
+        if not user_facility_id or patient.facility_id != user_facility_id:
+            return Response({"detail": "Patient must belong to your facility."}, status=403)
 
-    patient.hmo = None
-    patient.insurance_status = InsuranceStatus.UNINSURED
-    patient.save(update_fields=["hmo", "insurance_status", "updated_at"])
-    return Response(PatientSerializer(patient, context={"request": request}).data)
+        patient.hmo = None
+        patient.insurance_status = InsuranceStatus.SELF_PAY
+        patient.insurance_number = ""
+        patient.insurance_expiry = None
+        patient.insurance_notes = ""
+        
+        patient.save(update_fields=[
+            "hmo", 
+            "insurance_status",
+            "insurance_number",
+            "insurance_expiry",
+            "insurance_notes",
+            "updated_at"
+        ])
+        
+        return Response(PatientSerializer(patient, context={"request": request}).data)
+
 
 @api_view(["POST"])
 @permission_classes([AllowAny])
@@ -203,6 +231,7 @@ def self_register(request):
     s.is_valid(raise_exception=True)
     patient = s.save()
     return Response({"patient_id": patient.id}, status=201)
+
 
 # --- Dependent endpoints / viewset below ---
 
@@ -365,6 +394,7 @@ def add_dependents_actions_to_patient_viewset(viewset_cls):
     return viewset_cls
 
 PatientViewSet = add_dependents_actions_to_patient_viewset(PatientViewSet)
+
 
 class PatientDocumentViewSet(viewsets.ModelViewSet):
     """

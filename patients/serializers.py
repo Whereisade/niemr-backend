@@ -13,23 +13,23 @@ class HMOSerializer(serializers.ModelSerializer):
         model = HMO
         fields = ["id","name"]
 
+
 class PatientSerializer(serializers.ModelSerializer):
     hmo = HMOSerializer(read_only=True)
     hmo_id = serializers.PrimaryKeyRelatedField(source="hmo", queryset=HMO.objects.none(), write_only=True, required=False, allow_null=True)
 
-    
-def __init__(self, *args, **kwargs):
-    super().__init__(*args, **kwargs)
-    # Scope HMO choices to the requester's facility.
-    req = self.context.get("request") if hasattr(self, "context") else None
-    u = getattr(req, "user", None) if req else None
-    facility_id = getattr(u, "facility_id", None)
-    if facility_id:
-        self.fields["hmo_id"].queryset = HMO.objects.filter(facility_id=facility_id, is_active=True)
-    else:
-        self.fields["hmo_id"].queryset = HMO.objects.none()
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # Scope HMO choices to the requester's facility.
+        req = self.context.get("request") if hasattr(self, "context") else None
+        u = getattr(req, "user", None) if req else None
+        facility_id = getattr(u, "facility_id", None)
+        if facility_id:
+            self.fields["hmo_id"].queryset = HMO.objects.filter(facility_id=facility_id, is_active=True)
+        else:
+            self.fields["hmo_id"].queryset = HMO.objects.none()
 
-class Meta:
+    class Meta:
         model = Patient
         fields = [
             "id","user","facility","guardian_user",
@@ -44,6 +44,7 @@ class Meta:
         ]
         read_only_fields = ["bmi","created_at","updated_at","user"]
 
+
 class PatientCreateByStaffSerializer(PatientSerializer):
     """
     For hospital staff / provider creating a patient into a facility.
@@ -53,6 +54,7 @@ class PatientCreateByStaffSerializer(PatientSerializer):
         if not validated.get("facility") and self.context["request"].user.facility:
             validated["facility"] = self.context["request"].user.facility
         return super().create(validated)
+
 
 class SelfRegisterSerializer(serializers.Serializer):
     """
@@ -98,6 +100,7 @@ class SelfRegisterSerializer(serializers.Serializer):
         patient = Patient.objects.create(user=user, **p_fields)
         return patient
 
+
 class PatientDocumentSerializer(serializers.ModelSerializer):
     uploaded_by_name = serializers.SerializerMethodField(read_only=True)
 
@@ -132,14 +135,8 @@ class PatientDocumentSerializer(serializers.ModelSerializer):
             return user.get_full_name() or user.email
         return str(user)
 
-# --- Dependent serializers added below ---
 
- # keep namespace clear if needed
-# using the existing Patient model fields: dob and gender
-BASIC_DEPENDENT_FIELDS = (
-    "id", "first_name", "last_name", "dob", "gender",
-    "parent_patient", "relationship_to_guardian", "phone",  # read-only on list/detail; set on create by the view
-)
+# --- Dependent serializers ---
 
 class DependentCreateSerializer(serializers.ModelSerializer):
     """
