@@ -1,5 +1,5 @@
 from rest_framework import serializers
-from patients.models import Patient
+from patients.models import Patient, HMO
 from encounters.models import Encounter
 from .models import (
     Facility,
@@ -113,9 +113,9 @@ class BedAssignmentSerializer(serializers.ModelSerializer):
             "assigned_at",
             "discharged_at",
             "assigned_by",
-            "assigned_by_name",  # 🆕 NEW
+            "assigned_by_name",  
             "discharged_by",
-            "discharged_by_name",  # 🆕 NEW
+            "discharged_by_name",  
             "notes",
             "is_active",
             "status",
@@ -548,3 +548,10 @@ class FacilityAdminSignupSerializer(serializers.Serializer):
         }
 
 
+
+
+class FacilityHMOSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = HMO
+        fields = ["id", "name", "is_active", "created_at"]
+        read_only_fields = ["id", "created_at"]

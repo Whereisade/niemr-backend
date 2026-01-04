@@ -11,6 +11,7 @@ from rest_framework_simplejwt.authentication import JWTAuthentication
 
 from accounts.models import User
 from accounts.enums import UserRole
+from patients.models import HMO
 from .models import (
     Facility,
     Specialty,
@@ -29,8 +30,37 @@ from .serializers import (
     FacilityExtraDocumentSerializer,
     FacilityAdminSignupSerializer,
     BedAssignmentSerializer,
+    FacilityHMOSerializer,
 )
-from .permissions import IsFacilityAdmin
+from .permissions import IsFacilityAdmin, IsFacilityStaff, IsFacilitySuperAdmin
+
+
+
+class FacilityHMOViewSet(viewsets.ModelViewSet):
+    """
+    Facility-scoped HMO management.
+
+    - Any facility staff can list/view HMOs for their facility.
+    - Only facility SUPER_ADMIN can create/update/delete HMOs.
+    """
+    serializer_class = FacilityHMOSerializer
+    authentication_classes = [JWTAuthentication]
+    permission_classes = [IsAuthenticated, IsFacilityStaff]
+
+    def get_queryset(self):
+        facility_id = getattr(self.request.user, "facility_id", None)
+        if not facility_id:
+            return HMO.objects.none()
+        return HMO.objects.filter(facility_id=facility_id).order_by("name")
+
+    def get_permissions(self):
+        if self.action in ("create", "update", "partial_update", "destroy"):
+            return [IsAuthenticated(), IsFacilitySuperAdmin()]
+        return [IsAuthenticated(), IsFacilityStaff()]
+
+    def perform_create(self, serializer):
+        serializer.save(facility=self.request.user.facility)
+
 
 
 class FacilityViewSet(

@@ -18,6 +18,8 @@ class Service(models.Model):
     name = models.CharField(max_length=255)
     default_price = models.DecimalField(max_digits=12, decimal_places=2, validators=[MinValueValidator(0)], default=0)
     is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
     def __str__(self): return f"{self.code} - {self.name}"
 
 class Price(models.Model):
@@ -132,3 +134,43 @@ class PaymentAllocation(models.Model):
 
     class Meta:
         unique_together = ("payment","charge")
+class HMOPrice(models.Model):
+    """
+    Facility + HMO specific override price for a service code.
+
+    Used when a patient is insured (insurance_status=INSURED) and attached to an
+    HMO within the same facility. Falls back to the facility Price if no override.
+    """
+    facility = models.ForeignKey(
+        Facility,
+        null=True,
+        blank=True,
+        on_delete=models.CASCADE,
+        related_name="hmo_prices",
+    )
+    hmo = models.ForeignKey(
+        "patients.HMO",
+        on_delete=models.CASCADE,
+        related_name="prices",
+    )
+    service = models.ForeignKey(Service, on_delete=models.CASCADE)
+    amount = models.DecimalField(max_digits=12, decimal_places=2, validators=[MinValueValidator(0)])
+    currency = models.CharField(max_length=8, default="NGN")
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["service__code"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["facility", "hmo", "service"],
+                name="uniq_hmo_price_per_service",
+            )
+        ]
+
+    def __str__(self):
+        return f"{self.hmo_id}:{self.service.code} {self.amount} {self.currency}"
+
+
+

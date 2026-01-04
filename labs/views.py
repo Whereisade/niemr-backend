@@ -3,6 +3,7 @@ import io
 import math
 
 from django.db.models import Q
+from django.shortcuts import get_object_or_404
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 from rest_framework import mixins, status, viewsets
@@ -12,6 +13,7 @@ from rest_framework.response import Response
 from rest_framework_simplejwt.authentication import JWTAuthentication
 
 from accounts.enums import UserRole
+from patients.models import HMO
 from notifications.services.notify import notify_user, notify_patient
 from notifications.enums import Topic, Priority
 
@@ -385,7 +387,7 @@ class LabOrderViewSet(
     mixins.ListModelMixin,
 ):
     queryset = (
-        LabOrder.objects.select_related("patient", "facility", "ordered_by", "outsourced_to")
+        LabOrder.objects.select_related("patient", "patient__hmo", "facility", "ordered_by", "outsourced_to")
         .prefetch_related("items", "items__test")
         .all()
     )
@@ -425,6 +427,15 @@ class LabOrderViewSet(
         status_ = self.request.query_params.get("status")
         if status_:
             q = q.filter(status=status_)
+
+        coverage = self.request.query_params.get("coverage")
+        if coverage:
+            c = (coverage or "").strip().lower()
+            if c in {"insured", "hmo"}:
+                q = q.filter(patient__insurance_status="INSURED")
+            elif c in {"uninsured", "self_pay", "selfpay"}:
+                q = q.filter(Q(patient__insurance_status="SELF_PAY") | Q(patient__insurance_status__isnull=True))
+
 
         encounter_id = self.request.query_params.get("encounter")
         if encounter_id:

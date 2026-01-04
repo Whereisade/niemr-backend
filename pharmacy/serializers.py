@@ -386,6 +386,9 @@ class PrescriptionReadSerializer(serializers.ModelSerializer):
     items = PrescriptionItemReadSerializer(many=True)
     outsourced_to_name = serializers.SerializerMethodField()
     patient_name = serializers.SerializerMethodField()
+    patient_insurance_status = serializers.SerializerMethodField()
+    patient_hmo_id = serializers.SerializerMethodField()
+    patient_hmo_name = serializers.SerializerMethodField()
     facility_name = serializers.SerializerMethodField()
     prescribed_by_name = serializers.SerializerMethodField()
 
@@ -395,6 +398,9 @@ class PrescriptionReadSerializer(serializers.ModelSerializer):
             "id",
             "patient",
             "patient_name",
+            "patient_insurance_status",
+            "patient_hmo_id",
+            "patient_hmo_name",
             "facility",
             "facility_name",
             "prescribed_by",
@@ -417,6 +423,20 @@ class PrescriptionReadSerializer(serializers.ModelSerializer):
         last = getattr(p, "last_name", "") or ""
         full = f"{first} {last}".strip()
         return full or f"Patient #{p.id}"
+
+    def get_patient_insurance_status(self, obj):
+        p = getattr(obj, "patient", None)
+        return getattr(p, "insurance_status", None) if p else None
+
+    def get_patient_hmo_id(self, obj):
+        p = getattr(obj, "patient", None)
+        h = getattr(p, "hmo", None) if p else None
+        return getattr(h, "id", None) if h else None
+
+    def get_patient_hmo_name(self, obj):
+        p = getattr(obj, "patient", None)
+        h = getattr(p, "hmo", None) if p else None
+        return getattr(h, "name", None) if h else None
 
     def get_facility_name(self, obj):
         f = getattr(obj, "facility", None)
@@ -606,7 +626,7 @@ class DispenseSerializer(serializers.Serializer):
                 except Exception:
                     pass
 
-                unit_price = resolve_price(service=service, facility=billing_facility, owner=billing_owner)
+                unit_price = resolve_price(service=service, facility=billing_facility, owner=billing_owner, patient=rx.patient)
                 amount = (unit_price or Decimal("0")) * Decimal(take)
 
                 charge = Charge.objects.create(

@@ -15,9 +15,21 @@ class HMOSerializer(serializers.ModelSerializer):
 
 class PatientSerializer(serializers.ModelSerializer):
     hmo = HMOSerializer(read_only=True)
-    hmo_id = serializers.PrimaryKeyRelatedField(source="hmo", queryset=HMO.objects.all(), write_only=True, required=False, allow_null=True)
+    hmo_id = serializers.PrimaryKeyRelatedField(source="hmo", queryset=HMO.objects.none(), write_only=True, required=False, allow_null=True)
 
-    class Meta:
+    
+def __init__(self, *args, **kwargs):
+    super().__init__(*args, **kwargs)
+    # Scope HMO choices to the requester's facility.
+    req = self.context.get("request") if hasattr(self, "context") else None
+    u = getattr(req, "user", None) if req else None
+    facility_id = getattr(u, "facility_id", None)
+    if facility_id:
+        self.fields["hmo_id"].queryset = HMO.objects.filter(facility_id=facility_id, is_active=True)
+    else:
+        self.fields["hmo_id"].queryset = HMO.objects.none()
+
+class Meta:
         model = Patient
         fields = [
             "id","user","facility","guardian_user",

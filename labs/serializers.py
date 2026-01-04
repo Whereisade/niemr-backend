@@ -312,7 +312,7 @@ class LabOrderCreateSerializer(serializers.ModelSerializer):
                         except Exception:
                             pass
 
-                        unit_price = resolve_price(service=service, facility=billing_facility, owner=billing_owner)
+                        unit_price = resolve_price(service=service, facility=billing_facility, owner=billing_owner, patient=order.patient)
                         qty = 1
                         amount = (Decimal(str(unit_price)) * Decimal(qty)).quantize(Decimal("0.01"))
                         Charge.objects.create(
@@ -355,6 +355,9 @@ class LabOrderReadSerializer(serializers.ModelSerializer):
     items = LabOrderItemReadSerializer(many=True)
     patient_name = serializers.SerializerMethodField(read_only=True)
     outsourced_to_name = serializers.SerializerMethodField(read_only=True)
+    patient_insurance_status = serializers.SerializerMethodField(read_only=True)
+    patient_hmo_id = serializers.SerializerMethodField(read_only=True)
+    patient_hmo_name = serializers.SerializerMethodField(read_only=True)
 
     class Meta:
         model = LabOrder
@@ -362,6 +365,9 @@ class LabOrderReadSerializer(serializers.ModelSerializer):
             "id",
             "patient",
             "patient_name",
+            "patient_insurance_status",
+            "patient_hmo_id",
+            "patient_hmo_name",
             "facility",
             "ordered_by",
             "priority",
@@ -382,6 +388,20 @@ class LabOrderReadSerializer(serializers.ModelSerializer):
         last = getattr(obj.patient, "last_name", "") or ""
         name = (first + " " + last).strip()
         return name or str(obj.patient)
+
+    def get_patient_insurance_status(self, obj):
+        p = getattr(obj, "patient", None)
+        return getattr(p, "insurance_status", None) if p else None
+
+    def get_patient_hmo_id(self, obj):
+        p = getattr(obj, "patient", None)
+        h = getattr(p, "hmo", None) if p else None
+        return getattr(h, "id", None) if h else None
+
+    def get_patient_hmo_name(self, obj):
+        p = getattr(obj, "patient", None)
+        h = getattr(p, "hmo", None) if p else None
+        return getattr(h, "name", None) if h else None
 
     def get_outsourced_to_name(self, obj):
         u = getattr(obj, "outsourced_to", None)

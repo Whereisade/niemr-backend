@@ -4,6 +4,7 @@ import math
 
 from django.utils.dateparse import parse_datetime
 from django.db.models import Q
+from django.shortcuts import get_object_or_404
 from rest_framework import viewsets, mixins, status
 from rest_framework.decorators import action
 from rest_framework.permissions import IsAuthenticated
@@ -11,6 +12,7 @@ from rest_framework.response import Response
 from rest_framework_simplejwt.authentication import JWTAuthentication
 
 from accounts.enums import UserRole
+from patients.models import HMO
 from .models import Drug, StockItem, StockTxn, Prescription
 from .serializers import (
     DrugSerializer,
@@ -472,6 +474,189 @@ class StockViewSet(viewsets.GenericViewSet, mixins.ListModelMixin):
 
 # --- Prescriptions ---
 
+
+@action(detail=False, methods=["get"], permission_classes=[IsAuthenticated, IsPharmacyStaff], url_path="hmo-catalog")
+def hmo_catalog(self, request):
+    """Return the facility pharmacy catalog with HMO-specific override prices."""
+    u = request.user
+    facility_id = getattr(u, "facility_id", None)
+    if not facility_id:
+        return Response({"detail": "HMO catalogs are only available for facility accounts."}, status=400)
+
+    hmo_id = request.query_params.get("hmo") or request.query_params.get("hmo_id")
+    if not hmo_id:
+        return Response({"detail": "hmo (or hmo_id) query param is required"}, status=400)
+
+    hmo = get_object_or_404(HMO, id=hmo_id, facility_id=facility_id, is_active=True)
+
+    qs = self.get_queryset().filter(facility_id=facility_id).order_by("name", "code")
+    data = DrugSerializer(qs, many=True).data
+
+    from billing.models import HMOPrice
+
+    svc_codes = [f"DRUG:{d['code']}" for d in data if d.get("code")]
+    price_map = {}
+    if svc_codes:
+        hmo_prices = (
+            HMOPrice.objects.filter(
+                facility_id=facility_id,
+                hmo=hmo,
+                service__code__in=svc_codes,
+                is_active=True,
+            )
+            .select_related("service")
+        )
+        price_map = {hp.service.code: str(hp.amount) for hp in hmo_prices}
+
+    for row in data:
+        code = row.get("code")
+        svc_code = f"DRUG:{code}" if code else None
+        row["hmo_id"] = hmo.id
+        row["hmo_name"] = hmo.name
+        row["hmo_price"] = price_map.get(svc_code)
+    return Response(data)
+
+@action(detail=False, methods=["post"], permission_classes=[IsAuthenticated, IsPharmacyStaff], url_path="set-hmo-price")
+def set_hmo_price(self, request):
+    """Set/override a single drug price for an HMO."""
+    u = request.user
+    facility_id = getattr(u, "facility_id", None)
+    if not facility_id:
+        return Response({"detail": "HMO pricing is only available for facility accounts."}, status=400)
+
+    hmo_id = request.data.get("hmo_id") or request.data.get("hmo")
+    code = request.data.get("code")
+    amount = request.data.get("amount") or request.data.get("price")
+
+    if not (hmo_id and code and amount is not None):
+        return Response({"detail": "hmo_id, code, and amount are required"}, status=400)
+
+    hmo = get_object_or_404(HMO, id=hmo_id, facility_id=facility_id, is_active=True)
+    drug = get_object_or_404(Drug, facility_id=facility_id, code=str(code).strip())
+
+    from billing.models import Service, HMOPrice
+
+    svc_code = f"DRUG:{drug.code}"
+    service, _ = Service.objects.get_or_create(
+        code=svc_code,
+        defaults={
+            "name": drug.name or svc_code,
+            "default_price": drug.price or 0,
+        },
+    )
+    hp, _ = HMOPrice.objects.update_or_create(
+        facility_id=facility_id,
+        hmo=hmo,
+        service=service,
+        defaults={"amount": amount, "currency": "NGN", "is_active": True},
+    )
+    return Response({"ok": True, "service": service.code, "hmo_price": str(hp.amount)})
+
+@action(detail=False, methods=["post"], permission_classes=[IsAuthenticated, IsPharmacyStaff], url_path="import-hmo-file")
+def import_hmo_file(self, request):
+    """Upload an HMO-specific price list for drugs (CSV/Excel)."""
+    u = request.user
+    facility_id = getattr(u, "facility_id", None)
+    if not facility_id:
+        return Response({"detail": "HMO catalogs are only available for facility accounts."}, status=400)
+
+    hmo_id = request.query_params.get("hmo") or request.query_params.get("hmo_id") or request.data.get("hmo_id")
+    if not hmo_id:
+        return Response({"detail": "hmo (or hmo_id) is required"}, status=400)
+
+    hmo = get_object_or_404(HMO, id=hmo_id, facility_id=facility_id, is_active=True)
+
+    f = request.FILES.get("file")
+    if not f:
+        return Response({"detail": "file is required"}, status=400)
+
+    filename = f.name.lower()
+    updated = 0
+    errors = []
+
+    try:
+        if filename.endswith(".csv"):
+            buf = io.StringIO(f.read().decode("utf-8"))
+            reader = csv.DictReader(buf)
+            rows = list(reader)
+        elif filename.endswith((".xlsx", ".xls")):
+            try:
+                import pandas as pd
+            except ImportError:
+                return Response(
+                    {"detail": "Excel support not available. Please install pandas and openpyxl."},
+                    status=400,
+                )
+            engine = "openpyxl" if filename.endswith(".xlsx") else None
+            df = pd.read_excel(f, engine=engine)
+            rows = df.to_dict("records")
+        else:
+            return Response(
+                {"detail": "Unsupported file format. Please upload CSV or Excel (.xlsx, .xls) file."},
+                status=400,
+            )
+
+        if not rows:
+            return Response({"detail": "File is empty or has no data rows."}, status=400)
+
+        required_columns = ["code", "price"]
+        first_row_keys = [str(k).lower() for k in rows[0].keys()]
+        missing_columns = [col for col in required_columns if col not in first_row_keys]
+        if missing_columns:
+            return Response(
+                {"detail": f"Missing required columns: {', '.join(missing_columns)}"},
+                status=400,
+            )
+
+        from billing.models import Service, HMOPrice
+
+        for i, row in enumerate(rows, start=2):
+            try:
+                normalized = {str(k).lower(): v for k, v in row.items()}
+                code = str(normalized.get("code") or "").strip()
+                if not code:
+                    continue
+                amount = normalized.get("price")
+                if amount is None or str(amount).strip() == "":
+                    continue
+
+                drug = Drug.objects.filter(facility_id=facility_id, code=code).first()
+                if not drug:
+                    name = str(normalized.get("name") or code).strip()
+                    drug = Drug.objects.create(
+                        facility_id=facility_id,
+                        created_by=u,
+                        code=code,
+                        name=name,
+                        form=str(normalized.get("form") or "").strip(),
+                        strength=str(normalized.get("strength") or "").strip(),
+                        unit=str(normalized.get("unit") or "").strip(),
+                        price=amount,
+                        is_active=True,
+                    )
+
+                svc_code = f"DRUG:{drug.code}"
+                service, _ = Service.objects.get_or_create(
+                    code=svc_code,
+                    defaults={
+                        "name": drug.name or svc_code,
+                        "default_price": drug.price or 0,
+                    },
+                )
+                HMOPrice.objects.update_or_create(
+                    facility_id=facility_id,
+                    hmo=hmo,
+                    service=service,
+                    defaults={"amount": amount, "currency": "NGN", "is_active": True},
+                )
+                updated += 1
+            except Exception as e:
+                errors.append({"row": i, "error": str(e)})
+
+        return Response({"updated": updated, "errors": errors}, status=200)
+    except Exception as e:
+        return Response({"detail": f"Import failed: {str(e)}"}, status=400)
+
 class PrescriptionViewSet(
     viewsets.GenericViewSet,
     mixins.CreateModelMixin,
@@ -479,7 +664,7 @@ class PrescriptionViewSet(
     mixins.ListModelMixin,
 ):
     queryset = (
-        Prescription.objects.select_related("patient", "facility", "prescribed_by", "outsourced_to")
+        Prescription.objects.select_related("patient", "patient__hmo", "facility", "prescribed_by", "outsourced_to")
         .prefetch_related("items", "items__drug")
     )
     authentication_classes = [JWTAuthentication]
@@ -524,6 +709,15 @@ class PrescriptionViewSet(
         status_ = self.request.query_params.get("status")
         if status_:
             q = q.filter(status=status_)
+
+        coverage = self.request.query_params.get("coverage")
+        if coverage:
+            c = (coverage or "").strip().lower()
+            if c in {"insured", "hmo"}:
+                q = q.filter(patient__insurance_status="INSURED")
+            elif c in {"uninsured", "self_pay", "selfpay"}:
+                q = q.filter(Q(patient__insurance_status="SELF_PAY") | Q(patient__insurance_status__isnull=True))
+
 
         encounter_id = self.request.query_params.get("encounter")
         if encounter_id:

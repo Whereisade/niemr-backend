@@ -16,9 +16,37 @@ phone_validator = RegexValidator(
 )
 
 class HMO(models.Model):
-    name = models.CharField(max_length=160, unique=True)
-    def __str__(self): return self.name
+    """
+    Facility-scoped HMO.
 
+    Facilities (via their SUPER_ADMIN user) create HMOs. Patients can then be
+    attached to an HMO within the same facility. Pricing overrides for a given
+    HMO are stored in billing.HMOPrice (per service code).
+    """
+    facility = models.ForeignKey(
+        Facility,
+        on_delete=models.CASCADE,
+        related_name="hmos",
+        null=True,
+        blank=True,
+    )
+    name = models.CharField(max_length=255)
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["name"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["facility", "name"],
+                name="uniq_hmo_name_per_facility",
+            )
+        ]
+
+    def __str__(self):
+        if self.facility_id:
+            return f"{self.name} ({self.facility.name})"
+        return self.name
 def patient_document_upload_path(instance, filename):
     # e.g. patient_documents/<patient_id>/<uuid>_<filename>
     return f"patient_documents/{instance.patient_id}/{uuid.uuid4()}_{filename}"
