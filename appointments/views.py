@@ -902,7 +902,378 @@ class AppointmentViewSet(
 
         return Response({"sent": n})
 
+    @action(detail=False, methods=["get"], url_path="hmo-catalog")
+    def hmo_catalog(self, request):
+        """
+        Return appointment services with HMO-specific pricing.
+        
+        Query params:
+        - hmo_id (required): HMO to get pricing for
+        
+        Returns list of appointment types with:
+        - service_id, service_code, service_name
+        - appt_type
+        - catalog_price (facility/owner base price)
+        - hmo_price (HMO-specific override or falls back to catalog)
+        - discount_percent (calculated)
+        """
+        from billing.models import HMOPrice
+        from billing.services.pricing import get_service_price_info
+        from patients.models import HMO
+        from decimal import Decimal
 
+        hmo_id = request.query_params.get("hmo_id")
+        if not hmo_id:
+            return Response({"detail": "hmo_id is required"}, status=400)
+
+        try:
+            hmo = HMO.objects.get(id=hmo_id)
+        except HMO.DoesNotExist:
+            return Response({"detail": "HMO not found"}, status=404)
+
+        user = request.user
+        facility = getattr(user, "facility", None)
+        owner = None if facility else user
+
+        # Get all appointment service codes
+        service_codes = [
+            "APPT:CONSULTATION",
+            "APPT:FOLLOW_UP",
+            "APPT:PROCEDURE",
+            "APPT:DIAGNOSTIC_NON_LAB",
+            "APPT:NURSING_CARE",
+            "APPT:THERAPY_REHAB",
+            "APPT:MENTAL_HEALTH",
+            "APPT:IMMUNIZATION",
+            "APPT:MATERNAL_CHILD_CARE",
+            "APPT:SURGICAL_PRE_POST",
+            "APPT:EMERGENCY_NON_ER",
+            "APPT:TELEMEDICINE",
+            "APPT:HOME_VISIT",
+            "APPT:ADMIN_HMO_REVIEW",
+            "APPT:LAB",
+            "APPT:IMAGING",
+            "APPT:PHARMACY",
+            "APPT:OTHER",
+        ]
+
+        # Appointment type display names
+        appt_type_names = {
+            "CONSULTATION": "Consultation",
+            "FOLLOW_UP": "Follow-up Visit",
+            "PROCEDURE": "Procedure",
+            "DIAGNOSTIC_NON_LAB": "Diagnostic (Non-Lab)",
+            "NURSING_CARE": "Nursing Care",
+            "THERAPY_REHAB": "Therapy/Rehabilitation",
+            "MENTAL_HEALTH": "Mental Health",
+            "IMMUNIZATION": "Immunization/Vaccination",
+            "MATERNAL_CHILD_CARE": "Maternal/Child Care",
+            "SURGICAL_PRE_POST": "Surgical (Pre/Post-op)",
+            "EMERGENCY_NON_ER": "Emergency (Non-ER)",
+            "TELEMEDICINE": "Telemedicine",
+            "HOME_VISIT": "Home Visit",
+            "ADMIN_HMO_REVIEW": "Administrative/HMO Review",
+            "LAB": "Lab Visit",
+            "IMAGING": "Imaging Visit",
+            "PHARMACY": "Pharmacy Pickup",
+            "OTHER": "Other",
+        }
+
+        results = []
+
+        for service_code in service_codes:
+            try:
+                service = Service.objects.filter(code=service_code).first()
+                if not service:
+                    continue
+
+                appt_type = service_code.replace("APPT:", "")
+                service_name = appt_type_names.get(appt_type, appt_type)
+
+                # Get base catalog price (facility/owner)
+                price_info = get_service_price_info(
+                    service=service,
+                    facility=facility,
+                    owner=owner
+                )
+                catalog_price = price_info.get("facility_price") or Decimal("0.00")
+
+                # Get HMO-specific price if exists
+                hmo_price_obj = HMOPrice.objects.filter(
+                    service=service,
+                    hmo=hmo,
+                    facility=facility,
+                    is_active=True
+                ).first()
+
+                hmo_price = hmo_price_obj.amount if hmo_price_obj else catalog_price
+
+                # Calculate discount percentage
+                discount_percent = 0
+                if catalog_price > 0:
+                    discount_percent = int(
+                        ((catalog_price - hmo_price) / catalog_price) * 100
+                    )
+
+                results.append({
+                    "service_id": service.id,
+                    "service_code": service_code,
+                    "service_name": service_name,
+                    "appt_type": appt_type,
+                    "catalog_price": str(catalog_price),
+                    "hmo_price": str(hmo_price),
+                    "discount_percent": discount_percent,
+                })
+
+            except Exception as e:
+                print(f"Error processing service {service_code}: {e}")
+                continue
+
+        return Response(results, status=200)
+
+    @action(detail=False, methods=["post"], url_path="set-hmo-price", permission_classes=[IsAuthenticated, IsStaff])
+    def set_hmo_price(self, request):
+        """
+        Set HMO-specific price for an appointment service.
+        
+        Payload:
+        - hmo_id (required)
+        - service_id (required)
+        - amount (required)
+        
+        Admin-only endpoint.
+        """
+        from billing.models import HMOPrice
+        from billing.services.pricing import get_or_create_price_override
+        from patients.models import HMO
+        from decimal import Decimal
+
+        # Admin check
+        if request.user.role not in (UserRole.SUPER_ADMIN, UserRole.ADMIN):
+            return Response(
+                {"detail": "Only admins can set HMO prices"},
+                status=403
+            )
+
+        hmo_id = request.data.get("hmo_id")
+        service_id = request.data.get("service_id")
+        amount = request.data.get("amount")
+
+        if not all([hmo_id, service_id, amount]):
+            return Response(
+                {"detail": "hmo_id, service_id, and amount are required"},
+                status=400
+            )
+
+        try:
+            hmo = HMO.objects.get(id=hmo_id)
+        except HMO.DoesNotExist:
+            return Response({"detail": "HMO not found"}, status=404)
+
+        try:
+            service = Service.objects.get(id=service_id)
+        except Service.DoesNotExist:
+            return Response({"detail": "Service not found"}, status=404)
+
+        try:
+            amount_decimal = Decimal(str(amount))
+            if amount_decimal < 0:
+                raise ValueError("Amount cannot be negative")
+        except (ValueError, TypeError) as e:
+            return Response(
+                {"detail": f"Invalid amount: {e}"},
+                status=400
+            )
+
+        user = request.user
+        facility = getattr(user, "facility", None)
+
+        if not facility:
+            return Response(
+                {"detail": "Facility is required for HMO pricing"},
+                status=400
+            )
+
+        # Create or update HMO price
+        try:
+            price_obj = get_or_create_price_override(
+                service=service,
+                amount=amount_decimal,
+                facility=facility,
+                hmo=hmo,
+                currency="NGN"
+            )
+
+            return Response({
+                "id": price_obj.id,
+                "service_id": service.id,
+                "hmo_id": hmo.id,
+                "amount": str(price_obj.amount),
+                "message": "HMO price set successfully"
+            }, status=200)
+
+        except Exception as e:
+            return Response(
+                {"detail": f"Failed to set HMO price: {str(e)}"},
+                status=500
+            )
+
+    @action(detail=False, methods=["post"], url_path="import-hmo-file", permission_classes=[IsAuthenticated, IsStaff])
+    def import_hmo_file(self, request):
+        """
+        Bulk import HMO prices for appointment services from CSV/Excel.
+        
+        Query params:
+        - hmo_id (required)
+        
+        File format:
+        - code (required): Appointment service code (e.g., "APPT:CONSULTATION" or just "CONSULTATION")
+        - price (required): HMO price
+        - name (optional): Service name (for reference)
+        
+        Returns:
+        - created: number of new HMO prices created
+        - updated: number of existing HMO prices updated
+        - errors: list of error messages for failed rows
+        """
+        import csv
+        import io
+        from decimal import Decimal, InvalidOperation
+        from billing.models import HMOPrice
+        from billing.services.pricing import get_or_create_price_override
+        from patients.models import HMO
+
+        # Admin check
+        if request.user.role not in (UserRole.SUPER_ADMIN, UserRole.ADMIN):
+            return Response(
+                {"detail": "Only admins can import HMO prices"},
+                status=403
+            )
+
+        hmo_id = request.query_params.get("hmo_id")
+        if not hmo_id:
+            return Response({"detail": "hmo_id query parameter is required"}, status=400)
+
+        try:
+            hmo = HMO.objects.get(id=hmo_id)
+        except HMO.DoesNotExist:
+            return Response({"detail": "HMO not found"}, status=404)
+
+        file_obj = request.FILES.get("file")
+        if not file_obj:
+            return Response({"detail": "file is required"}, status=400)
+
+        user = request.user
+        facility = getattr(user, "facility", None)
+
+        if not facility:
+            return Response(
+                {"detail": "Facility is required for HMO pricing"},
+                status=400
+            )
+
+        # Parse file (CSV or Excel)
+        try:
+            file_ext = file_obj.name.lower().split(".")[-1]
+            
+            if file_ext == "csv":
+                content = file_obj.read().decode("utf-8")
+                reader = csv.DictReader(io.StringIO(content))
+                rows = list(reader)
+            elif file_ext in ("xlsx", "xls"):
+                try:
+                    import openpyxl
+                    wb = openpyxl.load_workbook(file_obj)
+                    ws = wb.active
+                    headers = [cell.value for cell in ws[1]]
+                    rows = []
+                    for row in ws.iter_rows(min_row=2, values_only=True):
+                        rows.append(dict(zip(headers, row)))
+                except ImportError:
+                    return Response(
+                        {"detail": "openpyxl is required for Excel files"},
+                        status=500
+                    )
+            else:
+                return Response(
+                    {"detail": "File must be CSV or Excel (.xlsx, .xls)"},
+                    status=400
+                )
+
+        except Exception as e:
+            return Response(
+                {"detail": f"Failed to parse file: {str(e)}"},
+                status=400
+            )
+
+        created_count = 0
+        updated_count = 0
+        errors = []
+
+        for idx, row in enumerate(rows, start=2):
+            try:
+                # Get code and normalize it
+                code = str(row.get("code") or "").strip().upper()
+                if not code:
+                    errors.append(f"Row {idx}: Missing code")
+                    continue
+
+                # Auto-add APPT: prefix if missing
+                if not code.startswith("APPT:"):
+                    code = f"APPT:{code}"
+
+                # Get price
+                price_str = str(row.get("price") or "").strip()
+                if not price_str:
+                    errors.append(f"Row {idx}: Missing price")
+                    continue
+
+                try:
+                    price = Decimal(price_str)
+                    if price < 0:
+                        errors.append(f"Row {idx}: Price cannot be negative")
+                        continue
+                except (InvalidOperation, ValueError):
+                    errors.append(f"Row {idx}: Invalid price '{price_str}'")
+                    continue
+
+                # Find service
+                service = Service.objects.filter(code=code).first()
+                if not service:
+                    errors.append(f"Row {idx}: Service '{code}' not found")
+                    continue
+
+                # Check if HMO price already exists
+                existing = HMOPrice.objects.filter(
+                    service=service,
+                    hmo=hmo,
+                    facility=facility
+                ).first()
+
+                # Create or update
+                get_or_create_price_override(
+                    service=service,
+                    amount=price,
+                    facility=facility,
+                    hmo=hmo,
+                    currency="NGN"
+                )
+
+                if existing:
+                    updated_count += 1
+                else:
+                    created_count += 1
+
+            except Exception as e:
+                errors.append(f"Row {idx}: {str(e)}")
+                continue
+
+        return Response({
+            "created": created_count,
+            "updated": updated_count,
+            "errors": errors,
+            "message": f"Processed {created_count + updated_count} prices"
+        }, status=200)
 # ─────────────────────────────────────────────────────────────
 # Utility functions for syncing appointment status from encounters
 # ─────────────────────────────────────────────────────────────
