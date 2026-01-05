@@ -193,6 +193,7 @@ class DrugViewSet(
         
         Returns:
         - Full drug catalog with hmo_price field showing HMO override (if any)
+        - All columns from general catalog plus HMO pricing
         
         Example:
         GET /api/pharmacy/catalog/hmo-catalog/?hmo_id=1
@@ -211,33 +212,47 @@ class DrugViewSet(
 
         # Get facility drugs
         qs = Drug.objects.filter(facility_id=facility_id, is_active=True).order_by("name", "code")
-        data = DrugSerializer(qs, many=True).data
-
+        
         # Fetch HMO price overrides
         from billing.models import HMOPrice, Service
-        svc_codes = [f"DRUG:{d['code']}" for d in data if d.get("code")]
-        price_map = {}
-        if svc_codes:
-            hmo_prices = (
-                HMOPrice.objects.filter(
-                    facility_id=facility_id,
-                    hmo=hmo,
-                    service__code__in=svc_codes,
-                    is_active=True,
-                )
-                .select_related("service")
-            )
-            price_map = {hp.service.code: str(hp.amount) for hp in hmo_prices}
-
-        # Augment response with HMO prices
-        for row in data:
-            code = row.get("code")
-            svc_code = f"DRUG:{code}" if code else None
-            row["hmo_id"] = hmo.id
-            row["hmo_name"] = hmo.name
-            row["hmo_price"] = price_map.get(svc_code)  # None if no override
+        drugs_data = []
         
-        return Response(data)
+        for drug in qs:
+            svc_code = f"DRUG:{drug.code}"
+            
+            # Get HMO price override if it exists
+            hmo_price = None
+            try:
+                service = Service.objects.filter(code=svc_code).first()
+                if service:
+                    hmo_price_obj = HMOPrice.objects.filter(
+                        facility_id=facility_id,
+                        hmo=hmo,
+                        service=service,
+                        is_active=True,
+                    ).first()
+                    if hmo_price_obj:
+                        hmo_price = str(hmo_price_obj.amount)
+            except Exception:
+                pass
+            
+            # Build response with complete data and clear field names
+            drugs_data.append({
+                "drug_id": drug.id,
+                "drug_code": drug.code,
+                "drug_name": drug.name,
+                "strength": drug.strength,
+                "form": drug.form,
+                "route": drug.route,
+                "qty_per_unit": drug.qty_per_unit,
+                "catalog_price": str(drug.unit_price),
+                "is_active": drug.is_active,
+                "hmo_id": hmo.id,
+                "hmo_name": hmo.name,
+                "hmo_price": hmo_price,  # None if no override
+            })
+        
+        return Response(drugs_data)
 
     @action(detail=False, methods=["post"], permission_classes=[IsAuthenticated, IsPharmacyStaff], url_path="set-hmo-price")
     def set_hmo_price(self, request):
@@ -246,18 +261,12 @@ class DrugViewSet(
         
         Body:
         {
-          "hmo_id": 1,
-          "code": "PARA_500_TAB",
-          "amount": 150.00
+        "hmo_id": 1,
+        "code": "PARA_500_TAB",  // OR "drug_id": 123
+        "amount": 150.00  // OR "price": 150.00
         }
         
-        Example:
-        POST /api/pharmacy/catalog/set-hmo-price/
-        {
-          "hmo_id": 1,
-          "code": "PARA_500_TAB",
-          "amount": 150.00
-        }
+        Accepts both drug_id and code for flexibility.
         """
         u = request.user
         facility_id = getattr(u, "facility_id", None)
@@ -266,14 +275,26 @@ class DrugViewSet(
 
         hmo_id = request.data.get("hmo_id") or request.data.get("hmo")
         code = request.data.get("code")
+        drug_id = request.data.get("drug_id")
         amount = request.data.get("amount") or request.data.get("price")
 
-        if not (hmo_id and code and amount is not None):
-            return Response({"detail": "hmo_id, code, and amount are required"}, status=400)
+        if not hmo_id:
+            return Response({"detail": "hmo_id is required"}, status=400)
+        
+        if not (code or drug_id):
+            return Response({"detail": "Either code or drug_id is required"}, status=400)
+        
+        if amount is None:
+            return Response({"detail": "amount is required"}, status=400)
 
         from patients.models import HMO
         hmo = get_object_or_404(HMO, id=hmo_id, facility_id=facility_id, is_active=True)
-        drug = get_object_or_404(Drug, facility_id=facility_id, code=str(code).strip(), is_active=True)
+        
+        # Get drug by ID or code
+        if drug_id:
+            drug = get_object_or_404(Drug, id=drug_id, facility_id=facility_id, is_active=True)
+        else:
+            drug = get_object_or_404(Drug, facility_id=facility_id, code=str(code).strip(), is_active=True)
 
         from billing.models import Service, HMOPrice
 
@@ -297,6 +318,8 @@ class DrugViewSet(
         
         return Response({
             "ok": True,
+            "drug_id": drug.id,
+            "drug_code": drug.code,
             "service": service.code,
             "hmo_price": str(hp.amount),
             "created": created

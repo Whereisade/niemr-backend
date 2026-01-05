@@ -388,6 +388,7 @@ class LabTestViewSet(viewsets.GenericViewSet, mixins.ListModelMixin, mixins.Crea
         
         Returns:
         - Full test catalog with hmo_price field showing HMO override (if any)
+        - All columns from general catalog plus HMO pricing
         
         Example:
         GET /api/labs/catalog/hmo-catalog/?hmo_id=1
@@ -406,33 +407,46 @@ class LabTestViewSet(viewsets.GenericViewSet, mixins.ListModelMixin, mixins.Crea
 
         # Get facility tests
         qs = LabTest.objects.filter(facility_id=facility_id, is_active=True).order_by("name", "code")
-        data = LabTestSerializer(qs, many=True).data
-
+        
         # Fetch HMO price overrides
         from billing.models import HMOPrice, Service
-        svc_codes = [f"LAB:{d['code']}" for d in data if d.get("code")]
-        price_map = {}
-        if svc_codes:
-            hmo_prices = (
-                HMOPrice.objects.filter(
-                    facility_id=facility_id,
-                    hmo=hmo,
-                    service__code__in=svc_codes,
-                    is_active=True,
-                )
-                .select_related("service")
-            )
-            price_map = {hp.service.code: str(hp.amount) for hp in hmo_prices}
-
-        # Augment response with HMO prices
-        for row in data:
-            code = row.get("code")
-            svc_code = f"LAB:{code}" if code else None
-            row["hmo_id"] = hmo.id
-            row["hmo_name"] = hmo.name
-            row["hmo_price"] = price_map.get(svc_code)  # None if no override
+        tests_data = []
         
-        return Response(data)
+        for test in qs:
+            svc_code = f"LAB:{test.code}"
+            
+            # Get HMO price override if it exists
+            hmo_price = None
+            try:
+                service = Service.objects.filter(code=svc_code).first()
+                if service:
+                    hmo_price_obj = HMOPrice.objects.filter(
+                        facility_id=facility_id,
+                        hmo=hmo,
+                        service=service,
+                        is_active=True,
+                    ).first()
+                    if hmo_price_obj:
+                        hmo_price = str(hmo_price_obj.amount)
+            except Exception:
+                pass
+            
+            # Build response with complete data and clear field names
+            tests_data.append({
+                "test_id": test.id,
+                "test_code": test.code,
+                "test_name": test.name,
+                "unit": test.unit,
+                "ref_low": test.ref_low,
+                "ref_high": test.ref_high,
+                "catalog_price": str(test.price),
+                "is_active": test.is_active,
+                "hmo_id": hmo.id,
+                "hmo_name": hmo.name,
+                "hmo_price": hmo_price,  # None if no override
+            })
+        
+        return Response(tests_data)
 
     @action(detail=False, methods=["post"], permission_classes=[IsAuthenticated, IsStaff], url_path="set-hmo-price")
     def set_hmo_price(self, request):
@@ -441,18 +455,12 @@ class LabTestViewSet(viewsets.GenericViewSet, mixins.ListModelMixin, mixins.Crea
         
         Body:
         {
-          "hmo_id": 1,
-          "code": "FBC_HB",
-          "amount": 2500.00
+        "hmo_id": 1,
+        "code": "FBC_HB",  // OR "test_id": 123
+        "amount": 2500.00  // OR "price": 2500.00
         }
         
-        Example:
-        POST /api/labs/catalog/set-hmo-price/
-        {
-          "hmo_id": 1,
-          "code": "FBC_HB",
-          "amount": 2500.00
-        }
+        Accepts both test_id and code for flexibility.
         """
         u = request.user
         facility_id = getattr(u, "facility_id", None)
@@ -461,14 +469,26 @@ class LabTestViewSet(viewsets.GenericViewSet, mixins.ListModelMixin, mixins.Crea
 
         hmo_id = request.data.get("hmo_id") or request.data.get("hmo")
         code = request.data.get("code")
+        test_id = request.data.get("test_id")
         amount = request.data.get("amount") or request.data.get("price")
 
-        if not (hmo_id and code and amount is not None):
-            return Response({"detail": "hmo_id, code, and amount are required"}, status=400)
+        if not hmo_id:
+            return Response({"detail": "hmo_id is required"}, status=400)
+        
+        if not (code or test_id):
+            return Response({"detail": "Either code or test_id is required"}, status=400)
+        
+        if amount is None:
+            return Response({"detail": "amount is required"}, status=400)
 
         from patients.models import HMO
         hmo = get_object_or_404(HMO, id=hmo_id, facility_id=facility_id, is_active=True)
-        test = get_object_or_404(LabTest, facility_id=facility_id, code=str(code).strip(), is_active=True)
+        
+        # Get test by ID or code
+        if test_id:
+            test = get_object_or_404(LabTest, id=test_id, facility_id=facility_id, is_active=True)
+        else:
+            test = get_object_or_404(LabTest, facility_id=facility_id, code=str(code).strip(), is_active=True)
 
         from billing.models import Service, HMOPrice
 
@@ -492,6 +512,8 @@ class LabTestViewSet(viewsets.GenericViewSet, mixins.ListModelMixin, mixins.Crea
         
         return Response({
             "ok": True,
+            "test_id": test.id,
+            "test_code": test.code,
             "service": service.code,
             "hmo_price": str(hp.amount),
             "created": created

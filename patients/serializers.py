@@ -36,6 +36,7 @@ class PatientSerializer(serializers.ModelSerializer):
             "first_name","last_name","middle_name","dob","gender",
             "email","phone","country","state","lga","address",
             "insurance_status","hmo","hmo_id","hmo_plan",
+            "insurance_number","insurance_expiry","insurance_notes",
             "blood_group","blood_group_other","genotype","genotype_other",
             "weight_kg","height_cm","bmi",
             "patient_status","default_encounter_type",

@@ -91,6 +91,9 @@ class Patient(models.Model):
     insurance_status = models.CharField(max_length=16, choices=InsuranceStatus.choices, default=InsuranceStatus.SELF_PAY)
     hmo = models.ForeignKey(HMO, null=True, blank=True, on_delete=models.SET_NULL)
     hmo_plan = models.CharField(max_length=120, blank=True)
+    insurance_number = models.CharField(max_length=120, blank=True, help_text="Insurance card number or policy ID")
+    insurance_expiry = models.DateField(null=True, blank=True, help_text="Insurance coverage expiry date")
+    insurance_notes = models.TextField(blank=True, help_text="Additional insurance information")
 
     # clinical profile bits
     blood_group = models.CharField(max_length=8, choices=BloodGroup.choices, blank=True)
