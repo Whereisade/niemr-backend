@@ -456,8 +456,7 @@ class AppointmentViewSet(
         
         # Check in the patient
         appointment.status = "CHECKED_IN"
-        appointment.check_in_time = timezone.now()
-        appointment.save()
+        appointment.save(update_fields=["status", "updated_at"])
         
         # Attempt to create billing charge
         charge_created = False
@@ -486,7 +485,7 @@ class AppointmentViewSet(
                     if hasattr(appointment.provider, 'facility') and appointment.provider.facility:
                         facility = appointment.provider.facility
                     else:
-                        owner = appointment.provider.user if hasattr(appointment.provider, 'user') else None
+                        owner = appointment.provider
                 
                 # Try to resolve the price
                 try:
@@ -502,17 +501,27 @@ class AppointmentViewSet(
                         price_not_set = True
                         charge_error = f"No price configured for {appointment.get_appt_type_display()} appointments"
                     else:
+                        # Format date from start_at (DateTimeField)
+                        appt_date = appointment.start_at.strftime("%Y-%m-%d") if appointment.start_at else "Unknown date"
+                        
                         # Create the charge
+                        # NOTE: Charge model fields:
+                        #   - patient, facility, owner, service (FKs)
+                        #   - description, unit_price, qty, amount
+                        #   - status, created_by, created_at
+                        #   - NO 'currency' field (assumed NGN)
                         charge = Charge.objects.create(
-                            patient=appointment.patient,
-                            service=service,
-                            amount=price_amount,
-                            currency="NGN",
-                            description=f"{appointment.get_appt_type_display()} - {appointment.date}",
-                            facility=facility,
-                            owner=owner,
-                            status="PENDING",
-                        )
+                        patient=appointment.patient,
+                        service=service,
+                        unit_price=price_amount,  # ✅ Correct field
+                        qty=1,                     # ✅ Required field
+                        amount=price_amount,       # ✅ Total amount
+                        description=f"{appointment.get_appt_type_display()} - {appt_date}",  # ✅ Correct date
+                        facility=facility,
+                        owner=owner,
+                        status="UNPAID",           # ✅ Correct enum
+                        created_by=request.user,   # ✅ Track creator
+                    )
                         
                         charge_created = True
                         charge_id = charge.id
@@ -528,7 +537,6 @@ class AppointmentViewSet(
         response_data = {
             "id": appointment.id,
             "status": appointment.status,
-            "check_in_time": appointment.check_in_time,
             "charge_created": charge_created,
         }
         
