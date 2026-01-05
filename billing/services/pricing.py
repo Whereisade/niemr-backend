@@ -1,70 +1,217 @@
+# billing/services/pricing.py
+"""
+Pricing service for resolving service prices based on facility/owner/HMO.
+
+NO DEFAULT PRICES - Facilities must configure their own prices.
+Returns None if no price is configured.
+"""
+
 from decimal import Decimal
 from typing import Optional
 
-from billing.models import Price, Service, HMOPrice
-from facilities.models import Facility
+from billing.models import Price, Service
 
 
-def resolve_price(*, service: Service, facility: Optional[Facility] = None, owner=None, patient=None) -> Decimal:
-    """Resolve price for a service.
-
-    Priority:
-    - HMO override (facility + patient's HMO) when patient is insured and HMO belongs to facility
-    - facility override (facility pricing)
-    - owner override (independent provider pricing)
-    - service.default_price
+def resolve_price(
+    service,
+    facility=None,
+    owner=None,
+    hmo=None,
+) -> Optional[Decimal]:
     """
-    # 1) HMO override (facility + patient)
-    if facility is not None and patient is not None:
-        try:
-            from patients.enums import InsuranceStatus  # local import to avoid circular deps
-            hmo = getattr(patient, "hmo", None)
-            if hmo and getattr(patient, "insurance_status", None) == InsuranceStatus.INSURED:
-                if getattr(hmo, "facility_id", None) == getattr(facility, "id", None):
-                    hp = (
-                        HMOPrice.objects.filter(
-                            facility=facility,
-                            hmo=hmo,
-                            service=service,
-                            is_active=True,
-                        )
-                        .order_by("-id")
-                        .first()
-                    )
-                    if hp:
-                        return hp.amount
-        except Exception:
-            # If anything about insurance/HMO resolution fails, fall back gracefully.
-            pass
+    Resolve the price for a service based on priority:
+    1. HMO-specific price (if patient has HMO)
+    2. Facility-specific price
+    3. Owner-specific price (for independent providers)
+    4. None (no price configured)
+    
+    NO DEFAULT PRICES - If no custom price is set, returns None.
+    
+    Args:
+        service: Service instance
+        facility: Facility instance (optional)
+        owner: User instance for independent providers (optional)
+        hmo: HMO instance (optional)
+    
+    Returns:
+        Decimal: The resolved price, or None if no price is configured
+    """
+    
+    # Priority 1: HMO-specific price
+    if hmo and facility:
+        price_obj = Price.objects.filter(
+            service=service,
+            facility=facility,
+            hmo=hmo,
+        ).first()
+        if price_obj and price_obj.amount:
+            return price_obj.amount
+    
+    # Priority 2: Facility-specific price
+    if facility:
+        price_obj = Price.objects.filter(
+            service=service,
+            facility=facility,
+            hmo__isnull=True,
+        ).first()
+        if price_obj and price_obj.amount:
+            return price_obj.amount
+    
+    # Priority 3: Owner-specific price (independent provider)
+    if owner:
+        price_obj = Price.objects.filter(
+            service=service,
+            owner=owner,
+            hmo__isnull=True,
+        ).first()
+        if price_obj and price_obj.amount:
+            return price_obj.amount
+    
+    # Priority 4: No price configured
+    return None
 
-    # 2) Facility override
-    if facility is not None:
-        p = (
-            Price.objects.filter(
-                facility=facility,
-                owner__isnull=True,
-                service=service,
-                is_active=True,
-            )
-            .order_by("-id")
-            .first()
-        )
-        if p:
-            return p.amount
 
-    # 3) Owner override (independent provider pricing)
-    if owner is not None:
-        p = (
-            Price.objects.filter(
-                owner=owner,
-                facility__isnull=True,
-                service=service,
-                is_active=True,
-            )
-            .order_by("-id")
-            .first()
-        )
-        if p:
-            return p.amount
+def get_service_price_info(
+    service,
+    facility=None,
+    owner=None,
+    hmo=None,
+):
+    """
+    Get detailed pricing information for a service.
+    
+    Returns:
+        dict: {
+            'facility_price': Decimal or None,
+            'is_set': bool (whether price is configured),
+        }
+    """
+    facility_price = None
+    is_set = False
+    
+    # Check facility price
+    if facility:
+        price_obj = Price.objects.filter(
+            service=service,
+            facility=facility,
+            hmo__isnull=True,
+        ).first()
+        if price_obj and price_obj.amount:
+            facility_price = price_obj.amount
+            is_set = True
+    
+    # Check owner price (independent provider)
+    elif owner:
+        price_obj = Price.objects.filter(
+            service=service,
+            owner=owner,
+            hmo__isnull=True,
+        ).first()
+        if price_obj and price_obj.amount:
+            facility_price = price_obj.amount
+            is_set = True
+    
+    return {
+        'facility_price': facility_price,
+        'is_set': is_set,
+    }
 
-    return service.default_price
+
+def get_or_create_price_override(
+    service,
+    amount,
+    facility=None,
+    owner=None,
+    hmo=None,
+    currency="NGN",
+):
+    """
+    Create or update a custom price for a service.
+    
+    Args:
+        service: Service instance
+        amount: Price amount (Decimal or float/int)
+        facility: Facility instance (optional)
+        owner: User instance for independent providers (optional)
+        hmo: HMO instance (optional, for HMO-specific pricing)
+        currency: Currency code (default: NGN)
+    
+    Returns:
+        Price: The created or updated Price instance
+    """
+    # Convert amount to Decimal
+    if not isinstance(amount, Decimal):
+        amount = Decimal(str(amount))
+    
+    # Build filter criteria
+    filters = {
+        'service': service,
+    }
+    
+    if hmo:
+        filters['hmo'] = hmo
+    else:
+        filters['hmo__isnull'] = True
+    
+    if facility:
+        filters['facility'] = facility
+        filters['owner__isnull'] = True
+    elif owner:
+        filters['owner'] = owner
+        filters['facility__isnull'] = True
+    else:
+        raise ValueError("Either facility or owner must be provided")
+    
+    # Create or update price
+    price_obj, created = Price.objects.update_or_create(
+        **filters,
+        defaults={
+            'amount': amount,
+            'currency': currency,
+        }
+    )
+    
+    return price_obj
+
+
+def delete_price_override(
+    service,
+    facility=None,
+    owner=None,
+    hmo=None,
+):
+    """
+    Delete a custom price override.
+    
+    After deletion, resolve_price() will return None for this service.
+    
+    Args:
+        service: Service instance
+        facility: Facility instance (optional)
+        owner: User instance for independent providers (optional)
+        hmo: HMO instance (optional)
+    
+    Returns:
+        bool: True if a price was deleted, False otherwise
+    """
+    # Build filter criteria
+    filters = {
+        'service': service,
+    }
+    
+    if hmo:
+        filters['hmo'] = hmo
+    else:
+        filters['hmo__isnull'] = True
+    
+    if facility:
+        filters['facility'] = facility
+    elif owner:
+        filters['owner'] = owner
+    else:
+        raise ValueError("Either facility or owner must be provided")
+    
+    # Delete matching prices
+    deleted_count, _ = Price.objects.filter(**filters).delete()
+    
+    return deleted_count > 0

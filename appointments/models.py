@@ -11,7 +11,7 @@ class Appointment(models.Model):
     provider = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL, related_name="appointments_provided")  # doctor/nurse/etc.
     created_by = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL, related_name="appointments_created")
 
-    appt_type = models.CharField(max_length=16, choices=ApptType.choices, default=ApptType.CONSULT)
+    appt_type = models.CharField(max_length=16, choices=ApptType.choices, default=ApptType.CONSULTATION)
     status    = models.CharField(max_length=16, choices=ApptStatus.choices, default=ApptStatus.SCHEDULED)
 
     reason = models.CharField(max_length=255, blank=True)

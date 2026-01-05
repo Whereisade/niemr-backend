@@ -7,7 +7,8 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework_simplejwt.authentication import JWTAuthentication
 from django.contrib.auth import get_user_model
-
+from billing.models import Service, Price
+from billing.services.pricing import get_service_price_info
 from .models import Appointment
 from .serializers import (
     AppointmentSerializer,
@@ -425,153 +426,254 @@ class AppointmentViewSet(
     # Status transition actions
     # ─────────────────────────────────────────────────────────────
 
-    @action(detail=True, methods=["post"])
+    @action(detail=True, methods=["POST"], url_path="check_in")
     def check_in(self, request, pk=None):
-        """Mark appointment as checked-in (patient has arrived)."""
-        appt = self.get_object()
-        self.permission_classes = [IsAuthenticated, IsStaff]
-        self.check_permissions(request)
-
-        if appt.status != ApptStatus.SCHEDULED:
-            return Response(
-                {"detail": "Only scheduled appointments can be checked-in."},
-                status=400,
-            )
-
-        appt.status = ApptStatus.CHECKED_IN
-        appt.save(update_fields=["status", "updated_at"])
-
-        try:
-            when = appt.start_at.strftime("%Y-%m-%d %H:%M") if appt.start_at else ""
-            payload = {"appointment_id": appt.id, "patient_id": appt.patient_id}
-            patient_name = " ".join([p for p in [getattr(appt.patient, 'first_name', ''), getattr(appt.patient, 'middle_name', ''), getattr(appt.patient, 'last_name', '')] if p]).strip()
-            group_key = f"APPT:{appt.id}:CHECKED_IN"
-            if appt.provider_id:
-                notify_user(
-                    user=appt.provider,
-                    topic=Topic.APPOINTMENT_CHECKED_IN,
-                    priority=Priority.HIGH,
-                    title="Patient checked-in",
-                    body=f"Appointment {when} has been checked-in.",
-                    facility_id=appt.facility_id,
-                    data=payload,
-                    action_url="/facility/appointments",
-                    group_key=group_key,
-                )
-            if appt.patient:
-                notify_patient(
-                    patient=appt.patient,
-                    topic=Topic.APPOINTMENT_CHECKED_IN,
-                    priority=Priority.LOW,
-                    title="Checked-in",
-                    body=f"You have been checked-in for your appointment ({when}).",
-                    facility_id=appt.facility_id,
-                    data=payload,
-                    action_url="/patient/appointments",
-                    group_key=group_key,
-                )
-            # Ops feed (role-scoped): Nurses get check-in events
-            if appt.facility_id:
-                notify_facility_roles(
-                    facility_id=appt.facility_id,
-                    roles=[UserRole.NURSE],
-                    topic=Topic.APPOINTMENT_CHECKED_IN,
-                    priority=Priority.NORMAL,
-                    title="Patient checked-in",
-                    body=f"{patient_name} checked-in for {when}.",
-                    data=payload,
-                    action_url=f"/facility/appointments/{appt.id}",
-                    group_key=group_key,
-                )
-
-        except Exception:
-            pass
-
-        # Patient cancellation email (opt-in)
-        try:
-            send_cancelled(appt)
-        except Exception:
-            pass
-
-        return Response(
-            AppointmentSerializer(appt, context={"request": request}).data
-        )
-
-    @action(detail=True, methods=["post"])
-    def complete(self, request, pk=None):
         """
-        Mark appointment as completed.
-        If there's a linked encounter that's still open, this also closes it.
+        Check in a patient for their appointment.
+        
+        Automatically creates a billing charge based on appointment type,
+        but ONLY if facility has set a price for that appointment type.
+        
+        If no price is set:
+        - Check-in still succeeds
+        - No charge is created
+        - Warning message returned
         """
-        appt = self.get_object()
-        self.permission_classes = [IsAuthenticated, IsStaff]
-        self.check_permissions(request)
-
-        if appt.status not in (ApptStatus.SCHEDULED, ApptStatus.CHECKED_IN):
+        appointment = self.get_object()
+        
+        # Validate appointment can be checked in
+        if appointment.status == "CHECKED_IN":
             return Response(
-                {"detail": "Only scheduled/checked-in appointments can be completed."},
-                status=400,
+                {"detail": "Patient already checked in"},
+                status=status.HTTP_400_BAD_REQUEST
             )
-
-        appt.status = ApptStatus.COMPLETED
-        appt.save(update_fields=["status", "updated_at"])
-
+        
+        if appointment.status in ["CANCELLED", "NO_SHOW"]:
+            return Response(
+                {"detail": f"Cannot check in {appointment.status.lower()} appointment"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Check in the patient
+        appointment.status = "CHECKED_IN"
+        appointment.check_in_time = timezone.now()
+        appointment.save()
+        
+        # Attempt to create billing charge
+        charge_created = False
+        charge_id = None
+        charge_amount = None
+        charge_error = None
+        price_not_set = False
+        
         try:
-            when = appt.start_at.strftime("%Y-%m-%d %H:%M") if appt.start_at else ""
-            payload = {"appointment_id": appt.id, "patient_id": appt.patient_id}
-            group_key = f"APPT:{appt.id}:COMPLETED"
-            if appt.provider_id:
-                notify_user(
-                    user=appt.provider,
-                    topic=Topic.APPOINTMENT_COMPLETED,
-                    priority=Priority.NORMAL,
-                    title="Appointment completed",
-                    body=f"Appointment {when} has been marked completed.",
-                    facility_id=appt.facility_id,
-                    data=payload,
-                    action_url="/facility/appointments",
-                    group_key=group_key,
-                )
-            if appt.patient:
-                notify_patient(
-                    patient=appt.patient,
-                    topic=Topic.APPOINTMENT_COMPLETED,
-                    priority=Priority.LOW,
-                    title="Appointment completed",
-                    body="Your appointment has been completed.",
-                    facility_id=appt.facility_id,
-                    data=payload,
-                    action_url="/patient/appointments",
-                    group_key=group_key,
-                )
-        except Exception:
-            pass
+            # Get the service code based on appointment type
+            service_code = f"APPT:{appointment.appt_type}"
+            
+            # Get the service
+            service = Service.objects.filter(code=service_code).first()
+            if not service:
+                charge_error = f"Service not found for appointment type: {appointment.appt_type}"
+            else:
+                # Determine scope for price resolution
+                facility = None
+                owner = None
+                
+                if hasattr(appointment, 'facility') and appointment.facility:
+                    facility = appointment.facility
+                elif hasattr(appointment, 'provider') and appointment.provider:
+                    # Get provider's facility or use as independent provider
+                    if hasattr(appointment.provider, 'facility') and appointment.provider.facility:
+                        facility = appointment.provider.facility
+                    else:
+                        owner = appointment.provider.user if hasattr(appointment.provider, 'user') else None
+                
+                # Try to resolve the price
+                try:
+                    price_amount = resolve_price(
+                        service=service,
+                        facility=facility,
+                        owner=owner,
+                        hmo=appointment.patient.hmo if hasattr(appointment.patient, 'hmo') and appointment.patient.hmo else None,
+                    )
+                    
+                    # If price is None or 0, it means no price has been set
+                    if price_amount is None or price_amount == 0:
+                        price_not_set = True
+                        charge_error = f"No price configured for {appointment.get_appt_type_display()} appointments"
+                    else:
+                        # Create the charge
+                        charge = Charge.objects.create(
+                            patient=appointment.patient,
+                            service=service,
+                            amount=price_amount,
+                            currency="NGN",
+                            description=f"{appointment.get_appt_type_display()} - {appointment.date}",
+                            facility=facility,
+                            owner=owner,
+                            status="PENDING",
+                        )
+                        
+                        charge_created = True
+                        charge_id = charge.id
+                        charge_amount = str(price_amount)
+                        
+                except Exception as price_error:
+                    charge_error = f"Failed to resolve price: {str(price_error)}"
+                    
+        except Exception as e:
+            charge_error = f"Billing error: {str(e)}"
+        
+        # Prepare response
+        response_data = {
+            "id": appointment.id,
+            "status": appointment.status,
+            "check_in_time": appointment.check_in_time,
+            "charge_created": charge_created,
+        }
+        
+        if charge_created:
+            response_data["charge_id"] = charge_id
+            response_data["charge_amount"] = charge_amount
+            response_data["message"] = "Patient checked in successfully. Billing charge created."
+        elif price_not_set:
+            response_data["charge_error"] = charge_error
+            response_data["message"] = "Patient checked in. No charge created - please configure pricing for this appointment type."
+            response_data["price_not_set"] = True
+        else:
+            response_data["charge_error"] = charge_error
+            response_data["message"] = "Patient checked in. Billing charge could not be created automatically."
+        
+        return Response(response_data, status=status.HTTP_200_OK)
 
-        # Patient completion email (opt-in)
-        try:
-            send_completed(appt)
-        except Exception:
-            pass
-
-        # Also close linked encounter if it's still open
-        if appt.encounter_id:
+    @action(detail=False, methods=["GET"], url_path="service_prices")
+    def service_prices(self, request):
+        """
+        Get pricing information for all appointment types.
+        
+        NO DEFAULT PRICES - Facilities must set their own prices.
+        
+        Returns a list of services with their pricing details:
+        - service_id: Service database ID
+        - service_code: Service code (e.g., "APPT:CONSULTATION")
+        - service_name: Friendly service name
+        - appt_type: Appointment type code
+        - facility_price: Price set by facility (null if not set)
+        - is_set: Whether facility has set a price
+        
+        Pricing is scoped to the current user's facility or provider profile.
+        """
+        user = request.user
+        
+        # Determine scope
+        facility = None
+        owner = None
+        
+        if hasattr(user, 'facility') and user.facility:
+            facility = user.facility
+        elif hasattr(user, 'provider_profile') and user.provider_profile:
+            # Independent provider
+            owner = user
+        else:
+            return Response(
+                {"detail": "User has no facility or provider profile"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Get all appointment service codes
+        service_codes = [
+            "APPT:CONSULTATION",
+            "APPT:FOLLOW_UP",
+            "APPT:PROCEDURE",
+            "APPT:DIAGNOSTIC_NON_LAB",
+            "APPT:NURSING_CARE",
+            "APPT:THERAPY_REHAB",
+            "APPT:MENTAL_HEALTH",
+            "APPT:IMMUNIZATION",
+            "APPT:MATERNAL_CHILD_CARE",
+            "APPT:SURGICAL_PRE_POST",
+            "APPT:EMERGENCY_NON_ER",
+            "APPT:TELEMEDICINE",
+            "APPT:HOME_VISIT",
+            "APPT:ADMIN_HMO_REVIEW",
+            "APPT:LAB",
+            "APPT:IMAGING",
+            "APPT:PHARMACY",
+            "APPT:OTHER",
+        ]
+        
+        # Map appointment types to friendly names
+        appt_type_names = {
+            "CONSULTATION": "Consultation",
+            "FOLLOW_UP": "Follow-up Visit",
+            "PROCEDURE": "Procedure",
+            "DIAGNOSTIC_NON_LAB": "Diagnostic (Non-Lab)",
+            "NURSING_CARE": "Nursing Care",
+            "THERAPY_REHAB": "Therapy/Rehabilitation",
+            "MENTAL_HEALTH": "Mental Health",
+            "IMMUNIZATION": "Immunization/Vaccination",
+            "MATERNAL_CHILD_CARE": "Maternal/Child Care",
+            "SURGICAL_PRE_POST": "Surgical (Pre/Post-op)",
+            "EMERGENCY_NON_ER": "Emergency (Non-ER)",
+            "TELEMEDICINE": "Telemedicine",
+            "HOME_VISIT": "Home Visit",
+            "ADMIN_HMO_REVIEW": "Administrative/HMO Review",
+            "LAB": "Lab Visit",
+            "IMAGING": "Imaging Visit",
+            "PHARMACY": "Pharmacy Pickup",
+            "OTHER": "Other",
+        }
+        
+        results = []
+        
+        for service_code in service_codes:
             try:
-                from encounters.models import Encounter
-                from encounters.enums import EncounterStatus
-
-                enc = Encounter.objects.filter(id=appt.encounter_id).first()
-                if enc and enc.status not in (
-                    EncounterStatus.CLOSED,
-                    EncounterStatus.CROSSED_OUT,
-                ):
-                    enc.status = EncounterStatus.CLOSED
-                    enc.save(update_fields=["status", "updated_at"])
-            except Exception:
-                pass
-
-        return Response(
-            AppointmentSerializer(appt, context={"request": request}).data
-        )
+                # Get or skip service
+                service = Service.objects.filter(code=service_code).first()
+                if not service:
+                    continue
+                
+                # Extract appointment type from code
+                appt_type = service_code.replace("APPT:", "")
+                service_name = appt_type_names.get(appt_type, appt_type)
+                
+                # Get facility/owner specific price
+                facility_price = None
+                is_set = False
+                
+                # Check if facility/owner has set a custom price
+                if facility:
+                    price_obj = Price.objects.filter(
+                        service=service,
+                        facility=facility
+                    ).first()
+                    if price_obj:
+                        facility_price = str(price_obj.amount)
+                        is_set = True
+                elif owner:
+                    price_obj = Price.objects.filter(
+                        service=service,
+                        owner=owner
+                    ).first()
+                    if price_obj:
+                        facility_price = str(price_obj.amount)
+                        is_set = True
+                
+                results.append({
+                    "service_id": service.id,
+                    "service_code": service_code,
+                    "service_name": service_name,
+                    "appt_type": appt_type,
+                    "facility_price": facility_price,  # null if not set
+                    "is_set": is_set,  # whether price is set
+                })
+                
+            except Exception as e:
+                # Log error but continue with other services
+                print(f"Error processing service {service_code}: {e}")
+                continue
+        
+        return Response(results, status=status.HTTP_200_OK)
 
     @action(detail=True, methods=["post"])
     def cancel(self, request, pk=None):

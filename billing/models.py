@@ -16,7 +16,7 @@ class Service(models.Model):
     """
     code = models.CharField(max_length=64, unique=True)   # e.g., CONSULT_STD, LAB:FBC_HB, IMG:CXR, DRUG:PARA_500_TAB
     name = models.CharField(max_length=255)
-    default_price = models.DecimalField(max_digits=12, decimal_places=2, validators=[MinValueValidator(0)], default=0)
+    default_price = models.DecimalField(max_digits=12, decimal_places=2, validators=[MinValueValidator(0)], null=True, blank=True, default=0)
     is_active = models.BooleanField(default=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
