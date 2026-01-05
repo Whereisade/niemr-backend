@@ -7,8 +7,8 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework_simplejwt.authentication import JWTAuthentication
 from django.contrib.auth import get_user_model
-from billing.models import Service, Price
-from billing.services.pricing import get_service_price_info
+from billing.models import Service, Price, Charge
+from billing.services.pricing import get_service_price_info, resolve_price
 from .models import Appointment
 from .serializers import (
     AppointmentSerializer,

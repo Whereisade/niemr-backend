@@ -9,7 +9,7 @@ Returns None if no price is configured.
 from decimal import Decimal
 from typing import Optional
 
-from billing.models import Price, Service
+from billing.models import Price, Service, HMOPrice
 
 
 def resolve_price(
@@ -20,9 +20,9 @@ def resolve_price(
 ) -> Optional[Decimal]:
     """
     Resolve the price for a service based on priority:
-    1. HMO-specific price (if patient has HMO)
-    2. Facility-specific price
-    3. Owner-specific price (for independent providers)
+    1. HMO-specific price (if patient has HMO) - uses HMOPrice model
+    2. Facility-specific price - uses Price model
+    3. Owner-specific price (for independent providers) - uses Price model
     4. None (no price configured)
     
     NO DEFAULT PRICES - If no custom price is set, returns None.
@@ -37,22 +37,27 @@ def resolve_price(
         Decimal: The resolved price, or None if no price is configured
     """
     
-    # Priority 1: HMO-specific price
+    # Priority 1: HMO-specific price (uses separate HMOPrice model)
     if hmo and facility:
-        price_obj = Price.objects.filter(
-            service=service,
-            facility=facility,
-            hmo=hmo,
-        ).first()
-        if price_obj and price_obj.amount:
-            return price_obj.amount
+        try:
+            hmo_price = HMOPrice.objects.filter(
+                service=service,
+                facility=facility,
+                hmo=hmo,
+                is_active=True
+            ).first()
+            if hmo_price and hmo_price.amount:
+                return hmo_price.amount
+        except Exception:
+            # HMOPrice table might not exist or other error - continue to regular pricing
+            pass
     
-    # Priority 2: Facility-specific price
+    # Priority 2: Facility-specific price (uses Price model, no HMO field)
     if facility:
         price_obj = Price.objects.filter(
             service=service,
             facility=facility,
-            hmo__isnull=True,
+            owner__isnull=True  # Facility pricing only
         ).first()
         if price_obj and price_obj.amount:
             return price_obj.amount
@@ -62,7 +67,7 @@ def resolve_price(
         price_obj = Price.objects.filter(
             service=service,
             owner=owner,
-            hmo__isnull=True,
+            facility__isnull=True  # Owner pricing only
         ).first()
         if price_obj and price_obj.amount:
             return price_obj.amount
@@ -89,12 +94,28 @@ def get_service_price_info(
     facility_price = None
     is_set = False
     
+    # Check HMO price first if applicable
+    if hmo and facility:
+        try:
+            hmo_price = HMOPrice.objects.filter(
+                service=service,
+                facility=facility,
+                hmo=hmo,
+                is_active=True
+            ).first()
+            if hmo_price and hmo_price.amount:
+                facility_price = hmo_price.amount
+                is_set = True
+                return {'facility_price': facility_price, 'is_set': is_set}
+        except Exception:
+            pass
+    
     # Check facility price
     if facility:
         price_obj = Price.objects.filter(
             service=service,
             facility=facility,
-            hmo__isnull=True,
+            owner__isnull=True
         ).first()
         if price_obj and price_obj.amount:
             facility_price = price_obj.amount
@@ -105,7 +126,7 @@ def get_service_price_info(
         price_obj = Price.objects.filter(
             service=service,
             owner=owner,
-            hmo__isnull=True,
+            facility__isnull=True
         ).first()
         if price_obj and price_obj.amount:
             facility_price = price_obj.amount
@@ -128,6 +149,9 @@ def get_or_create_price_override(
     """
     Create or update a custom price for a service.
     
+    If HMO is provided, creates HMOPrice entry.
+    Otherwise, creates regular Price entry.
+    
     Args:
         service: Service instance
         amount: Price amount (Decimal or float/int)
@@ -137,21 +161,31 @@ def get_or_create_price_override(
         currency: Currency code (default: NGN)
     
     Returns:
-        Price: The created or updated Price instance
+        Price or HMOPrice: The created or updated price instance
     """
     # Convert amount to Decimal
     if not isinstance(amount, Decimal):
         amount = Decimal(str(amount))
     
-    # Build filter criteria
-    filters = {
-        'service': service,
-    }
-    
+    # HMO-specific pricing (uses HMOPrice model)
     if hmo:
-        filters['hmo'] = hmo
-    else:
-        filters['hmo__isnull'] = True
+        if not facility:
+            raise ValueError("Facility is required for HMO pricing")
+        
+        price_obj, created = HMOPrice.objects.update_or_create(
+            facility=facility,
+            hmo=hmo,
+            service=service,
+            defaults={
+                'amount': amount,
+                'currency': currency,
+                'is_active': True,
+            }
+        )
+        return price_obj
+    
+    # Regular pricing (uses Price model)
+    filters = {'service': service}
     
     if facility:
         filters['facility'] = facility
@@ -194,20 +228,27 @@ def delete_price_override(
     Returns:
         bool: True if a price was deleted, False otherwise
     """
-    # Build filter criteria
-    filters = {
-        'service': service,
-    }
-    
+    # HMO-specific pricing
     if hmo:
-        filters['hmo'] = hmo
-    else:
-        filters['hmo__isnull'] = True
+        if not facility:
+            raise ValueError("Facility is required for HMO pricing")
+        
+        deleted_count, _ = HMOPrice.objects.filter(
+            facility=facility,
+            hmo=hmo,
+            service=service
+        ).delete()
+        return deleted_count > 0
+    
+    # Regular pricing
+    filters = {'service': service}
     
     if facility:
         filters['facility'] = facility
+        filters['owner__isnull'] = True
     elif owner:
         filters['owner'] = owner
+        filters['facility__isnull'] = True
     else:
         raise ValueError("Either facility or owner must be provided")
     
