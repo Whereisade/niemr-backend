@@ -16,7 +16,7 @@ from accounts.enums import UserRole
 from patients.models import HMO
 from notifications.services.notify import notify_user, notify_patient
 from notifications.enums import Topic, Priority
-
+from facilities.permissions_utils import has_facility_permission
 from .enums import OrderStatus
 from .models import LabTest, LabOrder, LabOrderItem
 from .permissions import CanViewLabOrder, IsLabOrAdmin, IsStaff
@@ -76,11 +76,21 @@ class LabTestViewSet(viewsets.GenericViewSet, mixins.ListModelMixin, mixins.Crea
         return ctx
 
     def create(self, request, *args, **kwargs):
+        if not has_facility_permission(request.user, 'can_manage_lab_catalog'):
+            return Response(
+                {"detail": "You do not have permission to manage the lab catalog."},
+                status=status.HTTP_403_FORBIDDEN
+            )
         self.permission_classes = [IsAuthenticated, IsStaff]
         self.check_permissions(request)
         return super().create(request, *args, **kwargs)
     
     def update(self, request, *args, **kwargs):
+        if not has_facility_permission(request.user, 'can_manage_lab_catalog'):
+            return Response(
+                {"detail": "You do not have permission to manage the lab catalog."},
+                status=status.HTTP_403_FORBIDDEN
+            )
         """Update a lab test (full update)"""
         self.permission_classes = [IsAuthenticated, IsStaff]
         self.check_permissions(request)
@@ -133,6 +143,11 @@ class LabTestViewSet(viewsets.GenericViewSet, mixins.ListModelMixin, mixins.Crea
         return super().partial_update(request, *args, **kwargs)
     
     def destroy(self, request, *args, **kwargs):
+        if not has_facility_permission(request.user, 'can_manage_lab_catalog'):
+            return Response(
+                {"detail": "You do not have permission to manage the lab catalog."},
+                status=status.HTTP_403_FORBIDDEN
+            )
         """Delete a single lab test"""
         self.permission_classes = [IsAuthenticated, IsStaff]
         self.check_permissions(request)
@@ -182,6 +197,12 @@ class LabTestViewSet(viewsets.GenericViewSet, mixins.ListModelMixin, mixins.Crea
 
     @action(detail=False, methods=["post"], permission_classes=[IsAuthenticated, IsStaff])
     def import_file(self, request):
+        if not has_facility_permission(request.user, 'can_manage_lab_catalog'):
+            return Response(
+                {"detail": "You do not have permission to manage the lab catalog."},
+                status=status.HTTP_403_FORBIDDEN
+            )
+
         """
         Import lab tests from CSV or Excel file.
         
@@ -337,6 +358,11 @@ class LabTestViewSet(viewsets.GenericViewSet, mixins.ListModelMixin, mixins.Crea
 
     @action(detail=False, methods=["delete"], permission_classes=[IsAuthenticated, IsStaff])
     def clear_catalog(self, request):
+        if not has_facility_permission(request.user, 'can_manage_lab_catalog'):
+            return Response(
+                {"detail": "You do not have permission to manage the lab catalog."},
+                status=status.HTTP_403_FORBIDDEN
+            )
         """
         Delete all lab tests in the user's scope (facility or user-created).
         This is a soft delete (sets is_active=False).
@@ -766,6 +792,11 @@ class LabOrderViewSet(
 
     @action(detail=True, methods=["post"], permission_classes=[IsAuthenticated, IsLabOrAdmin])
     def collect(self, request, pk=None):
+        if not has_facility_permission(request.user, 'can_process_lab_orders'):
+            return Response(
+                {"detail": "You do not have permission to process lab orders."},
+                status=status.HTTP_403_FORBIDDEN
+            )
         order = self.get_object()
 
         item_ids = request.data.get("item_ids")
@@ -784,6 +815,11 @@ class LabOrderViewSet(
 
     @action(detail=True, methods=["post"], permission_classes=[IsAuthenticated, IsLabOrAdmin])
     def result(self, request, pk=None):
+        if not has_facility_permission(request.user, 'can_process_lab_orders'):
+            return Response(
+                {"detail": "You do not have permission to enter lab results."},
+                status=status.HTTP_403_FORBIDDEN
+            )
         order = self.get_object()
 
         item_id = request.data.get("item_id")

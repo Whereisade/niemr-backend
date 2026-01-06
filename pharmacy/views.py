@@ -10,7 +10,7 @@ from rest_framework.decorators import action
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework_simplejwt.authentication import JWTAuthentication
-
+from facilities.permissions_utils import has_facility_permission
 from accounts.enums import UserRole
 from patients.models import HMO
 from .models import Drug, StockItem, StockTxn, Prescription
@@ -85,6 +85,11 @@ class DrugViewSet(
         return ctx
 
     def create(self, request, *args, **kwargs):
+        if not has_facility_permission(request.user, 'can_manage_pharmacy_catalog'):
+            return Response(
+                {"detail": "You do not have permission to manage the pharmacy catalog."},
+                status=status.HTTP_403_FORBIDDEN
+            )
         self.permission_classes = [IsAuthenticated, IsPharmacyStaff]
         self.check_permissions(request)
         return super().create(request, *args, **kwargs)
@@ -105,6 +110,11 @@ class DrugViewSet(
             serializer.save(facility=None, created_by=u)
 
     def destroy(self, request, *args, **kwargs):
+        if not has_facility_permission(request.user, 'can_manage_pharmacy_catalog'):
+            return Response(
+                {"detail": "You do not have permission to manage the pharmacy catalog."},
+                status=status.HTTP_403_FORBIDDEN
+            )
         """
         Soft delete a drug by setting is_active=False.
         Only allow deletion if user owns the drug (facility or created_by match).
@@ -140,6 +150,11 @@ class DrugViewSet(
 
     @action(detail=False, methods=["delete"], permission_classes=[IsAuthenticated, IsPharmacyStaff])
     def clear_catalog(self, request):
+        if not has_facility_permission(request.user, 'can_manage_pharmacy_catalog'):
+            return Response(
+                {"detail": "You do not have permission to manage the pharmacy catalog."},
+                status=status.HTTP_403_FORBIDDEN
+            )
         """
         Clear entire drug catalog by soft deleting all drugs in user's scope.
         - Facility staff: clear their facility's drugs
@@ -468,6 +483,11 @@ class DrugViewSet(
 
     @action(detail=False, methods=["post"], permission_classes=[IsAuthenticated, IsPharmacyStaff])
     def import_file(self, request):
+        if not has_facility_permission(request.user, 'can_manage_pharmacy_catalog'):
+            return Response(
+                {"detail": "You do not have permission to manage the pharmacy catalog."},
+                status=status.HTTP_403_FORBIDDEN
+            )
         """
         Import drugs from CSV or Excel file.
         
@@ -671,6 +691,11 @@ class StockViewSet(viewsets.GenericViewSet, mixins.ListModelMixin):
 
     @action(detail=False, methods=["post"], permission_classes=[IsAuthenticated, IsPharmacyStaff])
     def adjust(self, request):
+        if not has_facility_permission(request.user, 'can_manage_pharmacy_stock'):
+            return Response(
+                {"detail": "You do not have permission to manage pharmacy stock."},
+                status=status.HTTP_403_FORBIDDEN
+            )
         scope = self._scope(request.user)
         if not scope:
             return Response({"detail": "You do not have access to pharmacy stock."}, status=403)
@@ -1037,6 +1062,11 @@ class PrescriptionViewSet(
 
     @action(detail=True, methods=["post"], permission_classes=[IsAuthenticated, IsPharmacyStaff])
     def dispense(self, request, pk=None):
+        if not has_facility_permission(request.user, 'can_dispense_prescriptions'):
+            return Response(
+                {"detail": "You do not have permission to dispense prescriptions."},
+                status=status.HTTP_403_FORBIDDEN
+            )
         rx = self.get_object()
         u = request.user
         role = (getattr(u, "role", "") or "").upper()
