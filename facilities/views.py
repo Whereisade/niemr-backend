@@ -251,150 +251,186 @@ class FacilityViewSet(
         return Response({"ok": True})
     
     @action(
-        detail=True,
-        methods=["get", "post"],
-        url_path="role-permissions",
-        permission_classes=[IsAuthenticated, IsFacilitySuperAdmin],
+    detail=False,  # ✅ Changed from True
+    methods=['get'],
+    url_path="permissions",  # ✅ Changed from "role-permissions"
+    permission_classes=[IsAuthenticated, IsFacilitySuperAdmin],
     )
-    def role_permissions(self, request, pk=None):
+    def permissions(self, request):
         """
-        GET: List all role permissions for this facility
-        POST: Create permissions for a specific role
+        GET /api/facilities/permissions/
         
-        POST body: {
-            "role": "PHARMACY",
-            "can_manage_pharmacy_catalog": false,
-            "can_manage_pharmacy_stock": false,
-            ...
-        }
+        List all permission configurations for the current user's facility.
+        Super Admin only.
+        
+        Returns array of permission objects.
         """
-        facility = self.get_object()
+        user = request.user
         
-        if request.method == "GET":
-            perms = FacilityRolePermission.objects.filter(facility=facility).order_by('role')
-            serializer = FacilityRolePermissionSerializer(perms, many=True)
-            
-            # Also return which roles don't have permissions configured yet
-            configured_roles = set(perms.values_list('role', flat=True))
-            available_roles = [
-                UserRole.DOCTOR,
-                UserRole.NURSE,
-                UserRole.LAB,
-                UserRole.PHARMACY,
-                UserRole.FRONTDESK,
-                UserRole.ADMIN,
-            ]
-            unconfigured_roles = [r for r in available_roles if r not in configured_roles]
-            
-            return Response({
-                "permissions": serializer.data,
-                "unconfigured_roles": unconfigured_roles,
-            })
-        
-        # POST - create new role permission
-        role = request.data.get('role')
-        if not role:
-            return Response({"detail": "role is required"}, status=400)
-        
-        # Check if already exists
-        if FacilityRolePermission.objects.filter(facility=facility, role=role).exists():
+        if not user.facility:
             return Response(
-                {"detail": f"Permissions for {role} already exist. Use PATCH to update."},
-                status=400
+                {'error': 'User not associated with a facility'}, 
+                status=status.HTTP_400_BAD_REQUEST
             )
         
-        serializer = FacilityRolePermissionSerializer(data=request.data)
-        serializer.is_valid(raise_exception=True)
-        serializer.save(facility=facility, updated_by=request.user)
+        # Get all permissions for this facility
+        perms = FacilityRolePermission.objects.filter(
+            facility=user.facility
+        ).order_by('role')
         
-        return Response(serializer.data, status=201)
+        # Serialize to match frontend expectations
+        result = []
+        for perm in perms:
+            # Get all permission fields from the model
+            perm_fields = {
+                field.name: getattr(perm, field.name)
+                for field in FacilityRolePermission._meta.fields
+                if field.name.startswith('can_')
+            }
+            
+            # Add each permission field as a separate object
+            for permission_name, enabled in perm_fields.items():
+                result.append({
+                    'id': f"{perm.id}-{permission_name}",
+                    'facility': perm.facility.id,
+                    'role': perm.role,
+                    'permission': permission_name,
+                    'enabled': enabled,
+                    'created_at': perm.created_at.isoformat() if hasattr(perm, 'created_at') else None,
+                    'updated_at': perm.updated_at.isoformat() if hasattr(perm, 'updated_at') else None,
+                })
+        
+        return Response(result)
 
     @action(
-        detail=True,
-        methods=["get", "patch"],
-        url_path="role-permissions/(?P<role>[^/.]+)",
+        detail=False,  # ✅ Changed from True
+        methods=['post'],
+        url_path="permissions/bulk_update",  # ✅ New action
         permission_classes=[IsAuthenticated, IsFacilitySuperAdmin],
     )
-    def role_permission_detail(self, request, pk=None, role=None):
-        """
-        GET: Get permissions for a specific role
-        PATCH: Update permissions for a specific role
-        
-        PATCH body: {
-            "can_manage_pharmacy_catalog": false,
-            "can_manage_pharmacy_stock": true,
-            ...
-        }
-        """
-        facility = self.get_object()
-        
-        try:
-            perm = FacilityRolePermission.objects.get(facility=facility, role=role)
-        except FacilityRolePermission.DoesNotExist:
-            # Create default permissions if they don't exist
-            if request.method == "GET":
-                # Return default (all enabled)
-                from facilities.permissions_utils import _get_all_permissions
-                return Response({
-                    "role": role,
-                    "permissions": _get_all_permissions(enabled=True),
-                    "is_default": True,
-                    "message": "No custom permissions configured. All permissions enabled by default."
-                })
-            else:
-                # Create new
-                perm = FacilityRolePermission.objects.create(
-                    facility=facility,
-                    role=role,
-                    updated_by=request.user
+    def bulk_update_permissions(self, request):
+            """
+            POST /api/facilities/permissions/bulk_update/
+            
+            Bulk update permissions for one or more roles.
+            
+            Body: {
+                "permissions": [
+                    {"role": "DOCTOR", "permission": "can_view_patients", "enabled": true},
+                    {"role": "DOCTOR", "permission": "can_edit_patients", "enabled": false},
+                    ...
+                ]
+            }
+            """
+            user = request.user
+            
+            if not user.facility:
+                return Response(
+                    {'error': 'User not associated with a facility'}, 
+                    status=status.HTTP_400_BAD_REQUEST
                 )
-        
-        if request.method == "GET":
-            serializer = FacilityRolePermissionSerializer(perm)
-            return Response(serializer.data)
-        
-        # PATCH
-        serializer = FacilityRolePermissionSerializer(perm, data=request.data, partial=True)
-        serializer.is_valid(raise_exception=True)
-        serializer.save(updated_by=request.user)
-        
-        return Response(serializer.data)
-    
+            
+            permissions_data = request.data.get('permissions', [])
+            
+            if not isinstance(permissions_data, list):
+                return Response(
+                    {'error': 'permissions must be a list'}, 
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+            
+            # Group permissions by role
+            updates_by_role = {}
+            for perm_data in permissions_data:
+                role = perm_data.get('role')
+                permission = perm_data.get('permission')
+                enabled = perm_data.get('enabled', True)
+                
+                if not role or not permission:
+                    continue
+                
+                if role not in updates_by_role:
+                    updates_by_role[role] = {}
+                updates_by_role[role][permission] = enabled
+            
+            # Update or create permissions for each role
+            updated_count = 0
+            for role, perms_dict in updates_by_role.items():
+                # Get or create the permission object for this role
+                perm_obj, created = FacilityRolePermission.objects.get_or_create(
+                    facility=user.facility,
+                    role=role,
+                    defaults={'updated_by': user}
+                )
+                
+                # Update each permission field
+                for permission_name, enabled_value in perms_dict.items():
+                    if hasattr(perm_obj, permission_name):
+                        setattr(perm_obj, permission_name, enabled_value)
+                        updated_count += 1
+                
+                perm_obj.updated_by = user
+                perm_obj.save()
+            
+            return Response({
+                'message': f'Updated {updated_count} permissions',
+                'count': updated_count,
+                'roles_affected': list(updates_by_role.keys())
+            })
+
     @action(
-        detail=True,
-        methods=["delete"],
-        url_path="role-permissions/(?P<role>[^/.]+)/reset",
+        detail=False,  # ✅ Changed from True
+        methods=['post'],
+        url_path="permissions/reset_role",  # ✅ Changed URL pattern
         permission_classes=[IsAuthenticated, IsFacilitySuperAdmin],
     )
-    def reset_role_permissions(self, request, pk=None, role=None):
+    def reset_role_permissions(self, request):
         """
-        DELETE: Reset permissions for a role to defaults (delete custom config)
-        """
-        facility = self.get_object()
+        POST /api/facilities/permissions/reset_role/
         
-        try:
-            perm = FacilityRolePermission.objects.get(facility=facility, role=role)
-            perm.delete()
-            return Response({
-                "detail": f"Permissions reset to default for {role}",
-                "role": role
-            })
-        except FacilityRolePermission.DoesNotExist:
-            return Response({
-                "detail": f"No custom permissions found for {role}. Already using defaults.",
-                "role": role
-            })
+        Reset a role's permissions to defaults (delete custom config).
+        
+        Body: {"role": "DOCTOR"}
+        """
+        user = request.user
+        
+        if not user.facility:
+            return Response(
+                {'error': 'User not associated with a facility'}, 
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        role = request.data.get('role')
+        
+        if not role:
+            return Response(
+                {'error': 'role is required'}, 
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Delete all custom permissions for this role
+        deleted_count, _ = FacilityRolePermission.objects.filter(
+            facility=user.facility,
+            role=role
+        ).delete()
+        
+        return Response({
+            'message': f'Reset {role} to default permissions',
+            'deleted': deleted_count,
+            'role': role
+        })
 
     @action(
         detail=False,
-        methods=["get"],
+        methods=['get'],
         url_path="my-permissions",
         permission_classes=[IsAuthenticated],
     )
     def my_permissions(self, request):
         """
+        GET /api/facilities/my-permissions/
+        
         Get the current user's effective permissions in their facility.
-        Useful for frontend to know what UI elements to show/hide.
+        All authenticated users can call this.
         """
         from facilities.permissions_utils import get_user_permissions
         
@@ -410,12 +446,12 @@ class FacilityViewSet(
             ).exists()
         
         return Response({
-            "role": user.role,
-            "role_display": user.get_role_display() if hasattr(user, 'get_role_display') else user.role,
-            "facility_id": user.facility_id,
-            "permissions": permissions,
-            "is_super_admin": user.role == UserRole.SUPER_ADMIN,
-            "has_custom_permissions": has_custom,
+            'role': user.role,
+            'role_display': user.get_role_display() if hasattr(user, 'get_role_display') else user.role,
+            'facility_id': user.facility_id,
+            'permissions': permissions,
+            'is_super_admin': user.role == UserRole.SUPER_ADMIN,
+            'has_custom_permissions': has_custom,
         })
 
 
