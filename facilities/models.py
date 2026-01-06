@@ -1,7 +1,7 @@
 from django.db import models
 from django.conf import settings
 from django.utils import timezone
-
+from accounts.enums import UserRole
 # Create your models here.
 import re
 from django.core.validators import RegexValidator, EmailValidator
@@ -397,3 +397,173 @@ class BedAssignment(models.Model):
         return f"{self.patient} -> {self.bed} ({status})"
 
 
+class FacilityRolePermission(models.Model):
+    """
+    Facility-specific role permissions. Allows Super Admins to control what each role can do.
+    If no permissions are configured for a role, all actions are allowed (backward compatible).
+    """
+    facility = models.ForeignKey(
+        Facility,
+        on_delete=models.CASCADE,
+        related_name="role_permissions"
+    )
+    role = models.CharField(
+        max_length=32,
+        choices=[
+            (UserRole.DOCTOR, "Doctor"),
+            (UserRole.NURSE, "Nurse"),
+            (UserRole.LAB, "Lab Scientist"),
+            (UserRole.PHARMACY, "Pharmacist"),
+            (UserRole.FRONTDESK, "Front Desk"),
+            (UserRole.ADMIN, "Admin"),
+        ]
+    )
+    
+    # Pharmacy permissions
+    can_manage_pharmacy_catalog = models.BooleanField(
+        default=True,
+        help_text="Create, edit, delete drugs in pharmacy catalog"
+    )
+    can_manage_pharmacy_stock = models.BooleanField(
+        default=True,
+        help_text="Adjust pharmacy stock levels"
+    )
+    can_dispense_prescriptions = models.BooleanField(
+        default=True,
+        help_text="Dispense medications to patients"
+    )
+    can_view_prescriptions = models.BooleanField(
+        default=True,
+        help_text="View prescription orders"
+    )
+    
+    # Lab permissions
+    can_manage_lab_catalog = models.BooleanField(
+        default=True,
+        help_text="Create, edit, delete lab tests in catalog"
+    )
+    can_process_lab_orders = models.BooleanField(
+        default=True,
+        help_text="Collect samples and enter results"
+    )
+    can_view_lab_orders = models.BooleanField(
+        default=True,
+        help_text="View lab orders and results"
+    )
+    
+    # Encounter permissions
+    can_create_encounters = models.BooleanField(
+        default=True,
+        help_text="Start new patient encounters"
+    )
+    can_view_all_encounters = models.BooleanField(
+        default=True,
+        help_text="View all facility encounters (not just assigned ones)"
+    )
+    can_edit_encounters = models.BooleanField(
+        default=True,
+        help_text="Edit encounter details and SOAP notes"
+    )
+    can_close_encounters = models.BooleanField(
+        default=True,
+        help_text="Close and lock encounters"
+    )
+    can_assign_providers = models.BooleanField(
+        default=True,
+        help_text="Assign doctors to encounters"
+    )
+    
+    # Appointment permissions
+    can_manage_appointments = models.BooleanField(
+        default=True,
+        help_text="Create, edit, cancel appointments"
+    )
+    can_view_all_appointments = models.BooleanField(
+        default=True,
+        help_text="View all facility appointments"
+    )
+    can_check_in_appointments = models.BooleanField(
+        default=True,
+        help_text="Check in patients for appointments"
+    )
+    
+    # Billing permissions
+    can_create_charges = models.BooleanField(
+        default=True,
+        help_text="Create billing charges"
+    )
+    can_view_billing = models.BooleanField(
+        default=True,
+        help_text="View patient billing information"
+    )
+    can_manage_payments = models.BooleanField(
+        default=True,
+        help_text="Record and manage payments"
+    )
+    
+    # Patient management
+    can_create_patients = models.BooleanField(
+        default=True,
+        help_text="Register new patients"
+    )
+    can_view_all_patients = models.BooleanField(
+        default=True,
+        help_text="View all facility patients"
+    )
+    can_edit_patient_records = models.BooleanField(
+        default=True,
+        help_text="Edit patient information"
+    )
+    
+    # Vital signs
+    can_record_vitals = models.BooleanField(
+        default=True,
+        help_text="Record patient vital signs"
+    )
+    can_view_vitals = models.BooleanField(
+        default=True,
+        help_text="View patient vitals"
+    )
+    
+    # Ward management
+    can_manage_wards = models.BooleanField(
+        default=True,
+        help_text="Create and manage wards and beds"
+    )
+    can_assign_beds = models.BooleanField(
+        default=True,
+        help_text="Assign patients to beds"
+    )
+    can_discharge_patients = models.BooleanField(
+        default=True,
+        help_text="Discharge patients from beds"
+    )
+    
+    # HMO pricing (sensitive)
+    can_manage_hmo_pricing = models.BooleanField(
+        default=False,
+        help_text="Set and manage HMO-specific pricing"
+    )
+    
+    # Facility settings
+    can_manage_facility_settings = models.BooleanField(
+        default=False,
+        help_text="Edit facility information and settings"
+    )
+    
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    updated_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="permission_updates"
+    )
+    
+    class Meta:
+        unique_together = ('facility', 'role')
+        ordering = ['facility', 'role']
+        
+    def __str__(self):
+        return f"{self.facility.name} - {self.get_role_display()}"

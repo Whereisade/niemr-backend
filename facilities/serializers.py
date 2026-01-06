@@ -8,6 +8,7 @@ from .models import (
     Bed,
     FacilityExtraDocument,
     BedAssignment,
+    FacilityRolePermission,
 )
 from django.contrib.auth import get_user_model
 from django.contrib.auth.password_validation import validate_password
@@ -555,3 +556,86 @@ class FacilityHMOSerializer(serializers.ModelSerializer):
         model = HMO
         fields = ["id", "name", "is_active", "created_at"]
         read_only_fields = ["id", "created_at"]
+
+
+class FacilityRolePermissionSerializer(serializers.ModelSerializer):
+    role_display = serializers.CharField(source='get_role_display', read_only=True)
+    updated_by_name = serializers.SerializerMethodField()
+    
+    class Meta:
+        model = FacilityRolePermission
+        fields = [
+            'id',
+            'facility',
+            'role',
+            'role_display',
+            
+            # Pharmacy
+            'can_manage_pharmacy_catalog',
+            'can_manage_pharmacy_stock',
+            'can_dispense_prescriptions',
+            'can_view_prescriptions',
+            
+            # Lab
+            'can_manage_lab_catalog',
+            'can_process_lab_orders',
+            'can_view_lab_orders',
+            
+            # Encounters
+            'can_create_encounters',
+            'can_view_all_encounters',
+            'can_edit_encounters',
+            'can_close_encounters',
+            'can_assign_providers',
+            
+            # Appointments
+            'can_manage_appointments',
+            'can_view_all_appointments',
+            'can_check_in_appointments',
+            
+            # Billing
+            'can_create_charges',
+            'can_view_billing',
+            'can_manage_payments',
+            
+            # Patients
+            'can_create_patients',
+            'can_view_all_patients',
+            'can_edit_patient_records',
+            
+            # Vitals
+            'can_record_vitals',
+            'can_view_vitals',
+            
+            # Wards
+            'can_manage_wards',
+            'can_assign_beds',
+            'can_discharge_patients',
+            
+            # Sensitive
+            'can_manage_hmo_pricing',
+            'can_manage_facility_settings',
+            
+            # Metadata
+            'updated_by',
+            'updated_by_name',
+            'created_at',
+            'updated_at',
+        ]
+        read_only_fields = ['id', 'facility', 'created_at', 'updated_at', 'updated_by']
+    
+    def get_updated_by_name(self, obj):
+        if not obj.updated_by:
+            return None
+        user = obj.updated_by
+        name = f"{user.first_name} {user.last_name}".strip()
+        return name or user.email
+
+
+class UserPermissionsSerializer(serializers.Serializer):
+    """Serializer for returning a user's effective permissions."""
+    role = serializers.CharField()
+    role_display = serializers.CharField()
+    permissions = serializers.DictField()
+    is_super_admin = serializers.BooleanField()
+    has_custom_permissions = serializers.BooleanField()
