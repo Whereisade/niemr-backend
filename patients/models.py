@@ -23,6 +23,14 @@ class HMO(models.Model):
     attached to an HMO within the same facility. Pricing overrides for a given
     HMO are stored in billing.HMOPrice (per service code).
     """
+    
+    class RelationshipStatus(models.TextChoices):
+        EXCELLENT = "EXCELLENT", "Excellent"
+        GOOD = "GOOD", "Good"
+        FAIR = "FAIR", "Fair"
+        POOR = "POOR", "Poor"
+        BAD = "BAD", "Bad"
+    
     facility = models.ForeignKey(
         Facility,
         on_delete=models.CASCADE,
@@ -82,6 +90,34 @@ class HMO(models.Model):
         help_text='Contact person email address'
     )
     
+    # 🆕 Relationship Status Fields
+    relationship_status = models.CharField(
+        max_length=20,
+        choices=RelationshipStatus.choices,
+        default=RelationshipStatus.GOOD,
+        blank=True,
+        help_text='Current relationship status with this HMO'
+    )
+    
+    relationship_notes = models.TextField(
+        blank=True,
+        help_text='Notes about the relationship status'
+    )
+    
+    relationship_updated_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text='When the relationship status was last updated'
+    )
+    
+    relationship_updated_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='hmo_relationship_updates'
+    )
+    
     # Timestamps
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -111,6 +147,17 @@ class HMO(models.Model):
         if self.contact_numbers and len(self.contact_numbers) > 0:
             return self.contact_numbers[0]
         return ""
+    
+    def get_relationship_status_color(self):
+        """Return color code for relationship status"""
+        colors = {
+            self.RelationshipStatus.EXCELLENT: "emerald",
+            self.RelationshipStatus.GOOD: "blue",
+            self.RelationshipStatus.FAIR: "yellow",
+            self.RelationshipStatus.POOR: "orange",
+            self.RelationshipStatus.BAD: "red",
+        }
+        return colors.get(self.relationship_status, "slate")
 
 def patient_document_upload_path(instance, filename):
     # e.g. patient_documents/<patient_id>/<uuid>_<filename>

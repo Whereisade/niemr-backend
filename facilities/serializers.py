@@ -552,6 +552,11 @@ class FacilityAdminSignupSerializer(serializers.Serializer):
 
 
 class FacilityHMOSerializer(serializers.ModelSerializer):
+    """
+    Enhanced HMO serializer with relationship status fields.
+    """
+    relationship_updated_by_name = serializers.SerializerMethodField()
+    
     class Meta:
         model = HMO
         fields = [
@@ -565,10 +570,32 @@ class FacilityHMOSerializer(serializers.ModelSerializer):
             "contact_person_phone",
             "contact_person_email",
             "is_active",
+            # 🆕 Relationship status fields
+            "relationship_status",
+            "relationship_notes",
+            "relationship_updated_at",
+            "relationship_updated_by",
+            "relationship_updated_by_name",
+            # Timestamps
             "created_at",
             "updated_at",
         ]
-        read_only_fields = ["id", "created_at", "updated_at"]
+        read_only_fields = [
+            "id", 
+            "created_at", 
+            "updated_at",
+            "relationship_updated_at",
+            "relationship_updated_by",
+            "relationship_updated_by_name"
+        ]
+
+    def get_relationship_updated_by_name(self, obj):
+        """Return the name of the user who last updated relationship status"""
+        if not obj.relationship_updated_by:
+            return None
+        user = obj.relationship_updated_by
+        name = " ".join(filter(None, [user.first_name, user.last_name]))
+        return name or user.email or f"User #{user.id}"
 
     def validate_nhis_number(self, value):
         """Validate NHIS number is not empty"""

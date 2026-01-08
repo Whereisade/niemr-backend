@@ -58,10 +58,62 @@ class FacilityHMOViewSet(viewsets.ModelViewSet):
     def get_permissions(self):
         if self.action in ("create", "update", "partial_update", "destroy"):
             return [IsAuthenticated(), IsFacilitySuperAdmin()]
+        # 🆕 Allow admins to update relationship status
+        if self.action == "update_relationship_status":
+            return [IsAuthenticated(), IsFacilityAdmin()]
         return [IsAuthenticated(), IsFacilityStaff()]
 
     def perform_create(self, serializer):
         serializer.save(facility=self.request.user.facility)
+    
+    @action(
+        detail=True,
+        methods=["post"],
+        url_path="relationship-status",
+        permission_classes=[IsAuthenticated, IsFacilityAdmin]
+    )
+    def update_relationship_status(self, request, pk=None):
+        """
+        POST /api/facilities/hmos/{id}/relationship-status/
+        
+        Update the relationship status for an HMO.
+        Only SUPER_ADMIN and ADMIN can update this.
+        
+        Body: {
+            "status": "EXCELLENT" | "GOOD" | "FAIR" | "POOR" | "BAD",
+            "notes": "Optional notes about the status"
+        }
+        """
+        hmo = self.get_object()
+        
+        status = request.data.get("status")
+        notes = request.data.get("notes", "")
+        
+        # Validate status
+        valid_statuses = [choice[0] for choice in HMO.RelationshipStatus.choices]
+        if not status or status not in valid_statuses:
+            return Response(
+                {
+                    "detail": f"Invalid status. Must be one of: {', '.join(valid_statuses)}"
+                },
+                status=400
+            )
+        
+        # Update relationship status
+        hmo.relationship_status = status
+        hmo.relationship_notes = notes.strip()
+        hmo.relationship_updated_at = timezone.now()
+        hmo.relationship_updated_by = request.user
+        hmo.save(update_fields=[
+            "relationship_status",
+            "relationship_notes",
+            "relationship_updated_at",
+            "relationship_updated_by",
+            "updated_at"
+        ])
+        
+        serializer = self.get_serializer(hmo)
+        return Response(serializer.data)
 
 
 
