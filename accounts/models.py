@@ -44,6 +44,25 @@ class User(AbstractUser):
     # True only when the account was created by a facility admin via /providers/facility-create/
     # Used to decide whether "Remove/Sack" should delete the account or just detach it.
     created_by_facility = models.BooleanField(default=False)
+    
+    # Soft delete tracking for sacked providers
+    is_sacked = models.BooleanField(
+        default=False,
+        help_text="Provider has been sacked/terminated from their facility"
+    )
+    sacked_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text="When the provider was sacked"
+    )
+    sacked_by = models.ForeignKey(
+        "self",
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="providers_sacked",
+        help_text="Admin who sacked this provider"
+    )
 
     USERNAME_FIELD = "email"
     REQUIRED_FIELDS = []

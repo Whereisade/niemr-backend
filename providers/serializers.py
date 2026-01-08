@@ -44,7 +44,7 @@ class ProviderProfileSerializer(serializers.ModelSerializer):
     Supports writing specialties via a plain string list and reads them back with `specialties_read`.
     """
 
-    # 🔹 NEW: user-facing read-only fields for the frontend table
+    # 🔹 User-facing read-only fields for the frontend table
     first_name = serializers.CharField(source="user.first_name", read_only=True)
     last_name = serializers.CharField(source="user.last_name", read_only=True)
     email = serializers.EmailField(source="user.email", read_only=True)
@@ -56,6 +56,11 @@ class ProviderProfileSerializer(serializers.ModelSerializer):
         source="user.facility.name",
         read_only=True,
     )
+    
+    # 🆕 NEW: Sacked status fields
+    is_sacked = serializers.BooleanField(source="user.is_sacked", read_only=True)
+    sacked_at = serializers.DateTimeField(source="user.sacked_at", read_only=True)
+    sacked_by_name = serializers.SerializerMethodField(read_only=True)
 
     # Write specialties as a simple list of strings; store as M2M to Specialty
     specialties = serializers.ListField(
@@ -79,6 +84,14 @@ class ProviderProfileSerializer(serializers.ModelSerializer):
     def get_role(self, obj):
         # Map provider_type to something the UI can show as "Role"
         return obj.provider_type
+    
+    def get_sacked_by_name(self, obj):
+        """Return the name of the admin who sacked this provider"""
+        sacked_by = getattr(obj.user, "sacked_by", None)
+        if not sacked_by:
+            return None
+        name = " ".join(filter(None, [sacked_by.first_name, sacked_by.last_name]))
+        return name or sacked_by.email or f"User #{sacked_by.id}"
 
     def get_specialties_read(self, obj):
         return [s.name for s in obj.specialties.all()]

@@ -65,13 +65,14 @@ class ProviderViewSet(
             )
 
         # 🔹 Facility scoping
-        # ?facility=current → providers in the current user's facility
+        # ?facility=current → providers in the current user's facility (INCLUDING sacked ones)
         # ?facility=none    → independent providers (no facility assigned)
         # ?facility=<id>    → providers for a specific facility id
         facility_param = self.request.query_params.get("facility")
         if facility_param:
             if facility_param == "current":
                 if getattr(u, "facility_id", None):
+                    # ✅ Include sacked providers - they should still show in the list
                     q = q.filter(user__facility_id=u.facility_id)
                 else:
                     q = q.none()
@@ -268,12 +269,11 @@ class ProviderViewSet(
     )
     def remove_from_facility(self, request, pk=None):
         """
-        Facility admin action: remove/sack a provider from the facility.
-        If the provider account was created by this facility (user.created_by_facility=True),
-        this will DELETE the user account.
-
-        Otherwise (e.g. independent providers that joined via application),
-        this will only detach the user from the facility (user.facility=None).
+        ✅ UPDATED: Soft delete - mark provider as sacked instead of deleting.
+        
+        Facility admin action: sack/remove a provider from the facility.
+        This marks the provider as sacked (soft delete) rather than actually deleting them.
+        Sacked providers remain visible in the list but with no available actions.
         """
         prof = self.get_object()
         actor = request.user
@@ -285,47 +285,45 @@ class ProviderViewSet(
             if prof.user.facility_id != actor.facility_id:
                 return Response({"detail": "Not allowed"}, status=403)
 
-        old_facility_id = prof.user.facility_id
-        if old_facility_id is None:
+        if prof.user.facility_id is None:
             return Response({"detail": "Provider is not attached to a facility."}, status=400)
 
-        # Safety: don't allow deleting/removing yourself
+        # Safety: don't allow removing yourself
         if prof.user_id == actor.id:
             return Response({"detail": "You cannot remove your own account."}, status=400)
+        
+        # Check if already sacked
+        if prof.user.is_sacked:
+            return Response({"detail": "Provider is already sacked."}, status=400)
 
-        # If this was a facility-created account, delete it completely.
-        if getattr(prof.user, "created_by_facility", False):
-            deleted_email = prof.user.email
-            deleted_user_id = prof.user_id
-            prof.user.delete()
-            return Response(
-                {
-                    "detail": "Provider account deleted.",
-                    "deleted": True,
-                    "user_id": deleted_user_id,
-                    "email": deleted_email,
-                }
-            )
+        # ✅ Mark as sacked (soft delete) instead of deleting
+        prof.user.is_sacked = True
+        prof.user.sacked_at = timezone.now()
+        prof.user.sacked_by = actor
+        prof.user.is_active = False  # Also deactivate the account
+        prof.user.save(update_fields=["is_sacked", "sacked_at", "sacked_by", "is_active"])
 
-        # Otherwise just detach from facility
-        prof.user.facility_id = None
-        prof.user.save(update_fields=["facility"])
-
+        # Notify provider
         try:
             notify_user(
                 user=prof.user,
                 topic=Topic.ACCOUNT,
                 priority=Priority.HIGH,
-                title="Removed from facility",
-                body="You have been removed from your facility. If you think this is a mistake, please contact the facility admin.",
-                facility_id=old_facility_id,
+                title="Sacked from facility",
+                body="You have been sacked from your facility. If you think this is a mistake, please contact the facility admin.",
+                facility_id=prof.user.facility_id,
                 action_url="/provider",
-                group_key=f"PROVIDER:{prof.id}:REMOVED",
+                group_key=f"PROVIDER:{prof.id}:SACKED",
             )
         except Exception:
             pass
 
-        return Response({"detail": "Provider removed from facility.", "deleted": False, "facility_id": None})
+        return Response({
+            "detail": "Provider has been sacked.",
+            "is_sacked": True,
+            "sacked_at": prof.user.sacked_at,
+            "sacked_by": actor.id
+        })
 
 
 
