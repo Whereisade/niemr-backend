@@ -17,7 +17,13 @@ from .enums import EncounterStage, EncounterStatus, SoapSection, AmendmentType
 from .models import Encounter, EncounterAmendment
 from .permissions import CanViewEncounter, IsStaff
 from .serializers import AmendmentSerializer, EncounterListSerializer, EncounterSerializer
-
+from facilities.permissions_utils import (
+    has_facility_permission,
+    check_create_encounters_permission,
+    check_edit_encounters_permission,
+    check_close_encounters_permission,
+    check_assign_providers_permission,
+)
 
 class EncounterViewSet(
     viewsets.GenericViewSet,
@@ -110,6 +116,7 @@ class EncounterViewSet(
 
         return q
 
+    @check_create_encounters_permission
     def create(self, request, *args, **kwargs):
         self.permission_classes = [IsAuthenticated, IsStaff]
         self.check_permissions(request)
@@ -121,6 +128,7 @@ class EncounterViewSet(
         self.check_object_permissions(request, obj)
         return Response(EncounterSerializer(obj, context={"request": request}).data)
 
+    @check_edit_encounters_permission
     def update(self, request, *args, **kwargs):
         self.permission_classes = [IsAuthenticated, IsStaff]
         self.check_permissions(request)
@@ -284,6 +292,11 @@ class EncounterViewSet(
 
     @action(detail=True, methods=["post"], url_path="assign_provider")
     def assign_provider(self, request, pk=None):
+        if not has_facility_permission(request.user, 'can_assign_providers'):
+            return Response(
+                {"detail": "You do not have permission to assign providers."},
+                status=status.HTTP_403_FORBIDDEN
+            )
         """
         Assign a doctor as the provider for this encounter.
         Can be called by nurses to assign a doctor, or by doctors to assign themselves.
@@ -485,6 +498,11 @@ class EncounterViewSet(
 
     @action(detail=True, methods=["post"])
     def close(self, request, pk=None):
+        if not has_facility_permission(request.user, 'can_close_encounters'):
+            return Response(
+                {"detail": "You do not have permission to close encounters."},
+                status=status.HTTP_403_FORBIDDEN
+            )
         """
         Close the encounter and immediately lock clinical fields.
         Also updates linked appointment status to COMPLETED.

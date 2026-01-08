@@ -8,6 +8,8 @@ from rest_framework.response import Response
 from rest_framework_simplejwt.authentication import JWTAuthentication
 from django.contrib.auth import get_user_model
 from billing.models import Service, Price, Charge
+from accounts.enums import UserRole
+from facilities.permissions_utils import has_facility_permission
 from billing.services.pricing import get_service_price_info, resolve_price
 from .models import Appointment
 from .serializers import (
@@ -428,6 +430,11 @@ class AppointmentViewSet(
 
     @action(detail=True, methods=["POST"], url_path="check_in")
     def check_in(self, request, pk=None):
+        if not has_facility_permission(request.user, 'can_check_in_appointments'):
+            return Response(
+                {"detail": "You do not have permission to check in appointments."},
+                status=status.HTTP_403_FORBIDDEN
+            )
         """
         Check in a patient for their appointment.
         

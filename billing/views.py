@@ -5,8 +5,8 @@ from decimal import Decimal
 from django.db.models import Sum, Q, Count
 from django.db.models.functions import Coalesce
 from django.utils.dateparse import parse_datetime
-
-from rest_framework import viewsets, mixins
+from facilities.permissions_utils import has_facility_permission
+from rest_framework import viewsets, mixins, status
 from rest_framework.decorators import action
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
@@ -132,6 +132,9 @@ class ChargeViewSet(
         q = self.queryset
         u = self.request.user
 
+        if not has_facility_permission(u, 'can_view_billing'):
+            return q.none()
+
         role = (getattr(u, "role", "") or "").upper()
         if role == "PATIENT":
             q = q.filter(patient__user_id=u.id)
@@ -170,6 +173,11 @@ class ChargeViewSet(
 
     # staff-only charge creation
     def create(self, request, *args, **kwargs):
+        if not has_facility_permission(request.user, 'can_create_charges'):
+            return Response(
+                {"detail": "You do not have permission to create charges."},
+                status=status.HTTP_403_FORBIDDEN
+            )
         self.permission_classes = [IsAuthenticated, IsStaff]
         self.check_permissions(request)
         resp = super().create(request, *args, **kwargs)
@@ -405,6 +413,11 @@ class PaymentViewSet(
 
     # staff-only
     def create(self, request, *args, **kwargs):
+        if not has_facility_permission(request.user, 'can_manage_payments'):
+            return Response(
+                {"detail": "You do not have permission to manage payments."},
+                status=status.HTTP_403_FORBIDDEN
+            )
         self.permission_classes = [IsAuthenticated, IsStaff]
         self.check_permissions(request)
         resp = super().create(request, *args, **kwargs)

@@ -8,7 +8,7 @@ from rest_framework.decorators import action
 from rest_framework.permissions import IsAuthenticated, AllowAny
 from rest_framework.response import Response
 from rest_framework_simplejwt.authentication import JWTAuthentication
-
+from facilities.permissions_utils import has_facility_permission
 from accounts.models import User
 from accounts.enums import UserRole
 from patients.models import HMO
@@ -497,6 +497,11 @@ class BedAssignmentViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=["post"])
     def discharge(self, request, pk=None):
+        if not has_facility_permission(request.user, 'can_discharge_patients'):
+            return Response(
+                {"detail": "You do not have permission to discharge patients."},
+                status=status.HTTP_403_FORBIDDEN
+            )
         """
         Mark this bed assignment as discharged (free the bed).
         """

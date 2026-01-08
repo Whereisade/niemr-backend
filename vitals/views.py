@@ -6,7 +6,7 @@ from rest_framework.decorators import action
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework_simplejwt.authentication import JWTAuthentication
-
+from facilities.permissions_utils import has_facility_permission
 from .models import VitalSign
 from .serializers import VitalSignSerializer, VitalSignListSerializer, VitalSummarySerializer
 from .permissions import IsStaff, CanViewVitals
@@ -26,6 +26,11 @@ class VitalSignViewSet(viewsets.GenericViewSet,
 
     # CREATE: staff only
     def create(self, request, *args, **kwargs):
+        if not has_facility_permission(request.user, 'can_record_vitals'):
+            return Response(
+                {"detail": "You do not have permission to record vital signs."},
+                status=status.HTTP_403_FORBIDDEN
+            )
         self.permission_classes = [IsAuthenticated, IsStaff]
         self.check_permissions(request)
         return super().create(request, *args, **kwargs)
