@@ -3,8 +3,8 @@ from decimal import Decimal
 from django.db import models, transaction
 from rest_framework import serializers
 
-from .models import Service, Price, Charge, Payment, PaymentAllocation
-from .enums import ChargeStatus, PaymentMethod
+from .models import Service, Price, Charge, Payment, PaymentAllocation, HMOPrice
+from .enums import ChargeStatus, PaymentMethod, PaymentSource
 from .services.pricing import resolve_price
 
 
@@ -90,6 +90,7 @@ class ChargeReadSerializer(serializers.ModelSerializer):
     service_code = serializers.CharField(source="service.code", read_only=True)
     service_name = serializers.CharField(source="service.name", read_only=True)
     patient_name = serializers.SerializerMethodField()
+    patient_hmo = serializers.SerializerMethodField()
     created_by_name = serializers.SerializerMethodField()
 
     # annotated by ChargeViewSet.get_queryset
@@ -102,6 +103,7 @@ class ChargeReadSerializer(serializers.ModelSerializer):
             "id",
             "patient",
             "patient_name",
+            "patient_hmo",
             "facility",
             "owner",
             "service",
@@ -130,6 +132,19 @@ class ChargeReadSerializer(serializers.ModelSerializer):
         name = f"{getattr(p, 'first_name', '')} {getattr(p, 'last_name', '')}".strip()
         return name or str(p)
 
+    def get_patient_hmo(self, obj):
+        """Return patient's HMO info if they have one"""
+        p = getattr(obj, "patient", None)
+        if not p:
+            return None
+        hmo = getattr(p, "hmo", None)
+        if not hmo:
+            return None
+        return {
+            "id": hmo.id,
+            "name": hmo.name,
+        }
+
     def get_created_by_name(self, obj):
         u = getattr(obj, "created_by", None)
         if not u:
@@ -148,10 +163,17 @@ class PaymentAllocationReadSerializer(serializers.ModelSerializer):
     charge_id = serializers.IntegerField(source="charge.id", read_only=True)
     charge_service_code = serializers.CharField(source="charge.service.code", read_only=True)
     charge_description = serializers.CharField(source="charge.description", read_only=True)
+    patient_name = serializers.SerializerMethodField()
 
     class Meta:
         model = PaymentAllocation
-        fields = ["charge_id", "charge_service_code", "charge_description", "amount"]
+        fields = ["charge_id", "charge_service_code", "charge_description", "patient_name", "amount"]
+
+    def get_patient_name(self, obj):
+        p = getattr(obj.charge, "patient", None)
+        if not p:
+            return ""
+        return f"{p.first_name} {p.last_name}".strip()
 
 
 class PaymentCreateSerializer(serializers.ModelSerializer):
@@ -194,6 +216,7 @@ class PaymentCreateSerializer(serializers.ModelSerializer):
             patient=patient,
             facility=facility,
             owner=owner,
+            payment_source=PaymentSource.PATIENT_DIRECT,
             amount=validated["amount"],
             method=validated.get("method") or PaymentMethod.CASH,
             reference=validated.get("reference", ""),
@@ -272,6 +295,7 @@ class PaymentCreateSerializer(serializers.ModelSerializer):
 
 class PaymentReadSerializer(serializers.ModelSerializer):
     patient_name = serializers.SerializerMethodField()
+    hmo_name = serializers.SerializerMethodField()
     received_by_name = serializers.SerializerMethodField()
     allocations = PaymentAllocationReadSerializer(many=True, read_only=True)
     allocated_total = serializers.SerializerMethodField()
@@ -283,8 +307,11 @@ class PaymentReadSerializer(serializers.ModelSerializer):
             "id",
             "patient",
             "patient_name",
+            "hmo",
+            "hmo_name",
             "facility",
             "owner",
+            "payment_source",
             "amount",
             "method",
             "reference",
@@ -292,6 +319,8 @@ class PaymentReadSerializer(serializers.ModelSerializer):
             "received_by",
             "received_by_name",
             "received_at",
+            "period_start",
+            "period_end",
             "allocations",
             "allocated_total",
             "unallocated_total",
@@ -303,6 +332,12 @@ class PaymentReadSerializer(serializers.ModelSerializer):
             return ""
         name = f"{getattr(p, 'first_name', '')} {getattr(p, 'last_name', '')}".strip()
         return name or str(p)
+
+    def get_hmo_name(self, obj):
+        hmo = getattr(obj, "hmo", None)
+        if not hmo:
+            return ""
+        return hmo.name
 
     def get_received_by_name(self, obj):
         u = getattr(obj, "received_by", None)
@@ -316,3 +351,193 @@ class PaymentReadSerializer(serializers.ModelSerializer):
 
     def get_unallocated_total(self, obj):
         return Decimal(str(obj.amount)) - self.get_allocated_total(obj)
+
+
+# --- HMO Payment Serializers ---
+
+class HMOPaymentCreateSerializer(serializers.Serializer):
+    """
+    Create an HMO bulk payment that can be allocated to multiple patients' charges.
+    """
+    hmo_id = serializers.IntegerField(required=True, help_text="HMO making the payment")
+    amount = serializers.DecimalField(max_digits=12, decimal_places=2, required=True)
+    method = serializers.ChoiceField(choices=PaymentMethod.choices, default=PaymentMethod.TRANSFER)
+    reference = serializers.CharField(max_length=64, required=False, allow_blank=True)
+    note = serializers.CharField(max_length=255, required=False, allow_blank=True)
+    period_start = serializers.DateField(required=False, allow_null=True)
+    period_end = serializers.DateField(required=False, allow_null=True)
+    
+    # Allocation options
+    allocations = serializers.ListField(
+        child=serializers.DictField(),
+        required=False,
+        help_text="Optional list of {charge_id, amount} to allocate to specific charges"
+    )
+    auto_allocate = serializers.BooleanField(
+        default=True,
+        help_text="If true and no allocations provided, auto-allocate to oldest unpaid HMO charges"
+    )
+
+    def validate_amount(self, value):
+        if value <= 0:
+            raise serializers.ValidationError("Amount must be greater than zero")
+        return value
+
+    def validate(self, attrs):
+        # Validate period dates
+        if attrs.get("period_start") and attrs.get("period_end"):
+            if attrs["period_start"] > attrs["period_end"]:
+                raise serializers.ValidationError({
+                    "period_end": "End date must be after start date"
+                })
+        return attrs
+
+    @transaction.atomic
+    def create(self, validated_data):
+        from patients.models import HMO
+        from .services.rollup import recompute_charge_status
+
+        user = self.context["request"].user
+        facility = getattr(user, "facility", None)
+        
+        if not facility:
+            raise serializers.ValidationError("User must belong to a facility to record HMO payments")
+
+        # Get HMO
+        hmo_id = validated_data["hmo_id"]
+        try:
+            hmo = HMO.objects.get(id=hmo_id, facility=facility)
+        except HMO.DoesNotExist:
+            raise serializers.ValidationError({"hmo_id": "HMO not found in your facility"})
+
+        # Create payment
+        payment = Payment.objects.create(
+            hmo=hmo,
+            facility=facility,
+            payment_source=PaymentSource.HMO,
+            amount=validated_data["amount"],
+            method=validated_data.get("method", PaymentMethod.TRANSFER),
+            reference=validated_data.get("reference", ""),
+            note=validated_data.get("note", ""),
+            period_start=validated_data.get("period_start"),
+            period_end=validated_data.get("period_end"),
+            received_by=user,
+        )
+
+        # Handle allocations
+        allocations = validated_data.get("allocations", [])
+        auto_allocate = validated_data.get("auto_allocate", True)
+
+        if allocations:
+            # Manual allocations provided
+            self._allocate_to_charges(payment, allocations, hmo, facility)
+        elif auto_allocate:
+            # Auto-allocate to oldest unpaid charges for this HMO
+            self._auto_allocate_to_hmo_charges(payment, hmo, facility)
+
+        return payment
+
+    def _allocate_to_charges(self, payment, allocations, hmo, facility):
+        """Allocate payment to specific charges"""
+        from .services.rollup import recompute_charge_status
+        
+        remaining = Decimal(str(payment.amount))
+        
+        for item in allocations:
+            try:
+                charge_id = int(item.get("charge_id"))
+                alloc_amount = Decimal(str(item.get("amount")))
+            except (ValueError, TypeError):
+                continue
+                
+            if alloc_amount <= 0:
+                continue
+                
+            try:
+                charge = Charge.objects.select_for_update().get(
+                    id=charge_id,
+                    facility=facility,
+                    patient__hmo=hmo
+                )
+            except Charge.DoesNotExist:
+                continue
+            
+            # Calculate outstanding amount
+            already_paid = charge.allocations.aggregate(
+                total=models.Sum("amount")
+            )["total"] or Decimal("0.00")
+            outstanding = Decimal(str(charge.amount)) - already_paid
+            
+            if outstanding <= 0:
+                recompute_charge_status(charge)
+                continue
+            
+            # Allocate up to outstanding amount
+            take = min(alloc_amount, outstanding, remaining)
+            
+            if take > 0:
+                PaymentAllocation.objects.create(
+                    payment=payment,
+                    charge=charge,
+                    amount=take
+                )
+                remaining -= take
+                recompute_charge_status(charge)
+            
+            if remaining <= 0:
+                break
+
+    def _auto_allocate_to_hmo_charges(self, payment, hmo, facility):
+        """Auto-allocate payment to oldest unpaid charges for this HMO"""
+        from .services.rollup import recompute_charge_status
+        
+        remaining = Decimal(str(payment.amount))
+        
+        # Get unpaid/partially paid charges for patients under this HMO
+        charges = (
+            Charge.objects
+            .select_for_update()
+            .filter(
+                facility=facility,
+                patient__hmo=hmo,
+                patient__hmo__isnull=False,
+            )
+            .exclude(status=ChargeStatus.PAID)
+            .exclude(status=ChargeStatus.VOID)
+            .order_by("created_at", "id")
+        )
+        
+        for charge in charges:
+            if remaining <= 0:
+                break
+            
+            # Calculate outstanding
+            already_paid = charge.allocations.aggregate(
+                total=models.Sum("amount")
+            )["total"] or Decimal("0.00")
+            outstanding = Decimal(str(charge.amount)) - already_paid
+            
+            if outstanding <= 0:
+                recompute_charge_status(charge)
+                continue
+            
+            # Allocate what we can
+            take = min(remaining, outstanding)
+            
+            PaymentAllocation.objects.create(
+                payment=payment,
+                charge=charge,
+                amount=take
+            )
+            
+            remaining -= take
+            recompute_charge_status(charge)
+
+
+class HMOOutstandingChargesSerializer(serializers.Serializer):
+    """Summary of outstanding charges for an HMO"""
+    total_charges = serializers.DecimalField(max_digits=12, decimal_places=2)
+    total_paid = serializers.DecimalField(max_digits=12, decimal_places=2)
+    total_outstanding = serializers.DecimalField(max_digits=12, decimal_places=2)
+    patient_count = serializers.IntegerField()
+    charge_count = serializers.IntegerField()

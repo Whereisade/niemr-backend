@@ -6,8 +6,8 @@ from django.db import models
 from django.db.models import Q
 
 from facilities.models import Facility
-from patients.models import Patient
-from .enums import ChargeStatus, PaymentMethod
+from patients.models import Patient, HMO
+from .enums import ChargeStatus, PaymentMethod, PaymentSource
 
 class Service(models.Model):
     """
@@ -100,17 +100,73 @@ class Charge(models.Model):
 
 class Payment(models.Model):
     """
-    A payment (or credit) applied to a patient account; linked to one or more charges via PaymentAllocation.
+    A payment (or credit) applied to patient or HMO account; linked to one or more charges via PaymentAllocation.
+    
+    Payment Sources:
+    - PATIENT_DIRECT: Individual patient paying directly for their own charges
+    - HMO: Health Maintenance Organization paying for multiple patients' charges
+    - INSURANCE: Insurance company payment
+    - CORPORATE: Corporate/employer payment
+    
+    For HMO payments:
+    - patient is NULL
+    - hmo is set
+    - payment_source is HMO
+    - Can be allocated to charges from multiple patients under that HMO
+    
+    For patient direct payments:
+    - patient is set
+    - hmo is NULL (or matches patient's HMO if they have one)
+    - payment_source is PATIENT_DIRECT
     """
-    patient  = models.ForeignKey(Patient, on_delete=models.CASCADE, related_name="payments")
+    # Who is paying
+    patient  = models.ForeignKey(
+        Patient, 
+        null=True,  # NULL for HMO bulk payments
+        blank=True,
+        on_delete=models.CASCADE, 
+        related_name="payments"
+    )
+    hmo = models.ForeignKey(
+        HMO,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="payments",
+        help_text="Set for HMO bulk payments"
+    )
+    
+    # Scope
     facility = models.ForeignKey(Facility, null=True, blank=True, on_delete=models.CASCADE, related_name="payments")
     owner = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.CASCADE, related_name="payments_owned")
+    
+    # Payment details
+    payment_source = models.CharField(
+        max_length=32,
+        choices=PaymentSource.choices,
+        default=PaymentSource.PATIENT_DIRECT,
+        help_text="Source of the payment"
+    )
     amount   = models.DecimalField(max_digits=12, decimal_places=2, validators=[MinValueValidator(0.01)])
     method   = models.CharField(max_length=16, choices=PaymentMethod.choices, default=PaymentMethod.CASH)
-    reference = models.CharField(max_length=64, blank=True)  # receipt, POS ref, bank ref, etc.
+    reference = models.CharField(max_length=64, blank=True, help_text="Receipt number, transaction ID, etc.")
     note      = models.CharField(max_length=255, blank=True)
-    received_by = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, on_delete=models.SET_NULL)
+    
+    # Metadata
+    received_by = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, on_delete=models.SET_NULL, related_name="payments_received")
     received_at = models.DateTimeField(auto_now_add=True)
+    
+    # Period for HMO payments (optional)
+    period_start = models.DateField(
+        null=True,
+        blank=True,
+        help_text="Start of billing period for HMO bulk payments"
+    )
+    period_end = models.DateField(
+        null=True,
+        blank=True,
+        help_text="End of billing period for HMO bulk payments"
+    )
 
     class Meta:
         ordering = ["-received_at","-id"]
@@ -122,6 +178,17 @@ class Payment(models.Model):
                     | (Q(facility__isnull=True) & Q(owner__isnull=False))
                 ),
             ),
+            # Ensure either patient or HMO is set (but not necessarily both)
+            models.CheckConstraint(
+                name="billing_payment_patient_or_hmo",
+                check=(
+                    Q(patient__isnull=False) | Q(hmo__isnull=False)
+                ),
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["hmo", "-received_at"]),
+            models.Index(fields=["payment_source", "-received_at"]),
         ]
 
 class PaymentAllocation(models.Model):
@@ -134,6 +201,7 @@ class PaymentAllocation(models.Model):
 
     class Meta:
         unique_together = ("payment","charge")
+
 class HMOPrice(models.Model):
     """
     Facility + HMO specific override price for a service code.
@@ -171,6 +239,3 @@ class HMOPrice(models.Model):
 
     def __str__(self):
         return f"{self.hmo_id}:{self.service.code} {self.amount} {self.currency}"
-
-
-

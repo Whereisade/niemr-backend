@@ -1,10 +1,11 @@
 import csv
 import io
 from decimal import Decimal
+from datetime import date
 
 from django.db.models import Sum, Q, Count
 from django.db.models.functions import Coalesce
-from django.utils.dateparse import parse_datetime
+from django.utils.dateparse import parse_datetime, parse_date
 from facilities.permissions_utils import has_facility_permission
 from rest_framework import viewsets, mixins, status
 from rest_framework.decorators import action
@@ -20,9 +21,11 @@ from .serializers import (
     ChargeReadSerializer,
     PaymentCreateSerializer,
     PaymentReadSerializer,
+    HMOPaymentCreateSerializer,
+    HMOOutstandingChargesSerializer,
 )
 from .permissions import IsStaff
-from .enums import ChargeStatus, PaymentMethod
+from .enums import ChargeStatus, PaymentMethod, PaymentSource
 
 from notifications.services.notify import notify_patient
 from notifications.enums import Topic, Priority
@@ -119,7 +122,7 @@ class ChargeViewSet(
     mixins.RetrieveModelMixin,
     mixins.ListModelMixin,
 ):
-    queryset = Charge.objects.select_related("patient", "facility", "service", "created_by")
+    queryset = Charge.objects.select_related("patient", "patient__hmo", "facility", "service", "created_by")
     authentication_classes = [JWTAuthentication]
     permission_classes = [IsAuthenticated]
 
@@ -146,6 +149,7 @@ class ChargeViewSet(
 
         # filters
         patient_id = self.request.query_params.get("patient")
+        hmo_id = self.request.query_params.get("hmo")
         status_ = self.request.query_params.get("status")
         start = self.request.query_params.get("start")
         end = self.request.query_params.get("end")
@@ -153,6 +157,8 @@ class ChargeViewSet(
 
         if patient_id:
             q = q.filter(patient_id=patient_id)
+        if hmo_id:
+            q = q.filter(patient__hmo_id=hmo_id)
         if status_:
             q = q.filter(status=status_)
         if start:
@@ -363,6 +369,102 @@ class ChargeViewSet(
             }
         )
 
+    @action(detail=False, methods=["get"], permission_classes=[IsAuthenticated, IsStaff], url_path="hmo-outstanding")
+    def hmo_outstanding(self, request):
+        """
+        Get outstanding charges for an HMO.
+        
+        Query params:
+          - hmo: HMO ID (required)
+          - start: Start date filter (optional)
+          - end: End date filter (optional)
+        
+        Returns summary of charges and detailed charge list.
+        """
+        u = request.user
+        facility_id = getattr(u, "facility_id", None)
+        
+        if not facility_id:
+            return Response(
+                {"detail": "User must belong to a facility"},
+                status=status.HTTP_403_FORBIDDEN
+            )
+        
+        hmo_id = request.query_params.get("hmo")
+        if not hmo_id:
+            return Response(
+                {"detail": "hmo parameter is required"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Base queryset: charges for patients under this HMO
+        charges_qs = (
+            Charge.objects
+            .select_related("patient", "service")
+            .filter(
+                facility_id=facility_id,
+                patient__hmo_id=hmo_id,
+            )
+            .exclude(status=ChargeStatus.VOID)
+        )
+        
+        # Date filters
+        start = request.query_params.get("start")
+        end = request.query_params.get("end")
+        if start:
+            start_date = parse_date(start) or parse_datetime(start)
+            if start_date:
+                charges_qs = charges_qs.filter(created_at__gte=start_date)
+        if end:
+            end_date = parse_date(end) or parse_datetime(end)
+            if end_date:
+                charges_qs = charges_qs.filter(created_at__lte=end_date)
+        
+        # Annotate with allocated amounts
+        charges_qs = charges_qs.annotate(
+            allocated_total=Coalesce(Sum("allocations__amount"), Decimal("0.00"))
+        )
+        
+        # Calculate summary
+        summary = charges_qs.aggregate(
+            total_charges=Coalesce(Sum("amount"), Decimal("0.00")),
+            total_paid=Coalesce(Sum("allocations__amount"), Decimal("0.00")),
+            patient_count=Count("patient_id", distinct=True),
+            charge_count=Count("id"),
+        )
+        
+        total_outstanding = Decimal(summary["total_charges"]) - Decimal(summary["total_paid"])
+        
+        # Prepare detailed charges
+        charges_data = []
+        for charge in charges_qs[:100]:  # Limit to 100 for performance
+            outstanding = Decimal(str(charge.amount)) - Decimal(str(charge.allocated_total))
+            if outstanding > 0:  # Only include unpaid/partially paid
+                charges_data.append({
+                    "id": charge.id,
+                    "patient_id": charge.patient_id,
+                    "patient_name": f"{charge.patient.first_name} {charge.patient.last_name}",
+                    "service_code": charge.service.code,
+                    "service_name": charge.service.name,
+                    "description": charge.description,
+                    "amount": charge.amount,
+                    "allocated": charge.allocated_total,
+                    "outstanding": outstanding,
+                    "status": charge.status,
+                    "created_at": charge.created_at,
+                })
+        
+        return Response({
+            "summary": {
+                "total_charges": summary["total_charges"],
+                "total_paid": summary["total_paid"],
+                "total_outstanding": total_outstanding,
+                "patient_count": summary["patient_count"],
+                "charge_count": summary["charge_count"],
+            },
+            "charges": charges_data,
+        })
+
 
 # --- Payments ---
 class PaymentViewSet(
@@ -371,13 +473,15 @@ class PaymentViewSet(
     mixins.RetrieveModelMixin,
     mixins.ListModelMixin,
 ):
-    queryset = Payment.objects.select_related("patient", "facility", "received_by")
+    queryset = Payment.objects.select_related("patient", "hmo", "facility", "received_by")
     authentication_classes = [JWTAuthentication]
     permission_classes = [IsAuthenticated]
 
     def get_serializer_class(self):
         if self.action in ("create",):
             return PaymentCreateSerializer
+        elif self.action in ("record_hmo_payment",):
+            return HMOPaymentCreateSerializer
         return PaymentReadSerializer
 
     def get_queryset(self):
@@ -392,7 +496,10 @@ class PaymentViewSet(
         elif role not in {"ADMIN", "SUPER_ADMIN"}:
             q = q.filter(owner=u, facility__isnull=True)
 
+        # Filters
         patient_id = self.request.query_params.get("patient")
+        hmo_id = self.request.query_params.get("hmo")
+        payment_source = self.request.query_params.get("payment_source")
         start = self.request.query_params.get("start")
         end = self.request.query_params.get("end")
         s = self.request.query_params.get("s")
@@ -400,6 +507,10 @@ class PaymentViewSet(
 
         if patient_id:
             q = q.filter(patient_id=patient_id)
+        if hmo_id:
+            q = q.filter(hmo_id=hmo_id)
+        if payment_source:
+            q = q.filter(payment_source=payment_source)
         if method:
             q = q.filter(method=method)
         if start:
@@ -445,3 +556,52 @@ class PaymentViewSet(
     @action(detail=False, methods=["get"])
     def methods(self, request):
         return Response([m for m, _ in PaymentMethod.choices])
+    
+    @action(detail=False, methods=["get"])
+    def sources(self, request):
+        """Return available payment sources"""
+        return Response([s for s, _ in PaymentSource.choices])
+
+    @action(
+        detail=False, 
+        methods=["post"], 
+        permission_classes=[IsAuthenticated, IsStaff],
+        url_path="hmo-payment"
+    )
+    def record_hmo_payment(self, request):
+        """
+        Record a bulk payment from an HMO.
+        
+        POST /api/billing/payments/hmo-payment/
+        
+        Body:
+        {
+            "hmo_id": 123,
+            "amount": "50000.00",
+            "method": "TRANSFER",
+            "reference": "HMO-2025-001",
+            "note": "January 2025 settlement",
+            "period_start": "2025-01-01",
+            "period_end": "2025-01-31",
+            "allocations": [  // Optional - manual allocations
+                {"charge_id": 1, "amount": "5000.00"},
+                {"charge_id": 2, "amount": "3000.00"}
+            ],
+            "auto_allocate": true  // If true and no allocations, auto-allocate to oldest charges
+        }
+        
+        Returns the created payment with allocations.
+        """
+        if not has_facility_permission(request.user, 'can_manage_payments'):
+            return Response(
+                {"detail": "You do not have permission to manage payments."},
+                status=status.HTTP_403_FORBIDDEN
+            )
+        
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        payment = serializer.save()
+        
+        # Return full payment details
+        output_serializer = PaymentReadSerializer(payment)
+        return Response(output_serializer.data, status=status.HTTP_201_CREATED)

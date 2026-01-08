@@ -21,8 +21,4 @@ urlpatterns = [
     path("api/audit/", include("audit.urls")),
     path("api/reports/", include("reports.urls")),
     path("api/emails/", include("emails.urls")),
-]
-
-# In production, media is served by Supabase Storage (S3 protocol), not Django.
-if settings.DEBUG:
-    urlpatterns += static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT)
+] + static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT)

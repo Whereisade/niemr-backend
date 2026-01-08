@@ -14,3 +14,13 @@ class PaymentMethod(models.TextChoices):
     CHEQUE = "CHEQUE","Cheque"
     INSURANCE = "INSURANCE","Insurance"
     OTHER = "OTHER","Other"
+
+class PaymentSource(models.TextChoices):
+    """
+    Source of payment - who is paying the facility.
+    """
+    PATIENT_DIRECT = "PATIENT_DIRECT", "Patient Direct Payment"
+    HMO = "HMO", "HMO Payment"
+    INSURANCE = "INSURANCE", "Insurance Payment"
+    CORPORATE = "CORPORATE", "Corporate Payment"
+    OTHER = "OTHER", "Other"
