@@ -262,6 +262,9 @@ class LabOrderCreateSerializer(serializers.ModelSerializer):
             from billing.models import Charge, Service, Price
             from billing.services.pricing import resolve_price
             from decimal import Decimal
+            import logging
+            
+            logger = logging.getLogger(__name__)
 
             # Avoid duplicates (idempotent-ish)
             if not Charge.objects.filter(lab_order_id=order.id).exists():
@@ -276,6 +279,9 @@ class LabOrderCreateSerializer(serializers.ModelSerializer):
                         billing_owner = user
 
                 if billing_facility or billing_owner:
+                    # 🔥 FIX: Get patient's HMO for pricing resolution
+                    patient_hmo = getattr(patient, "hmo", None)
+                    
                     for it in order.items.select_related("test").all():
                         if not getattr(it, "test_id", None):
                             continue
@@ -309,12 +315,32 @@ class LabOrderCreateSerializer(serializers.ModelSerializer):
                                     service=service,
                                     defaults={"amount": getattr(test, "price", 0) or 0, "currency": "NGN"},
                                 )
-                        except Exception:
-                            pass
+                        except Exception as e:
+                            logger.warning(f"Failed to create price override for service {code}: {e}")
 
-                        unit_price = resolve_price(service=service, facility=billing_facility, owner=billing_owner, patient=order.patient)
+                        # 🔥 FIX: Pass patient's HMO to resolve_price
+                        unit_price = resolve_price(
+                            service=service, 
+                            facility=billing_facility, 
+                            owner=billing_owner, 
+                            hmo=patient_hmo
+                        )
+                        
+                        # 🔥 FIX: Handle None pricing gracefully - use test price as fallback
+                        if unit_price is None:
+                            unit_price = getattr(test, "price", 0) or Decimal("0.00")
+                            logger.warning(
+                                f"No price configured for lab test {test.code} "
+                                f"(facility={billing_facility}, hmo={patient_hmo}). "
+                                f"Using test default price: {unit_price}"
+                            )
+                        
+                        # Convert to Decimal safely
+                        unit_price = Decimal(str(unit_price)) if unit_price is not None else Decimal("0.00")
                         qty = 1
-                        amount = (Decimal(str(unit_price)) * Decimal(qty)).quantize(Decimal("0.01"))
+                        amount = (unit_price * Decimal(qty)).quantize(Decimal("0.01"))
+                        
+                        # Create charge
                         Charge.objects.create(
                             patient=order.patient,
                             facility=billing_facility,
@@ -328,9 +354,16 @@ class LabOrderCreateSerializer(serializers.ModelSerializer):
                             encounter_id=order.encounter_id,
                             lab_order_id=order.id,
                         )
-        except Exception:
-            # Billing is best-effort; lab workflow should still complete.
-            pass
+                        
+                        logger.info(
+                            f"Created billing charge for lab order {order.id}, test {test.code}: "
+                            f"₦{amount} (patient HMO: {patient_hmo.name if patient_hmo else 'None'})"
+                        )
+        except Exception as e:
+            # Log the error but don't fail the lab order creation
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.error(f"Failed to create billing charges for lab order {order.id}: {e}", exc_info=True)
 
         # Link to encounter (append order.id to encounter.lab_order_ids)
         if order.encounter_id:
