@@ -626,7 +626,16 @@ class DispenseSerializer(serializers.Serializer):
                 except Exception:
                     pass
 
-                unit_price = resolve_price(service=service, facility=billing_facility, owner=billing_owner, patient=rx.patient)
+                patient_hmo = None
+                if rx.patient:
+                    patient_hmo = getattr(rx.patient, 'hmo', None)
+
+                unit_price = resolve_price(
+                    service=service, 
+                    facility=billing_facility, 
+                    owner=billing_owner,
+                    hmo=patient_hmo
+                )
                 amount = (unit_price or Decimal("0")) * Decimal(take)
 
                 charge = Charge.objects.create(
