@@ -17,7 +17,7 @@ phone_validator = RegexValidator(
 
 class HMO(models.Model):
     """
-    Facility-scoped HMO.
+    Facility-scoped HMO with enhanced contact details.
 
     Facilities (via their SUPER_ADMIN user) create HMOs. Patients can then be
     attached to an HMO within the same facility. Pricing overrides for a given
@@ -30,9 +30,61 @@ class HMO(models.Model):
         null=True,
         blank=True,
     )
+    
+    # Basic Information
     name = models.CharField(max_length=255)
     is_active = models.BooleanField(default=True)
+    
+    # NHIS Registration
+    nhis_number = models.CharField(
+        max_length=120,
+        blank=True,
+        default='',
+        help_text='NHIS registration number'
+    )
+    
+    # Contact Information
+    email = models.EmailField(
+        max_length=254,
+        blank=True,
+        help_text='HMO primary email address'
+    )
+    
+    # Multiple addresses and phone numbers (stored as JSON)
+    addresses = models.JSONField(
+        default=list,
+        blank=True,
+        help_text='List of HMO office addresses'
+    )
+    
+    contact_numbers = models.JSONField(
+        default=list,
+        blank=True,
+        help_text='List of contact phone numbers'
+    )
+    
+    # Contact Person Details
+    contact_person_name = models.CharField(
+        max_length=255,
+        blank=True,
+        help_text='Name of HMO contact person'
+    )
+    
+    contact_person_phone = models.CharField(
+        max_length=20,
+        blank=True,
+        help_text='Contact person phone number'
+    )
+    
+    contact_person_email = models.EmailField(
+        max_length=254,
+        blank=True,
+        help_text='Contact person email address'
+    )
+    
+    # Timestamps
     created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
         ordering = ["name"]
@@ -47,6 +99,19 @@ class HMO(models.Model):
         if self.facility_id:
             return f"{self.name} ({self.facility.name})"
         return self.name
+    
+    def get_primary_address(self):
+        """Return the first address or empty string"""
+        if self.addresses and len(self.addresses) > 0:
+            return self.addresses[0]
+        return ""
+    
+    def get_primary_contact(self):
+        """Return the first contact number or empty string"""
+        if self.contact_numbers and len(self.contact_numbers) > 0:
+            return self.contact_numbers[0]
+        return ""
+
 def patient_document_upload_path(instance, filename):
     # e.g. patient_documents/<patient_id>/<uuid>_<filename>
     return f"patient_documents/{instance.patient_id}/{uuid.uuid4()}_{filename}"

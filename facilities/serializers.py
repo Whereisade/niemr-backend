@@ -554,8 +554,65 @@ class FacilityAdminSignupSerializer(serializers.Serializer):
 class FacilityHMOSerializer(serializers.ModelSerializer):
     class Meta:
         model = HMO
-        fields = ["id", "name", "is_active", "created_at"]
-        read_only_fields = ["id", "created_at"]
+        fields = [
+            "id",
+            "name",
+            "email",
+            "nhis_number",
+            "addresses",
+            "contact_numbers",
+            "contact_person_name",
+            "contact_person_phone",
+            "contact_person_email",
+            "is_active",
+            "created_at",
+            "updated_at",
+        ]
+        read_only_fields = ["id", "created_at", "updated_at"]
+
+    def validate_nhis_number(self, value):
+        """Validate NHIS number is not empty"""
+        if not value or not value.strip():
+            raise serializers.ValidationError("NHIS number is required")
+        return value.strip()
+
+    def validate_addresses(self, value):
+        """Ensure addresses is a list and filter empty values"""
+        if value is None:
+            return []
+        if not isinstance(value, list):
+            raise serializers.ValidationError("Addresses must be a list")
+        # Filter out empty strings and strip whitespace
+        cleaned = [addr.strip() for addr in value if addr and addr.strip()]
+        return cleaned
+
+    def validate_contact_numbers(self, value):
+        """Ensure contact_numbers is a list and filter empty values"""
+        if value is None:
+            return []
+        if not isinstance(value, list):
+            raise serializers.ValidationError("Contact numbers must be a list")
+        # Filter out empty strings and strip whitespace
+        cleaned = [num.strip() for num in value if num and num.strip()]
+        return cleaned
+
+    def validate(self, attrs):
+        """Cross-field validation"""
+        # Ensure at least one address is provided
+        addresses = attrs.get('addresses', [])
+        if not addresses or len(addresses) == 0:
+            raise serializers.ValidationError({
+                "addresses": "At least one address is required"
+            })
+        
+        # Ensure at least one contact number is provided
+        contact_numbers = attrs.get('contact_numbers', [])
+        if not contact_numbers or len(contact_numbers) == 0:
+            raise serializers.ValidationError({
+                "contact_numbers": "At least one contact number is required"
+            })
+        
+        return attrs
 
 
 class FacilityRolePermissionSerializer(serializers.ModelSerializer):

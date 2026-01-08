@@ -9,9 +9,36 @@ from rest_framework import serializers as rf_serializers
 
 
 class HMOSerializer(serializers.ModelSerializer):
+    """
+    Read-only serializer for HMO details in patient serializers.
+    Shows full HMO information including contact details.
+    """
+    primary_address = serializers.SerializerMethodField()
+    primary_contact = serializers.SerializerMethodField()
+    
     class Meta:
         model = HMO
-        fields = ["id","name"]
+        fields = [
+            "id",
+            "name",
+            "email",
+            "nhis_number",
+            "addresses",
+            "contact_numbers",
+            "primary_address",
+            "primary_contact",
+            "contact_person_name",
+            "contact_person_phone",
+            "contact_person_email",
+        ]
+    
+    def get_primary_address(self, obj):
+        """Get the first address from the list"""
+        return obj.get_primary_address()
+    
+    def get_primary_contact(self, obj):
+        """Get the first contact number from the list"""
+        return obj.get_primary_contact()
 
 
 class PatientSerializer(serializers.ModelSerializer):
