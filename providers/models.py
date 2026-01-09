@@ -29,6 +29,13 @@ class ProviderProfile(models.Model):
 
     years_experience = models.PositiveIntegerField(default=0, validators=[MinValueValidator(0)])
     bio = models.TextField(blank=True)
+    
+    # Business information
+    business_name = models.CharField(
+        max_length=255,
+        blank=True,
+        help_text="Business/practice name for independent providers (e.g., 'City Medical Lab', 'Downtown Pharmacy')"
+    )
 
     # Contact & address
     phone = models.CharField(max_length=20, validators=[phone_validator], blank=True)
@@ -49,6 +56,33 @@ class ProviderProfile(models.Model):
     # Audit
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
+
+    def get_display_name(self):
+        """
+        Get the display name for this provider.
+        Priority: business_name > full_name > email
+        """
+        if self.business_name:
+            return self.business_name.strip()
+        
+        user = self.user
+        if user:
+            # Try to get full name
+            if hasattr(user, "get_full_name"):
+                full_name = (user.get_full_name() or "").strip()
+            else:
+                first = getattr(user, "first_name", "") or ""
+                last = getattr(user, "last_name", "") or ""
+                full_name = f"{first} {last}".strip()
+            
+            if full_name:
+                return full_name
+            
+            # Fallback to email
+            if hasattr(user, "email"):
+                return user.email
+        
+        return f"Provider #{self.id}"
 
     def approve(self, by_user):
         self.verification_status = VerificationStatus.APPROVED

@@ -439,11 +439,26 @@ class LabOrderReadSerializer(serializers.ModelSerializer):
         return getattr(h, "name", None) if h else None
 
     def get_outsourced_to_name(self, obj):
+        """
+        Get the display name for outsourced lab provider.
+        Priority: business_name (from provider profile) > full_name > email
+        """
         u = getattr(obj, "outsourced_to", None)
         if not u:
             return None
+        
+        # Try to get provider profile for business name
+        try:
+            profile = getattr(u, "provider_profile", None)
+            if profile:
+                return profile.get_display_name()
+        except Exception:
+            pass
+        
+        # Fallback to user name if no profile or no business name
         full = (u.get_full_name() or "").strip()
         return full or u.email
+
     
     def get_patient_hmo_relationship_status(self, obj):
         """Get the HMO relationship status for color coding."""

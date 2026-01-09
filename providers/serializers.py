@@ -56,6 +56,8 @@ class ProviderProfileSerializer(serializers.ModelSerializer):
         source="user.facility.name",
         read_only=True,
     )
+    # 🆕 Display name with business name priority
+    display_name = serializers.SerializerMethodField(read_only=True)
     
     # 🆕 NEW: Sacked status fields
     is_sacked = serializers.BooleanField(source="user.is_sacked", read_only=True)
@@ -84,6 +86,13 @@ class ProviderProfileSerializer(serializers.ModelSerializer):
     def get_role(self, obj):
         # Map provider_type to something the UI can show as "Role"
         return obj.provider_type
+
+    def get_display_name(self, obj):
+        """
+        Get the display name for this provider.
+        Priority: business_name > full_name > email
+        """
+        return obj.get_display_name()
     
     def get_sacked_by_name(self, obj):
         """Return the name of the admin who sacked this provider"""
@@ -174,6 +183,13 @@ class SelfRegisterProviderSerializer(serializers.Serializer):
     years_experience = serializers.IntegerField(required=False, min_value=0)
     bio = serializers.CharField(required=False, allow_blank=True)
     consultation_fee = serializers.DecimalField(max_digits=12, decimal_places=2, required=False)
+    # Business information
+    business_name = serializers.CharField(
+        max_length=255,
+        required=False,
+        allow_blank=True,
+        help_text="Business/practice name (e.g., 'City Medical Lab', 'Downtown Pharmacy')"
+    )
 
     # Nested documents
     documents = ProviderDocumentSerializer(many=True, required=False)
@@ -232,6 +248,7 @@ class SelfRegisterProviderSerializer(serializers.Serializer):
             lga=validated.get("lga", ""),
             address=validated.get("address", ""),
             consultation_fee=validated.get("consultation_fee") or 0,
+            business_name=validated.get("business_name", ""),
             verification_status=VerificationStatus.PENDING,
         )
 
@@ -296,6 +313,13 @@ class FacilityProviderCreateSerializer(serializers.Serializer):
     consultation_fee = serializers.DecimalField(
         max_digits=12, decimal_places=2, required=False, default=0
     )
+    business_name = serializers.CharField(
+        max_length=255,
+        required=False,
+        allow_blank=True,
+        default="",
+        help_text="Business/practice name for the provider"
+    )
 
     def validate_email(self, value):
         if User.objects.filter(email__iexact=value).exists():
@@ -352,6 +376,7 @@ class FacilityProviderCreateSerializer(serializers.Serializer):
             years_experience=validated_data.get("years_experience", 0),
             bio=validated_data.get("bio", ""),
             phone=validated_data.get("phone", ""),
+            business_name=validated_data.get("business_name", ""),
             consultation_fee=validated_data.get("consultation_fee", 0),
             verification_status=VerificationStatus.APPROVED,
             verified_by=request.user,

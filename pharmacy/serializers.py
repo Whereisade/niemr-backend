@@ -466,10 +466,23 @@ class PrescriptionReadSerializer(serializers.ModelSerializer):
         return full or getattr(u, "email", None) or f"User #{u.id}"
 
     def get_outsourced_to_name(self, obj):
+        """
+        Get the display name for outsourced pharmacy provider.
+        Priority: business_name (from provider profile) > full_name > email
+        """
         u = getattr(obj, "outsourced_to", None)
         if not u:
             return None
-        # Try get_full_name if available, otherwise construct from fields
+        
+        # Try to get provider profile for business name
+        try:
+            profile = getattr(u, "provider_profile", None)
+            if profile:
+                return profile.get_display_name()
+        except Exception:
+            pass
+        
+        # Fallback to user name if no profile or no business name
         if hasattr(u, "get_full_name"):
             full = (u.get_full_name() or "").strip()
         else:
