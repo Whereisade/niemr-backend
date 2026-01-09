@@ -389,6 +389,7 @@ class PrescriptionReadSerializer(serializers.ModelSerializer):
     patient_insurance_status = serializers.SerializerMethodField()
     patient_hmo_id = serializers.SerializerMethodField()
     patient_hmo_name = serializers.SerializerMethodField()
+    patient_hmo_relationship_status = serializers.SerializerMethodField()
     facility_name = serializers.SerializerMethodField()
     prescribed_by_name = serializers.SerializerMethodField()
 
@@ -401,6 +402,7 @@ class PrescriptionReadSerializer(serializers.ModelSerializer):
             "patient_insurance_status",
             "patient_hmo_id",
             "patient_hmo_name",
+            "patient_hmo_relationship_status",
             "facility",
             "facility_name",
             "prescribed_by",
@@ -437,6 +439,12 @@ class PrescriptionReadSerializer(serializers.ModelSerializer):
         p = getattr(obj, "patient", None)
         h = getattr(p, "hmo", None) if p else None
         return getattr(h, "name", None) if h else None
+    
+    def get_patient_hmo_relationship_status(self, obj):
+        """Get the HMO relationship status for color coding."""
+        p = getattr(obj, "patient", None)
+        h = getattr(p, "hmo", None) if p else None
+        return getattr(h, "relationship_status", None) if h else None
 
     def get_facility_name(self, obj):
         f = getattr(obj, "facility", None)

@@ -391,6 +391,7 @@ class LabOrderReadSerializer(serializers.ModelSerializer):
     patient_insurance_status = serializers.SerializerMethodField(read_only=True)
     patient_hmo_id = serializers.SerializerMethodField(read_only=True)
     patient_hmo_name = serializers.SerializerMethodField(read_only=True)
+    patient_hmo_relationship_status = serializers.SerializerMethodField(read_only=True)
 
     class Meta:
         model = LabOrder
@@ -401,6 +402,7 @@ class LabOrderReadSerializer(serializers.ModelSerializer):
             "patient_insurance_status",
             "patient_hmo_id",
             "patient_hmo_name",
+            "patient_hmo_relationship_status",
             "facility",
             "ordered_by",
             "priority",
@@ -442,6 +444,12 @@ class LabOrderReadSerializer(serializers.ModelSerializer):
             return None
         full = (u.get_full_name() or "").strip()
         return full or u.email
+    
+    def get_patient_hmo_relationship_status(self, obj):
+        """Get the HMO relationship status for color coding."""
+        p = getattr(obj, "patient", None)
+        h = getattr(p, "hmo", None) if p else None
+        return getattr(h, "relationship_status", None) if h else None
 
 
 class ResultEntrySerializer(serializers.Serializer):
