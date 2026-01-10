@@ -668,3 +668,48 @@ class AllergyViewSet(viewsets.ModelViewSet):
         instance = self.get_object()
         self.perform_destroy(instance)
         return Response(status=status.HTTP_204_NO_CONTENT)
+    
+@action(detail=True, methods=["post"], url_path="detach-hmo", permission_classes=[IsAuthenticated])
+def detach_hmo(self, request, pk=None):
+    """Allow patients to detach themselves from their HMO (self-service)."""
+    patient = self.get_object()
+    user = request.user
+
+    # Patients can only detach their own profile
+    if user.role == UserRole.PATIENT:
+        patient_profile = getattr(user, "patient_profile", None)
+        if not patient_profile or patient.id != patient_profile.id:
+            return Response(
+                {"detail": "You can only detach your own HMO coverage."},
+                status=403
+            )
+    # Staff can detach for any patient in their facility
+    elif user.facility_id and patient.facility_id != user.facility_id:
+        return Response(
+            {"detail": "Patient must belong to your facility."},
+            status=403
+        )
+    
+    # Check if patient has HMO to detach
+    if not patient.hmo:
+        return Response(
+            {"detail": "Patient does not have active HMO coverage."},
+            status=400
+        )
+
+    patient.hmo = None
+    patient.insurance_status = InsuranceStatus.SELF_PAY
+    patient.insurance_number = ""
+    patient.insurance_expiry = None
+    patient.insurance_notes = ""
+    
+    patient.save(update_fields=[
+        "hmo", 
+        "insurance_status",
+        "insurance_number",
+        "insurance_expiry",
+        "insurance_notes",
+        "updated_at"
+    ])
+    
+    return Response(PatientSerializer(patient, context={"request": request}).data)
