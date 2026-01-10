@@ -34,8 +34,11 @@ class PatientViewSet(viewsets.GenericViewSet,
         return PatientSerializer
 
     def get_permissions(self):
-        if self.action in ("list","create"):
+        if self.action == "create":
             return [IsAuthenticated(), IsStaff()]
+        elif self.action == "list":
+            # Allow both staff AND patients to list
+            return [IsAuthenticated()]
         elif self.action in ("retrieve","update","partial_update"):
             return [IsAuthenticated(), IsSelfOrFacilityStaff()]
         return super().get_permissions()
@@ -44,8 +47,15 @@ class PatientViewSet(viewsets.GenericViewSet,
         q = self.queryset
         u = request.user
 
+        # 🔧 FIX: PATIENT role users see only their own record
+        if getattr(u, "role", None) == UserRole.PATIENT:
+            patient_profile = getattr(u, "patient_profile", None)
+            if patient_profile:
+                q = q.filter(id=patient_profile.id)
+            else:
+                q = q.none()
         # Facility staff: scope to their facility patients
-        if getattr(u, "facility_id", None):
+        elif getattr(u, "facility_id", None):
             q = q.filter(facility_id=u.facility_id)
         else:
             # Independent staff users (no facility) must NOT see all patients.
