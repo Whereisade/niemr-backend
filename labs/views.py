@@ -45,11 +45,40 @@ class LabTestViewSet(viewsets.GenericViewSet, mixins.ListModelMixin, mixins.Crea
         - Independent lab (no facility): see tests they created
         - Admins without facility: see all (for admin dashboards)
         - Patients: see all active tests (for appointment booking)
+        
+        🔥 NEW: Supports ?created_by=<user_id> to view a specific independent lab's catalog
+        This enables facility staff to browse outsourced lab catalogs when selecting tests.
         """
         u = self.request.user
         role = (getattr(u, "role", "") or "").upper()
         
-        base_qs = LabTest.objects.filter(is_active=True).order_by("name")
+        base_qs = LabTest.objects.filter(is_active=True).select_related('facility', 'created_by').order_by("name")
+        
+        # 🔥 NEW: Check for ?created_by query parameter (for outsourced catalog viewing)
+        created_by_param = self.request.query_params.get("created_by")
+        if created_by_param:
+            try:
+                creator_id = int(created_by_param)
+                # Verify the creator is an independent lab (no facility)
+                from django.contrib.auth import get_user_model
+                User = get_user_model()
+                creator = User.objects.filter(
+                    id=creator_id,
+                    role=UserRole.LAB,
+                    facility__isnull=True
+                ).first()
+                
+                if creator:
+                    # Return tests created by this independent lab
+                    return base_qs.filter(created_by_id=creator_id, facility__isnull=True)
+                else:
+                    # Invalid creator - return empty queryset
+                    return base_qs.none()
+            except (ValueError, TypeError):
+                # Invalid ID format - fall through to normal scoping
+                pass
+        
+        # Standard scoping (when not viewing outsourced catalog)
         
         # Facility staff: see their facility's tests
         if getattr(u, "facility_id", None):
@@ -57,7 +86,7 @@ class LabTestViewSet(viewsets.GenericViewSet, mixins.ListModelMixin, mixins.Crea
         
         # Independent lab (no facility): see their own tests
         if role == UserRole.LAB:
-            return base_qs.filter(created_by_id=u.id)
+            return base_qs.filter(created_by_id=u.id, facility__isnull=True)
         
         # Admins/Super Admins without facility: can see all for admin purposes
         if role in {UserRole.ADMIN, UserRole.SUPER_ADMIN}:

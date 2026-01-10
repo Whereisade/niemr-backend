@@ -54,11 +54,39 @@ class DrugViewSet(
         - Independent pharmacy (no facility): see drugs they created
         - Admins without facility: see all (for admin dashboards)
         - Patients: see all active drugs (for appointment booking)
+        
+        ENHANCEMENT: Support ?created_by=<user_id> query parameter for outsourcing
         """
         u = self.request.user
         role = (getattr(u, "role", "") or "").upper()
         
         base_qs = Drug.objects.filter(is_active=True).order_by("name")
+        
+        # ✅ NEW: Support ?created_by=<user_id> query parameter
+        # This allows facility doctors to query independent pharmacy catalogs for outsourcing
+        created_by_param = self.request.query_params.get("created_by")
+        if created_by_param:
+            try:
+                creator_id = int(created_by_param)
+                from django.contrib.auth import get_user_model
+                User = get_user_model()
+                
+                # Verify the creator is an independent PHARMACY user
+                creator = User.objects.filter(
+                    id=creator_id,
+                    role=UserRole.PHARMACY,
+                    facility__isnull=True
+                ).first()
+                
+                if creator:
+                    # Return drugs created by this independent pharmacy
+                    return base_qs.filter(created_by_id=creator_id, facility__isnull=True)
+                else:
+                    # Invalid creator_id or not an independent pharmacy - return empty
+                    return base_qs.none()
+            except (ValueError, TypeError):
+                # Invalid created_by parameter - ignore and continue with normal scoping
+                pass
         
         # Facility staff: see their facility's drugs
         if getattr(u, "facility_id", None):
