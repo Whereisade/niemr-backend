@@ -1,13 +1,14 @@
 from django.db import transaction
 from django.utils import timezone
 
-from rest_framework import viewsets, mixins, status
+from rest_framework import viewsets, mixins, status, filters
 from rest_framework.views import APIView
 from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
 from rest_framework.decorators import action
 from rest_framework.permissions import IsAuthenticated, AllowAny
 from rest_framework.response import Response
 from rest_framework_simplejwt.authentication import JWTAuthentication
+from django_filters.rest_framework import DjangoFilterBackend
 from facilities.permissions_utils import has_facility_permission
 from accounts.models import User
 from accounts.enums import UserRole
@@ -124,9 +125,42 @@ class FacilityViewSet(
     mixins.UpdateModelMixin,
     mixins.ListModelMixin,
 ):
-    queryset = Facility.objects.all().order_by("-created_at")
+    queryset = Facility.objects.filter(is_active=True)
     authentication_classes = [JWTAuthentication]
     permission_classes = [IsAuthenticated]
+    filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
+    filterset_fields = ["state", "facility_type"]
+    search_fields = ["name", "address", "state"]
+    ordering_fields = ["name", "created_at"]
+
+    def get_queryset(self):
+        '''
+        Filter facilities based on user role and visibility settings.
+        Patients only see publicly visible facilities.
+        '''
+        queryset = super().get_queryset()
+        user = self.request.user
+        
+        # Check if user is a patient (not staff or provider)
+        is_patient = (
+            hasattr(user, 'patient_profile') and 
+            not hasattr(user, 'provider_profile') and
+            not hasattr(user, 'facility_staff')
+        )
+        
+        # Patients only see publicly visible facilities
+        if is_patient:
+            queryset = queryset.filter(is_publicly_visible=True)
+        
+        # Optional: Add query parameter override for explicit visibility filtering
+        visibility_param = self.request.query_params.get('is_publicly_visible', None)
+        if visibility_param is not None:
+            if visibility_param.lower() in ['true', '1', 'yes']:
+                queryset = queryset.filter(is_publicly_visible=True)
+            elif visibility_param.lower() in ['false', '0', 'no']:
+                queryset = queryset.filter(is_publicly_visible=False)
+        
+        return queryset
 
     def get_serializer_class(self):
         if self.action in ("create", "update", "partial_update"):

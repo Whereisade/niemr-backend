@@ -185,6 +185,10 @@ class Facility(models.Model):
 
     # Status / audit
     is_active = models.BooleanField(default=True)
+    is_publicly_visible = models.BooleanField(
+    default=True,
+    help_text="Controls whether this facility appears in public search and can accept online bookings"
+    )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 

@@ -2,12 +2,13 @@ from django.conf import settings
 from django.contrib.auth.tokens import default_token_generator
 from django.utils.encoding import force_bytes, force_str
 from django.utils.http import urlsafe_base64_encode, urlsafe_base64_decode
-
+from accounts.enums import UserRole
 from rest_framework import permissions, status
 from rest_framework.decorators import api_view, permission_classes, authentication_classes
 from rest_framework.response import Response
 from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework_simplejwt.authentication import JWTAuthentication
+from rest_framework.permissions import IsAuthenticated
 
 from .serializers import (
     RegisterSerializer,
@@ -183,3 +184,128 @@ def password_reset_confirm(request):
         pass
 
     return Response({"detail": "Password has been reset."}, status=status.HTTP_200_OK)
+
+@api_view(["GET", "PATCH"])
+@authentication_classes([JWTAuthentication])
+@permission_classes([IsAuthenticated])
+def visibility_settings(request):
+    """
+    Get or update visibility settings for the current user.
+    
+    GET: Returns current visibility status
+    PATCH: Updates visibility status
+    
+    Body (for PATCH):
+    {
+        "is_publicly_visible": true/false
+    }
+    
+    Only available for facility users and independent providers.
+    Patients cannot access this endpoint.
+    """
+    user = request.user
+    
+    # Block patients from accessing this endpoint
+    if user.role == UserRole.PATIENT:
+        return Response(
+            {"detail": "Patients cannot modify visibility settings."},
+            status=status.HTTP_403_FORBIDDEN
+        )
+    
+    # Determine if this is a facility user or independent provider
+    is_facility_user = getattr(user, "facility_id", None) is not None
+    is_independent_provider = user.role in {
+        UserRole.DOCTOR, UserRole.NURSE, UserRole.LAB, UserRole.PHARMACY
+    } and not is_facility_user
+    
+    if request.method == "GET":
+        # Return current visibility status
+        current_visibility = None
+        entity_type = None
+        
+        if is_facility_user:
+            # Facility user - check facility visibility
+            facility = user.facility
+            current_visibility = getattr(facility, "is_publicly_visible", True)
+            entity_type = "facility"
+            entity_name = facility.name
+        elif is_independent_provider:
+            # Independent provider - check provider profile visibility
+            try:
+                provider_profile = user.provider_profile
+                current_visibility = getattr(provider_profile, "is_publicly_visible", True)
+                entity_type = "provider"
+                entity_name = provider_profile.get_display_name()
+            except Exception:
+                return Response(
+                    {"detail": "Provider profile not found."},
+                    status=status.HTTP_404_NOT_FOUND
+                )
+        else:
+            return Response(
+                {"detail": "User type does not support visibility settings."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        return Response({
+            "is_publicly_visible": current_visibility,
+            "entity_type": entity_type,
+            "entity_name": entity_name,
+            "role": user.role,
+        })
+    
+    elif request.method == "PATCH":
+        # Update visibility status
+        is_publicly_visible = request.data.get("is_publicly_visible")
+        
+        if is_publicly_visible is None:
+            return Response(
+                {"detail": "is_publicly_visible field is required."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Convert to boolean
+        is_visible = bool(is_publicly_visible)
+        
+        if is_facility_user:
+            # Update facility visibility (only SUPER_ADMIN and ADMIN can do this)
+            if user.role not in {UserRole.SUPER_ADMIN, UserRole.ADMIN}:
+                return Response(
+                    {"detail": "Only facility admins can modify facility visibility."},
+                    status=status.HTTP_403_FORBIDDEN
+                )
+            
+            facility = user.facility
+            facility.is_publicly_visible = is_visible
+            facility.save(update_fields=["is_publicly_visible", "updated_at"])
+            
+            return Response({
+                "is_publicly_visible": facility.is_publicly_visible,
+                "entity_type": "facility",
+                "entity_name": facility.name,
+                "message": f"Facility visibility updated to {'visible' if is_visible else 'hidden'}."
+            })
+        
+        elif is_independent_provider:
+            # Update provider profile visibility
+            try:
+                provider_profile = user.provider_profile
+                provider_profile.is_publicly_visible = is_visible
+                provider_profile.save(update_fields=["is_publicly_visible", "updated_at"])
+                
+                return Response({
+                    "is_publicly_visible": provider_profile.is_publicly_visible,
+                    "entity_type": "provider",
+                    "entity_name": provider_profile.get_display_name(),
+                    "message": f"Provider visibility updated to {'visible' if is_visible else 'hidden'}."
+                })
+            except Exception as e:
+                return Response(
+                    {"detail": f"Failed to update provider profile: {str(e)}"},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+        
+        return Response(
+            {"detail": "User type does not support visibility settings."},
+            status=status.HTTP_400_BAD_REQUEST
+        )

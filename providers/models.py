@@ -46,6 +46,10 @@ class ProviderProfile(models.Model):
 
     # Business
     consultation_fee = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    is_publicly_visible = models.BooleanField(
+    default=True,
+    help_text="Controls whether this provider appears in public search and can accept online bookings"
+    )
 
     # Verification workflow
     verification_status = models.CharField(max_length=16, choices=VerificationStatus.choices, default=VerificationStatus.PENDING)
