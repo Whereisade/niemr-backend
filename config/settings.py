@@ -32,7 +32,7 @@ EMAILS_PROVIDER = (os.getenv("EMAILS_PROVIDER", "SMTP") or "SMTP").upper()
 # Optional Resend settings (only required if EMAILS_PROVIDER=RESEND)
 RESEND_API_KEY = os.getenv("RESEND_API_KEY", "")
 RESEND_FROM = os.getenv("RESEND_FROM", "no-reply@niemr.app")
-if EMAILS_PROVIDER == "SMTP" and not RESEND_API_KEY:
+if EMAILS_PROVIDER == "RESEND" and not RESEND_API_KEY:
     raise RuntimeError("RESEND_API_KEY is required when EMAILS_PROVIDER=RESEND.")
 
 EMAILS_WEBHOOK_SECRET = os.getenv("EMAILS_WEBHOOK_SECRET", "")  # optional Resend webhook signature secret

@@ -54,14 +54,37 @@ class ProviderViewSet(
         return ProviderProfileSerializer
 
     def get_queryset(self):
+        '''
+        Filter providers based on user role and visibility settings.
+        Patients only see publicly visible providers.
+        '''
         q = self.queryset
         u = self.request.user
+
+        # ✅ NEW: Check if user is a patient (not staff or provider)
+        is_patient = (
+            hasattr(u, 'patient_profile') and 
+            not hasattr(u, 'provider_profile') and
+            not u.role in {UserRole.SUPER_ADMIN, UserRole.ADMIN, UserRole.DOCTOR, 
+                        UserRole.NURSE, UserRole.LAB, UserRole.PHARMACY, UserRole.FRONTDESK}
+        )
 
         # Admins: can see all. Others: can see only approved providers + self (if any)
         if not IsAdmin().has_permission(self.request, self):
             q = q.filter(
                 Q(verification_status=VerificationStatus.APPROVED)
                 | Q(user_id=u.id)
+            )
+
+        # ✅ NEW: Patients only see publicly visible providers
+        if is_patient:
+            q = q.filter(is_publicly_visible=True)
+            
+            # Also filter out providers whose facilities are not publicly visible
+            # (for facility-based providers)
+            q = q.filter(
+                Q(user__facility__isnull=True) |  # Independent providers
+                Q(user__facility__is_publicly_visible=True)  # Or facility is visible
             )
 
         # 🔹 Facility scoping
@@ -86,7 +109,15 @@ class ProviderViewSet(
                 else:
                     q = q.filter(user__facility_id=facility_id)
 
-        # other filters
+        # ✅ NEW: Optional query parameter override for explicit visibility filtering
+        visibility_param = self.request.query_params.get('is_publicly_visible', None)
+        if visibility_param is not None:
+            if visibility_param.lower() in ['true', '1', 'yes']:
+                q = q.filter(is_publicly_visible=True)
+            elif visibility_param.lower() in ['false', '0', 'no']:
+                q = q.filter(is_publicly_visible=False)
+
+        # other filters (KEEP ALL EXISTING CODE BELOW)
         state = self.request.query_params.get("state")
         specialty = self.request.query_params.get("specialty")  # name
         ptype = self.request.query_params.get("type")

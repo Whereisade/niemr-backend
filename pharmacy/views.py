@@ -1080,7 +1080,16 @@ class PrescriptionViewSet(
     def create(self, request, *args, **kwargs):
         self.permission_classes = [IsAuthenticated, CanPrescribe]
         self.check_permissions(request)
-        return super().create(request, *args, **kwargs)
+        
+        # Use write serializer for validation and creation
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        instance = serializer.save()
+        
+        # Use read serializer for response to properly handle ForeignKey fields
+        read_serializer = PrescriptionReadSerializer(instance)
+        headers = self.get_success_headers(read_serializer.data)
+        return Response(read_serializer.data, status=status.HTTP_201_CREATED, headers=headers)
 
     def retrieve(self, request, *args, **kwargs):
         obj = self.get_object()
