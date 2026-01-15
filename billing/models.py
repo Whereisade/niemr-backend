@@ -204,38 +204,111 @@ class PaymentAllocation(models.Model):
 
 class HMOPrice(models.Model):
     """
-    Facility + HMO specific override price for a service code.
-
-    Used when a patient is insured (insurance_status=INSURED) and attached to an
-    HMO within the same facility. Falls back to the facility Price if no override.
+    Facility/Provider + HMO specific override price for a service code.
+    
+    UPDATED: Now references SystemHMO instead of facility-scoped HMO.
+    
+    Pricing resolution order:
+    1. HMOPrice with matching tier (most specific)
+    2. HMOPrice without tier (HMO-level default)
+    3. Facility/Provider Price (facility default)
+    4. Service.default_price (system default)
+    
+    Scope rules:
+    - Facility-based: facility is set, owner is null
+    - Independent provider: owner is set, facility is null
     """
+    
+    # Scope: either facility or independent provider
     facility = models.ForeignKey(
-        Facility,
+        'facilities.Facility',
         null=True,
         blank=True,
         on_delete=models.CASCADE,
-        related_name="hmo_prices",
+        related_name='hmo_prices',
     )
-    hmo = models.ForeignKey(
-        "patients.HMO",
+    
+    owner = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        null=True,
+        blank=True,
         on_delete=models.CASCADE,
-        related_name="prices",
+        related_name='hmo_prices',
+        help_text='Independent provider who set this price'
     )
-    service = models.ForeignKey(Service, on_delete=models.CASCADE)
-    amount = models.DecimalField(max_digits=12, decimal_places=2, validators=[MinValueValidator(0)])
-    currency = models.CharField(max_length=8, default="NGN")
+    
+    # HMO reference (now SystemHMO)
+    system_hmo = models.ForeignKey(
+        'patients.SystemHMO',
+        on_delete=models.CASCADE,
+        related_name='prices',
+    )
+    
+    # Optional tier-specific pricing
+    tier = models.ForeignKey(
+        'patients.HMOTier',
+        null=True,
+        blank=True,
+        on_delete=models.CASCADE,
+        related_name='prices',
+        help_text='If set, this price only applies to this specific tier'
+    )
+    
+    # Service reference
+    service = models.ForeignKey(
+        'billing.Service',
+        on_delete=models.CASCADE,
+        related_name='hmo_prices',
+    )
+    
+    # Pricing
+    amount = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        validators=[MinValueValidator(Decimal('0.00'))],
+    )
+    
+    currency = models.CharField(max_length=8, default='NGN')
+    
     is_active = models.BooleanField(default=True)
+    
+    # Timestamps
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
-
+    
     class Meta:
-        ordering = ["service__code"]
+        ordering = ['service__code']
+        verbose_name = 'HMO Price'
+        verbose_name_plural = 'HMO Prices'
         constraints = [
+            # Either facility or owner must be set (XOR)
+            models.CheckConstraint(
+                name='billing_hmo_price_scope_xor',
+                check=(
+                    (models.Q(facility__isnull=False) & models.Q(owner__isnull=True))
+                    | (models.Q(facility__isnull=True) & models.Q(owner__isnull=False))
+                ),
+            ),
+            # Unique price per facility + system_hmo + tier + service
             models.UniqueConstraint(
-                fields=["facility", "hmo", "service"],
-                name="uniq_hmo_price_per_service",
-            )
+                name='unique_facility_hmo_tier_service_price',
+                fields=['facility', 'system_hmo', 'tier', 'service'],
+                condition=models.Q(facility__isnull=False),
+            ),
+            # Unique price per owner + system_hmo + tier + service
+            models.UniqueConstraint(
+                name='unique_owner_hmo_tier_service_price',
+                fields=['owner', 'system_hmo', 'tier', 'service'],
+                condition=models.Q(owner__isnull=False),
+            ),
         ]
-
+        indexes = [
+            models.Index(fields=['facility', 'system_hmo', 'service']),
+            models.Index(fields=['owner', 'system_hmo', 'service']),
+            models.Index(fields=['system_hmo', 'tier', 'service']),
+        ]
+    
     def __str__(self):
-        return f"{self.hmo_id}:{self.service.code} {self.amount} {self.currency}"
+        tier_str = f' ({self.tier.name})' if self.tier else ''
+        scope = self.facility.name if self.facility else f'Provider:{self.owner_id}'
+        return f'{scope} - {self.system_hmo.name}{tier_str}: {self.service.code} @ {self.amount}'
