@@ -6,7 +6,7 @@ from accounts.enums import UserRole
 from .models import Patient, PatientDocument, HMO, Allergy
 from .enums import BloodGroup, Genotype, InsuranceStatus, AllergyType, AllergySeverity
 from rest_framework import serializers as rf_serializers
-from .models import SystemHMO, HMOTier, FacilityHMO, PatientFacilityHMOApproval
+from .models import SystemHMO, HMOTier, FacilityHMO, PatientFacilityHMOApproval, Patient
 
 
 
@@ -379,10 +379,7 @@ class AllergyUpdateSerializer(serializers.ModelSerializer):
 
 
 class HMOTierSerializer(serializers.ModelSerializer):
-    """
-    Serializer for HMO tiers.
-    Read-only for most users, writable only by system admins.
-    """
+    """Serializer for HMO Tiers."""
     
     class Meta:
         model = HMOTier
@@ -400,7 +397,7 @@ class HMOTierSerializer(serializers.ModelSerializer):
 
 
 class HMOTierMinimalSerializer(serializers.ModelSerializer):
-    """Minimal tier serializer for nested use in patient/HMO serializers."""
+    """Minimal tier serializer for nested use."""
     
     class Meta:
         model = HMOTier
@@ -408,13 +405,12 @@ class HMOTierMinimalSerializer(serializers.ModelSerializer):
 
 
 class SystemHMOSerializer(serializers.ModelSerializer):
-    """
-    Full serializer for System HMOs.
-    Includes nested tiers.
-    """
-    tiers = HMOTierSerializer(many=True, read_only=True)
-    primary_address = serializers.SerializerMethodField()
-    primary_contact = serializers.SerializerMethodField()
+    """Serializer for SystemHMO with tier summary."""
+    
+    tiers = HMOTierMinimalSerializer(many=True, read_only=True)
+    tier_count = serializers.IntegerField(read_only=True)
+    facility_count = serializers.IntegerField(read_only=True)
+    patient_count = serializers.IntegerField(read_only=True)
     
     class Meta:
         model = SystemHMO
@@ -425,8 +421,6 @@ class SystemHMOSerializer(serializers.ModelSerializer):
             'email',
             'addresses',
             'contact_numbers',
-            'primary_address',
-            'primary_contact',
             'contact_person_name',
             'contact_person_phone',
             'contact_person_email',
@@ -434,17 +428,26 @@ class SystemHMOSerializer(serializers.ModelSerializer):
             'description',
             'is_active',
             'tiers',
+            'tier_count',
+            'facility_count',
+            'patient_count',
             'created_at',
             'updated_at',
         ]
-        read_only_fields = ['id', 'tiers', 'created_at', 'updated_at']
-    
-    def get_primary_address(self, obj):
-        return obj.get_primary_address()
-    
-    def get_primary_contact(self, obj):
-        return obj.get_primary_contact()
+        read_only_fields = ['id', 'created_at', 'updated_at', 'tiers', 'tier_count', 'facility_count', 'patient_count']
 
+class SystemHMODetailSerializer(SystemHMOSerializer):
+    """Detailed SystemHMO serializer with full tier information."""
+    
+    tiers = HMOTierSerializer(many=True, read_only=True)
+
+
+class SystemHMOMinimalSerializer(serializers.ModelSerializer):
+    """Minimal HMO serializer for nested use."""
+    
+    class Meta:
+        model = SystemHMO
+        fields = ['id', 'name', 'nhis_number']
 
 class SystemHMOListSerializer(serializers.ModelSerializer):
     """
@@ -518,130 +521,100 @@ class SystemHMOCreateSerializer(serializers.ModelSerializer):
 # ============================================================================
 
 class FacilityHMOSerializer(serializers.ModelSerializer):
-    """
-    Full serializer for Facility-HMO relationships.
-    Shows the system HMO details and relationship status.
-    """
-    system_hmo_details = SystemHMOListSerializer(source='system_hmo', read_only=True)
-    system_hmo_name = serializers.CharField(source='system_hmo.name', read_only=True)
-    scope_name = serializers.SerializerMethodField()
-    relationship_updated_by_name = serializers.SerializerMethodField()
+    """Serializer for FacilityHMO relationships."""
+    
+    system_hmo = SystemHMOSerializer(read_only=True)
+    system_hmo_id = serializers.PrimaryKeyRelatedField(
+        queryset=SystemHMO.objects.filter(is_active=True),
+        source='system_hmo',
+        write_only=True
+    )
+    facility_name = serializers.CharField(source='facility.name', read_only=True)
+    owner_name = serializers.SerializerMethodField()
+    relationship_updated_by_name = serializers.CharField(
+        source='relationship_updated_by.get_full_name',
+        read_only=True
+    )
+    patient_count = serializers.IntegerField(read_only=True)
+    scope = serializers.SerializerMethodField()
     
     class Meta:
         model = FacilityHMO
         fields = [
             'id',
-            'facility',
-            'owner',
             'system_hmo',
-            'system_hmo_name',
-            'system_hmo_details',
-            'scope_name',
+            'system_hmo_id',
+            'facility',
+            'facility_name',
+            'owner',
+            'owner_name',
+            'scope',
             'relationship_status',
             'relationship_notes',
             'relationship_updated_at',
-            'relationship_updated_by',
             'relationship_updated_by_name',
             'contract_start_date',
             'contract_end_date',
             'contract_reference',
             'is_active',
+            'patient_count',
             'created_at',
             'updated_at',
         ]
         read_only_fields = [
-            'id',
-            'facility',
-            'owner',
-            'system_hmo_name',
-            'system_hmo_details',
-            'scope_name',
-            'relationship_updated_at',
-            'relationship_updated_by',
-            'relationship_updated_by_name',
-            'created_at',
-            'updated_at',
+            'id', 'facility', 'owner', 'created_at', 'updated_at',
+            'relationship_updated_at', 'patient_count'
         ]
     
-    def get_scope_name(self, obj):
-        return obj.get_scope_name()
+    def get_owner_name(self, obj):
+        if obj.owner:
+            return obj.owner.get_full_name() or obj.owner.username
+        return None
     
-    def get_relationship_updated_by_name(self, obj):
-        if not obj.relationship_updated_by:
-            return None
-        user = obj.relationship_updated_by
-        name = f"{user.first_name} {user.last_name}".strip()
-        return name or user.email
+    def get_scope(self, obj):
+        if obj.facility:
+            return 'FACILITY'
+        elif obj.owner:
+            return 'INDEPENDENT'
+        return None
 
 
-class FacilityHMOCreateSerializer(serializers.Serializer):
-    """
-    Serializer for enabling a System HMO for a facility/provider.
-    """
-    system_hmo_id = serializers.IntegerField(required=True)
-    relationship_notes = serializers.CharField(required=False, allow_blank=True)
-    contract_start_date = serializers.DateField(required=False, allow_null=True)
-    contract_end_date = serializers.DateField(required=False, allow_null=True)
-    contract_reference = serializers.CharField(required=False, allow_blank=True, max_length=120)
+class FacilityHMOCreateSerializer(serializers.ModelSerializer):
+    """Serializer for creating FacilityHMO relationships."""
+    
+    system_hmo_id = serializers.PrimaryKeyRelatedField(
+        queryset=SystemHMO.objects.filter(is_active=True),
+        source='system_hmo'
+    )
+    
+    class Meta:
+        model = FacilityHMO
+        fields = [
+            'system_hmo_id',
+            'relationship_status',
+            'relationship_notes',
+            'contract_start_date',
+            'contract_end_date',
+            'contract_reference',
+        ]
     
     def validate_system_hmo_id(self, value):
-        try:
-            system_hmo = SystemHMO.objects.get(id=value, is_active=True)
-            self.context['system_hmo'] = system_hmo
-            return value
-        except SystemHMO.DoesNotExist:
-            raise serializers.ValidationError("System HMO not found or inactive.")
-    
-    def validate(self, attrs):
-        request = self.context.get('request')
-        user = request.user
+        """Ensure HMO is not already enabled for this facility."""
+        facility_id = self.context.get('facility_id')
+        owner = self.context.get('owner')
         
-        facility = getattr(user, 'facility', None)
-        system_hmo = self.context.get('system_hmo')
+        filter_kwargs = {'system_hmo': value, 'is_active': True}
+        if facility_id:
+            filter_kwargs['facility_id'] = facility_id
+        elif owner:
+            filter_kwargs['owner'] = owner
         
-        # Check if this HMO is already enabled
-        if facility:
-            if FacilityHMO.objects.filter(facility=facility, system_hmo=system_hmo).exists():
-                raise serializers.ValidationError({
-                    "system_hmo_id": "This HMO is already enabled for your facility."
-                })
-        else:
-            # Independent provider
-            if FacilityHMO.objects.filter(owner=user, system_hmo=system_hmo).exists():
-                raise serializers.ValidationError({
-                    "system_hmo_id": "This HMO is already enabled for your practice."
-                })
+        if FacilityHMO.objects.filter(**filter_kwargs).exists():
+            raise serializers.ValidationError(
+                'This HMO is already enabled for your facility/practice'
+            )
         
-        # Validate contract dates
-        if attrs.get('contract_start_date') and attrs.get('contract_end_date'):
-            if attrs['contract_start_date'] > attrs['contract_end_date']:
-                raise serializers.ValidationError({
-                    "contract_end_date": "End date must be after start date."
-                })
-        
-        return attrs
-    
-    @transaction.atomic
-    def create(self, validated_data):
-        request = self.context.get('request')
-        user = request.user
-        system_hmo = self.context.get('system_hmo')
-        
-        facility = getattr(user, 'facility', None)
-        
-        facility_hmo = FacilityHMO.objects.create(
-            facility=facility if facility else None,
-            owner=user if not facility else None,
-            system_hmo=system_hmo,
-            relationship_status=FacilityHMO.RelationshipStatus.GOOD,
-            relationship_notes=validated_data.get('relationship_notes', ''),
-            contract_start_date=validated_data.get('contract_start_date'),
-            contract_end_date=validated_data.get('contract_end_date'),
-            contract_reference=validated_data.get('contract_reference', ''),
-            is_active=True,
-        )
-        
-        return facility_hmo
+        return value
 
 
 class FacilityHMOUpdateRelationshipSerializer(serializers.Serializer):
@@ -678,83 +651,31 @@ class FacilityHMOUpdateRelationshipSerializer(serializers.Serializer):
 # ============================================================================
 
 class PatientAttachHMOSerializer(serializers.Serializer):
-    """
-    Serializer for attaching a patient to an HMO.
+    """Serializer for attaching HMO to a patient."""
     
-    Used when:
-    1. Initial HMO enrollment (patient has no HMO)
-    2. Changing HMO
-    """
     system_hmo_id = serializers.IntegerField(required=True)
     tier_id = serializers.IntegerField(required=True)
-    insurance_number = serializers.CharField(required=False, allow_blank=True, max_length=120)
+    insurance_number = serializers.CharField(max_length=120, required=False, allow_blank=True)
     insurance_expiry = serializers.DateField(required=False, allow_null=True)
-    insurance_notes = serializers.CharField(required=False, allow_blank=True)
+    notes = serializers.CharField(required=False, allow_blank=True)
     
     def validate_system_hmo_id(self, value):
-        try:
-            system_hmo = SystemHMO.objects.get(id=value, is_active=True)
-            self.context['system_hmo'] = system_hmo
-            return value
-        except SystemHMO.DoesNotExist:
-            raise serializers.ValidationError("HMO not found or inactive.")
-    
-    def validate_tier_id(self, value):
-        system_hmo = self.context.get('system_hmo')
-        if not system_hmo:
-            # Will be validated after system_hmo_id
-            self.context['_tier_id'] = value
-            return value
-        
-        try:
-            tier = HMOTier.objects.get(id=value, system_hmo=system_hmo, is_active=True)
-            self.context['tier'] = tier
-            return value
-        except HMOTier.DoesNotExist:
-            raise serializers.ValidationError("Invalid tier for this HMO.")
+        if not SystemHMO.objects.filter(id=value, is_active=True).exists():
+            raise serializers.ValidationError('HMO not found or is inactive')
+        return value
     
     def validate(self, attrs):
-        request = self.context.get('request')
-        user = request.user
+        system_hmo_id = attrs.get('system_hmo_id')
+        tier_id = attrs.get('tier_id')
         
-        system_hmo = self.context.get('system_hmo')
-        
-        # Validate tier against system_hmo if we have deferred validation
-        if self.context.get('_tier_id') and system_hmo:
-            try:
-                tier = HMOTier.objects.get(
-                    id=self.context['_tier_id'],
-                    system_hmo=system_hmo,
-                    is_active=True
-                )
-                self.context['tier'] = tier
-            except HMOTier.DoesNotExist:
-                raise serializers.ValidationError({
-                    "tier_id": "Invalid tier for this HMO."
-                })
-        
-        # Check if facility/provider has this HMO enabled
-        facility = getattr(user, 'facility', None)
-        
-        if facility:
-            if not FacilityHMO.objects.filter(
-                facility=facility,
-                system_hmo=system_hmo,
-                is_active=True
-            ).exists():
-                raise serializers.ValidationError({
-                    "system_hmo_id": "Your facility has not enabled this HMO. Please enable it first."
-                })
-        else:
-            # Independent provider
-            if not FacilityHMO.objects.filter(
-                owner=user,
-                system_hmo=system_hmo,
-                is_active=True
-            ).exists():
-                raise serializers.ValidationError({
-                    "system_hmo_id": "You have not enabled this HMO. Please enable it first."
-                })
+        if not HMOTier.objects.filter(
+            id=tier_id,
+            system_hmo_id=system_hmo_id,
+            is_active=True
+        ).exists():
+            raise serializers.ValidationError({
+                'tier_id': 'Tier not found or does not belong to this HMO'
+            })
         
         return attrs
 
@@ -786,16 +707,22 @@ class PatientTransferHMOApprovalSerializer(serializers.Serializer):
 # ============================================================================
 
 class PatientFacilityHMOApprovalSerializer(serializers.ModelSerializer):
-    """
-    Serializer for patient HMO approval requests.
-    """
+    """Serializer for HMO transfer approval requests."""
+    
     patient_name = serializers.SerializerMethodField()
-    system_hmo_name = serializers.CharField(source='system_hmo.name', read_only=True)
-    tier_name = serializers.CharField(source='tier.name', read_only=True)
-    tier_level = serializers.IntegerField(source='tier.level', read_only=True)
-    original_facility_name = serializers.SerializerMethodField()
+    system_hmo = SystemHMOMinimalSerializer(read_only=True)
+    tier = HMOTierMinimalSerializer(read_only=True)
+    facility_name = serializers.CharField(source='facility.name', read_only=True)
+    owner_name = serializers.SerializerMethodField()
+    original_facility_name = serializers.CharField(
+        source='original_facility.name',
+        read_only=True
+    )
     original_provider_name = serializers.SerializerMethodField()
-    decided_by_name = serializers.SerializerMethodField()
+    decided_by_name = serializers.CharField(
+        source='decided_by.get_full_name',
+        read_only=True
+    )
     status_display = serializers.CharField(source='get_status_display', read_only=True)
     
     class Meta:
@@ -805,18 +732,13 @@ class PatientFacilityHMOApprovalSerializer(serializers.ModelSerializer):
             'patient',
             'patient_name',
             'facility',
+            'facility_name',
             'owner',
+            'owner_name',
             'system_hmo',
-            'system_hmo_name',
             'tier',
-            'tier_name',
-            'tier_level',
             'insurance_number',
             'insurance_expiry',
-            'original_facility',
-            'original_facility_name',
-            'original_provider',
-            'original_provider_name',
             'status',
             'status_display',
             'requested_at',
@@ -825,49 +747,31 @@ class PatientFacilityHMOApprovalSerializer(serializers.ModelSerializer):
             'decided_by_name',
             'request_notes',
             'decision_notes',
+            'original_facility',
+            'original_facility_name',
+            'original_provider',
+            'original_provider_name',
             'created_at',
             'updated_at',
         ]
         read_only_fields = [
-            'id',
-            'patient',
-            'patient_name',
-            'facility',
-            'owner',
-            'system_hmo_name',
-            'tier_name',
-            'tier_level',
-            'original_facility_name',
-            'original_provider_name',
-            'status_display',
-            'requested_at',
-            'decided_at',
-            'decided_by',
-            'decided_by_name',
-            'created_at',
-            'updated_at',
+            'id', 'patient', 'facility', 'owner', 'system_hmo', 'tier',
+            'status', 'requested_at', 'decided_at', 'decided_by',
+            'original_facility', 'original_provider',
+            'created_at', 'updated_at'
         ]
     
     def get_patient_name(self, obj):
-        if obj.patient:
-            return f"{obj.patient.first_name} {obj.patient.last_name}".strip()
-        return None
+        return obj.patient.full_name if obj.patient else None
     
-    def get_original_facility_name(self, obj):
-        if obj.original_facility:
-            return obj.original_facility.name
+    def get_owner_name(self, obj):
+        if obj.owner:
+            return obj.owner.get_full_name() or obj.owner.username
         return None
     
     def get_original_provider_name(self, obj):
         if obj.original_provider:
-            name = f"{obj.original_provider.first_name} {obj.original_provider.last_name}".strip()
-            return name or obj.original_provider.email
-        return None
-    
-    def get_decided_by_name(self, obj):
-        if obj.decided_by:
-            name = f"{obj.decided_by.first_name} {obj.decided_by.last_name}".strip()
-            return name or obj.decided_by.email
+            return obj.original_provider.get_full_name() or obj.original_provider.username
         return None
 
 
@@ -974,3 +878,73 @@ class HMOTierPriceSerializer(serializers.Serializer):
         if value < 0:
             raise serializers.ValidationError("Amount cannot be negative.")
         return value
+
+
+class PatientHMOInfoSerializer(serializers.Serializer):
+    """Serializer for patient HMO information display."""
+    
+    has_hmo = serializers.BooleanField()
+    system_hmo = SystemHMOMinimalSerializer(allow_null=True)
+    tier = HMOTierMinimalSerializer(allow_null=True)
+    insurance_number = serializers.CharField(allow_null=True)
+    insurance_expiry = serializers.DateField(allow_null=True)
+    enrolled_at = serializers.DateTimeField(allow_null=True)
+    enrollment_source = serializers.SerializerMethodField()
+    
+    def get_enrollment_source(self, obj):
+        if obj.get('enrollment_facility'):
+            return {
+                'type': 'FACILITY',
+                'id': obj['enrollment_facility'].id,
+                'name': obj['enrollment_facility'].name,
+            }
+        elif obj.get('enrollment_provider'):
+            return {
+                'type': 'INDEPENDENT',
+                'id': obj['enrollment_provider'].id,
+                'name': obj['enrollment_provider'].get_full_name(),
+            }
+        return None
+
+
+# ===========================================
+# PATIENT SERIALIZER MIXIN
+# ===========================================
+
+class PatientHMOMixin(serializers.Serializer):
+    """
+    Mixin to add HMO fields to patient serializers.
+    
+    Use this in your existing PatientSerializer:
+    
+    class PatientSerializer(PatientHMOMixin, serializers.ModelSerializer):
+        ...
+    """
+    
+    # Read-only computed fields
+    system_hmo_display = SystemHMOMinimalSerializer(source='system_hmo', read_only=True)
+    hmo_tier_display = HMOTierMinimalSerializer(source='hmo_tier', read_only=True)
+    hmo_enrollment_info = serializers.SerializerMethodField()
+    has_hmo = serializers.SerializerMethodField()
+    
+    def get_hmo_enrollment_info(self, obj):
+        if not obj.system_hmo:
+            return None
+        
+        info = {
+            'enrolled_at': obj.hmo_enrolled_at,
+        }
+        
+        if obj.hmo_enrollment_facility:
+            info['source_type'] = 'FACILITY'
+            info['source_id'] = obj.hmo_enrollment_facility_id
+            info['source_name'] = obj.hmo_enrollment_facility.name
+        elif obj.hmo_enrollment_provider:
+            info['source_type'] = 'INDEPENDENT'
+            info['source_id'] = obj.hmo_enrollment_provider_id
+            info['source_name'] = obj.hmo_enrollment_provider.get_full_name()
+        
+        return info
+    
+    def get_has_hmo(self, obj):
+        return obj.system_hmo_id is not None

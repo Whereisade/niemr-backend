@@ -1,6 +1,22 @@
 from django.db import transaction
 from django.utils import timezone
+from rest_framework import viewsets, status
+from rest_framework.decorators import action
+from rest_framework.response import Response
+from rest_framework.permissions import IsAuthenticated
+from django.db.models import Count, Sum, Q, Prefetch
+from django.utils import timezone
 
+from patients.models import SystemHMO, HMOTier, FacilityHMO, PatientFacilityHMOApproval, Patient
+from patients.serializers import (
+    SystemHMOSerializer,
+    HMOTierSerializer,
+    FacilityHMOSerializer,
+    FacilityHMOCreateSerializer,
+    PatientFacilityHMOApprovalSerializer,
+)
+from facilities.models import Facility
+from .permissions import IsFacilityStaff, HasFacilityPermission
 from rest_framework import viewsets, mixins, status, filters
 from rest_framework.views import APIView
 from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
@@ -39,82 +55,313 @@ from .permissions import IsFacilityAdmin, IsFacilityStaff, IsFacilitySuperAdmin
 
 
 
+class FacilitySystemHMOViewSet(viewsets.ReadOnlyModelViewSet):
+    """
+    ViewSet for listing available SystemHMOs that a facility can enable.
+    
+    This is read-only - facilities select from the system-wide HMO list.
+    Actual HMO management (create/update/delete) is admin-only.
+    
+    Endpoints:
+    - GET /api/facilities/{facility_id}/system-hmos/ - List all active SystemHMOs
+    - GET /api/facilities/{facility_id}/system-hmos/{id}/ - Get SystemHMO detail
+    - GET /api/facilities/{facility_id}/system-hmos/{id}/tiers/ - Get tiers for an HMO
+    """
+    
+    serializer_class = SystemHMOSerializer
+    permission_classes = [IsAuthenticated, IsFacilityStaff]
+    
+    def get_queryset(self):
+        """Return active SystemHMOs with tier counts."""
+        return SystemHMO.objects.filter(
+            is_active=True
+        ).prefetch_related(
+            Prefetch(
+                'tiers',
+                queryset=HMOTier.objects.filter(is_active=True).order_by('level')
+            )
+        ).annotate(
+            tier_count=Count('tiers', filter=Q(tiers__is_active=True)),
+            facility_count=Count('facility_links', filter=Q(facility_links__is_active=True))
+        ).order_by('name')
+    
+    @action(detail=True, methods=['get'])
+    def tiers(self, request, pk=None, facility_id=None):
+        """Get all tiers for a specific SystemHMO."""
+        system_hmo = self.get_object()
+        tiers = system_hmo.tiers.filter(is_active=True).order_by('level')
+        serializer = HMOTierSerializer(tiers, many=True)
+        return Response(serializer.data)
+
+
 class FacilityHMOViewSet(viewsets.ModelViewSet):
     """
-    Facility-scoped HMO management.
-
-    - Any facility staff can list/view HMOs for their facility.
-    - Only facility SUPER_ADMIN can create/update/delete HMOs.
-    """
-    serializer_class = FacilityHMOSerializer
-    authentication_classes = [JWTAuthentication]
-    permission_classes = [IsAuthenticated, IsFacilityStaff]
-
-    def get_queryset(self):
-        facility_id = getattr(self.request.user, "facility_id", None)
-        if not facility_id:
-            return HMO.objects.none()
-        return HMO.objects.filter(facility_id=facility_id).order_by("name")
-
-    def get_permissions(self):
-        if self.action in ("create", "update", "partial_update", "destroy"):
-            return [IsAuthenticated(), IsFacilitySuperAdmin()]
-        # 🆕 Allow admins to update relationship status
-        if self.action == "update_relationship_status":
-            return [IsAuthenticated(), IsFacilityAdmin()]
-        return [IsAuthenticated(), IsFacilityStaff()]
-
-    def perform_create(self, serializer):
-        serializer.save(facility=self.request.user.facility)
+    ViewSet for managing a facility's HMO relationships.
     
-    @action(
-        detail=True,
-        methods=["post"],
-        url_path="relationship-status",
-        permission_classes=[IsAuthenticated, IsFacilityAdmin]
-    )
-    def update_relationship_status(self, request, pk=None):
+    This manages the FacilityHMO junction table - which HMOs a facility
+    has enabled and their relationship details.
+    
+    Endpoints:
+    - GET /api/facilities/{facility_id}/hmos/ - List facility's enabled HMOs
+    - POST /api/facilities/{facility_id}/hmos/ - Enable an HMO for facility
+    - GET /api/facilities/{facility_id}/hmos/{id}/ - Get HMO relationship detail
+    - PATCH /api/facilities/{facility_id}/hmos/{id}/ - Update relationship
+    - DELETE /api/facilities/{facility_id}/hmos/{id}/ - Disable HMO for facility
+    """
+    
+    permission_classes = [IsAuthenticated, IsFacilityStaff]
+    
+    def get_serializer_class(self):
+        if self.action == 'create':
+            return FacilityHMOCreateSerializer
+        return FacilityHMOSerializer
+    
+    def get_queryset(self):
+        """Return HMOs enabled for this facility."""
+        facility_id = self.kwargs.get('facility_id')
+        
+        return FacilityHMO.objects.filter(
+            facility_id=facility_id
+        ).select_related(
+            'system_hmo',
+            'relationship_updated_by'
+        ).prefetch_related(
+            Prefetch(
+                'system_hmo__tiers',
+                queryset=HMOTier.objects.filter(is_active=True).order_by('level')
+            )
+        ).annotate(
+            patient_count=Count(
+                'system_hmo__patients',
+                filter=Q(
+                    system_hmo__patients__facility_id=facility_id,
+                    system_hmo__patients__is_active=True
+                )
+            )
+        ).order_by('system_hmo__name')
+    
+    def get_serializer_context(self):
+        context = super().get_serializer_context()
+        context['facility_id'] = self.kwargs.get('facility_id')
+        return context
+    
+    def perform_create(self, serializer):
+        """Enable an HMO for the facility."""
+        facility_id = self.kwargs.get('facility_id')
+        facility = Facility.objects.get(id=facility_id)
+        serializer.save(facility=facility)
+    
+    def perform_destroy(self, instance):
         """
-        POST /api/facilities/hmos/{id}/relationship-status/
-        
-        Update the relationship status for an HMO.
-        Only SUPER_ADMIN and ADMIN can update this.
-        
-        Body: {
-            "status": "EXCELLENT" | "GOOD" | "FAIR" | "POOR" | "BAD",
-            "notes": "Optional notes about the status"
-        }
+        Soft-delete: deactivate instead of hard delete.
+        This preserves historical data and relationships.
         """
-        hmo = self.get_object()
+        instance.is_active = False
+        instance.save(update_fields=['is_active', 'updated_at'])
+    
+    @action(detail=True, methods=['post'])
+    def reactivate(self, request, pk=None, facility_id=None):
+        """Reactivate a previously disabled HMO relationship."""
+        instance = self.get_object()
+        instance.is_active = True
+        instance.save(update_fields=['is_active', 'updated_at'])
+        serializer = self.get_serializer(instance)
+        return Response(serializer.data)
+    
+    @action(detail=True, methods=['patch'])
+    def update_relationship(self, request, pk=None, facility_id=None):
+        """Update the relationship status and notes."""
+        instance = self.get_object()
         
-        status = request.data.get("status")
-        notes = request.data.get("notes", "")
+        relationship_status = request.data.get('relationship_status')
+        relationship_notes = request.data.get('relationship_notes')
         
-        # Validate status
-        valid_statuses = [choice[0] for choice in HMO.RelationshipStatus.choices]
-        if not status or status not in valid_statuses:
+        if relationship_status:
+            instance.relationship_status = relationship_status
+        if relationship_notes is not None:
+            instance.relationship_notes = relationship_notes
+        
+        instance.relationship_updated_by = request.user
+        instance.relationship_updated_at = timezone.now()
+        instance.save()
+        
+        serializer = self.get_serializer(instance)
+        return Response(serializer.data)
+    
+    @action(detail=False, methods=['get'])
+    def available(self, request, facility_id=None):
+        """
+        List SystemHMOs that are NOT yet enabled for this facility.
+        Useful for the "Add HMO" dropdown.
+        """
+        enabled_hmo_ids = FacilityHMO.objects.filter(
+            facility_id=facility_id,
+            is_active=True
+        ).values_list('system_hmo_id', flat=True)
+        
+        available_hmos = SystemHMO.objects.filter(
+            is_active=True
+        ).exclude(
+            id__in=enabled_hmo_ids
+        ).prefetch_related(
+            'tiers'
+        ).order_by('name')
+        
+        serializer = SystemHMOSerializer(available_hmos, many=True)
+        return Response(serializer.data)
+    
+    @action(detail=True, methods=['get'])
+    def patients(self, request, pk=None, facility_id=None):
+        """Get patients enrolled with this HMO at this facility."""
+        instance = self.get_object()
+        
+        patients = Patient.objects.filter(
+            facility_id=facility_id,
+            system_hmo=instance.system_hmo,
+            is_active=True
+        ).select_related(
+            'hmo_tier'
+        ).order_by('last_name', 'first_name')
+        
+        # Use your existing PatientListSerializer
+        from patients.serializers import PatientListSerializer
+        serializer = PatientListSerializer(patients, many=True)
+        return Response(serializer.data)
+    
+    @action(detail=True, methods=['get'])
+    def pricing(self, request, pk=None, facility_id=None):
+        """Get HMO pricing configured for this facility."""
+        from billing.models import HMOPrice
+        
+        instance = self.get_object()
+        
+        prices = HMOPrice.objects.filter(
+            facility_id=facility_id,
+            system_hmo=instance.system_hmo,
+            is_active=True
+        ).select_related(
+            'service',
+            'tier'
+        ).order_by('service__name', 'tier__level')
+        
+        # Format for response
+        pricing_data = []
+        for price in prices:
+            pricing_data.append({
+                'id': price.id,
+                'service_id': price.service_id,
+                'service_name': price.service.name,
+                'tier_id': price.tier_id,
+                'tier_name': price.tier.name if price.tier else 'All Tiers',
+                'price': str(price.price),
+                'is_active': price.is_active,
+            })
+        
+        return Response(pricing_data)
+
+
+class FacilityHMOApprovalViewSet(viewsets.ModelViewSet):
+    """
+    ViewSet for managing HMO transfer approvals at a facility.
+    
+    When a patient with an existing HMO enrollment visits a new facility,
+    they may need approval before their HMO coverage applies.
+    
+    Endpoints:
+    - GET /api/facilities/{facility_id}/hmo-approvals/ - List pending approvals
+    - GET /api/facilities/{facility_id}/hmo-approvals/{id}/ - Get approval detail
+    - POST /api/facilities/{facility_id}/hmo-approvals/{id}/approve/ - Approve
+    - POST /api/facilities/{facility_id}/hmo-approvals/{id}/reject/ - Reject
+    """
+    
+    serializer_class = PatientFacilityHMOApprovalSerializer
+    permission_classes = [IsAuthenticated, IsFacilityStaff]
+    
+    def get_queryset(self):
+        facility_id = self.kwargs.get('facility_id')
+        
+        queryset = PatientFacilityHMOApproval.objects.filter(
+            facility_id=facility_id
+        ).select_related(
+            'patient',
+            'system_hmo',
+            'tier',
+            'decided_by',
+            'original_facility',
+            'original_provider'
+        ).order_by('-requested_at')
+        
+        # Filter by status if provided
+        status_filter = self.request.query_params.get('status')
+        if status_filter:
+            queryset = queryset.filter(status=status_filter.upper())
+        
+        return queryset
+    
+    @action(detail=True, methods=['post'])
+    def approve(self, request, pk=None, facility_id=None):
+        """Approve the HMO transfer request."""
+        instance = self.get_object()
+        
+        if instance.status != 'PENDING':
             return Response(
-                {
-                    "detail": f"Invalid status. Must be one of: {', '.join(valid_statuses)}"
-                },
-                status=400
+                {'detail': 'This request has already been processed'},
+                status=status.HTTP_400_BAD_REQUEST
             )
         
-        # Update relationship status
-        hmo.relationship_status = status
-        hmo.relationship_notes = notes.strip()
-        hmo.relationship_updated_at = timezone.now()
-        hmo.relationship_updated_by = request.user
-        hmo.save(update_fields=[
-            "relationship_status",
-            "relationship_notes",
-            "relationship_updated_at",
-            "relationship_updated_by",
-            "updated_at"
-        ])
+        decision_notes = request.data.get('decision_notes', '')
         
-        serializer = self.get_serializer(hmo)
+        instance.status = 'APPROVED'
+        instance.decided_by = request.user
+        instance.decided_at = timezone.now()
+        instance.decision_notes = decision_notes
+        instance.save()
+        
+        # Update patient's HMO enrollment to this facility
+        patient = instance.patient
+        patient.hmo_enrollment_facility_id = facility_id
+        patient.hmo_enrollment_provider = None
+        patient.save(update_fields=['hmo_enrollment_facility', 'hmo_enrollment_provider'])
+        
+        serializer = self.get_serializer(instance)
         return Response(serializer.data)
+    
+    @action(detail=True, methods=['post'])
+    def reject(self, request, pk=None, facility_id=None):
+        """Reject the HMO transfer request."""
+        instance = self.get_object()
+        
+        if instance.status != 'PENDING':
+            return Response(
+                {'detail': 'This request has already been processed'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        decision_notes = request.data.get('decision_notes', '')
+        if not decision_notes:
+            return Response(
+                {'decision_notes': 'Please provide a reason for rejection'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        instance.status = 'REJECTED'
+        instance.decided_by = request.user
+        instance.decided_at = timezone.now()
+        instance.decision_notes = decision_notes
+        instance.save()
+        
+        serializer = self.get_serializer(instance)
+        return Response(serializer.data)
+    
+    @action(detail=False, methods=['get'])
+    def pending_count(self, request, facility_id=None):
+        """Get count of pending approvals for dashboard."""
+        count = PatientFacilityHMOApproval.objects.filter(
+            facility_id=facility_id,
+            status='PENDING'
+        ).count()
+        
+        return Response({'pending_count': count})
 
 
 

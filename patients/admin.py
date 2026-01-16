@@ -1,12 +1,74 @@
+# patients/admin.py
 from django.contrib import admin
 from django.utils.html import format_html
-from .models import Patient, PatientDocument, HMO, Allergy, PatientProviderLink
+from .models import (
+    Patient, PatientDocument, HMO, Allergy, PatientProviderLink,
+    SystemHMO, HMOTier, FacilityHMO, PatientFacilityHMOApproval
+)
+
 
 @admin.register(Patient)
 class PatientAdmin(admin.ModelAdmin):
-    list_display = ("last_name","first_name","dob","facility","insurance_status","created_at")
-    search_fields = ("last_name","first_name","email","phone")
-    list_filter = ("facility","insurance_status","patient_status","blood_group","genotype")
+    list_display = (
+        "last_name", "first_name", "dob", "facility", 
+        "insurance_status", "system_hmo_display", "hmo_tier_display", "created_at"
+    )
+    search_fields = ("last_name", "first_name", "email", "phone", "insurance_number")
+    list_filter = ("facility", "insurance_status", "patient_status", "blood_group", "genotype", "system_hmo")
+    raw_id_fields = ("user", "facility", "guardian_user", "parent_patient", "hmo", "system_hmo", "hmo_tier")
+    readonly_fields = ("created_at", "updated_at", "bmi")
+    
+    fieldsets = (
+        ('Basic Info', {
+            'fields': ('first_name', 'last_name', 'middle_name', 'dob', 'gender')
+        }),
+        ('Contact', {
+            'fields': ('email', 'phone', 'country', 'state', 'lga', 'address')
+        }),
+        ('Account & Facility', {
+            'fields': ('user', 'facility', 'guardian_user', 'parent_patient', 'relationship_to_guardian')
+        }),
+        ('Insurance (Legacy)', {
+            'fields': ('insurance_status', 'hmo', 'hmo_plan'),
+            'classes': ('collapse',),
+            'description': 'Legacy facility-scoped HMO (deprecated)'
+        }),
+        ('Insurance (System HMO)', {
+            'fields': (
+                'system_hmo', 'hmo_tier', 'insurance_number', 
+                'insurance_expiry', 'insurance_notes',
+                'hmo_enrollment_facility', 'hmo_enrollment_provider', 'hmo_enrolled_at'
+            ),
+        }),
+        ('Clinical', {
+            'fields': ('blood_group', 'blood_group_other', 'genotype', 'genotype_other', 'weight_kg', 'height_cm', 'bmi'),
+            'classes': ('collapse',)
+        }),
+        ('Status', {
+            'fields': ('patient_status', 'default_encounter_type')
+        }),
+        ('Emergency Contact', {
+            'fields': ('emergency_contact_name', 'emergency_contact_phone'),
+            'classes': ('collapse',)
+        }),
+        ('Timestamps', {
+            'fields': ('created_at', 'updated_at'),
+            'classes': ('collapse',)
+        }),
+    )
+    
+    def system_hmo_display(self, obj):
+        if obj.system_hmo:
+            return obj.system_hmo.name
+        return "-"
+    system_hmo_display.short_description = "System HMO"
+    
+    def hmo_tier_display(self, obj):
+        if obj.hmo_tier:
+            return obj.hmo_tier.name
+        return "-"
+    hmo_tier_display.short_description = "Tier"
+
 
 @admin.register(Allergy)
 class AllergyAdmin(admin.ModelAdmin):
@@ -17,8 +79,8 @@ class AllergyAdmin(admin.ModelAdmin):
     readonly_fields = ("id", "created_at", "updated_at")
     ordering = ("-created_at",)
 
-admin.site.register(PatientDocument)
 
+admin.site.register(PatientDocument)
 
 
 @admin.register(PatientProviderLink)
@@ -34,10 +96,11 @@ class PatientProviderLinkAdmin(admin.ModelAdmin):
     list_filter = ("created_at",)
     raw_id_fields = ("patient", "provider")
 
+
 @admin.register(HMO)
 class HMOAdmin(admin.ModelAdmin):
     """
-    Enhanced admin interface for HMO management with all new fields.
+    Admin for legacy facility-scoped HMOs.
     """
     list_display = [
         'name',
@@ -51,13 +114,9 @@ class HMOAdmin(admin.ModelAdmin):
     ]
     
     list_filter = ['is_active', 'facility', 'created_at']
-    
-    search_fields = [
-        'name',
-        'nhis_number',
-        'email',
-        'contact_person_name',
-    ]
+    search_fields = ['name', 'nhis_number', 'email', 'contact_person_name']
+    raw_id_fields = ['facility', 'relationship_updated_by']
+    readonly_fields = ['created_at', 'updated_at']
     
     fieldsets = (
         ('Basic Information', {
@@ -74,7 +133,15 @@ class HMOAdmin(admin.ModelAdmin):
                 'contact_person_email',
             ),
             'classes': ('collapse',),
-            'description': 'Designated contact person for this HMO'
+        }),
+        ('Relationship Status', {
+            'fields': (
+                'relationship_status',
+                'relationship_notes',
+                'relationship_updated_at',
+                'relationship_updated_by',
+            ),
+            'classes': ('collapse',),
         }),
         ('Timestamps', {
             'fields': ('created_at', 'updated_at'),
@@ -82,16 +149,7 @@ class HMOAdmin(admin.ModelAdmin):
         }),
     )
     
-    readonly_fields = ['created_at', 'updated_at']
-    
-    def get_readonly_fields(self, request, obj=None):
-        """Make facility read-only after creation"""
-        if obj:  # Editing existing object
-            return self.readonly_fields + ['facility']
-        return self.readonly_fields
-    
     def get_address_count(self, obj):
-        """Display number of addresses"""
         if obj.addresses:
             count = len(obj.addresses)
             return f"{count} address{'es' if count != 1 else ''}"
@@ -99,7 +157,6 @@ class HMOAdmin(admin.ModelAdmin):
     get_address_count.short_description = 'Addresses'
     
     def get_phone_count(self, obj):
-        """Display number of phone numbers"""
         if obj.contact_numbers:
             count = len(obj.contact_numbers)
             return f"{count} number{'s' if count != 1 else ''}"
@@ -107,14 +164,17 @@ class HMOAdmin(admin.ModelAdmin):
     get_phone_count.short_description = 'Phone Numbers'
 
 
-# HMO Admin Configuration for new HMO models
+# ============================================================================
+# SYSTEM HMO ADMIN
+# ============================================================================
 
 class HMOTierInline(admin.TabularInline):
     """Inline admin for HMO tiers."""
-    model = None  # Set to HMOTier when integrating
+    model = HMOTier
     extra = 0
     fields = ['name', 'level', 'description', 'is_active']
     readonly_fields = ['level']  # Tiers are created automatically, level is fixed
+    ordering = ['level']
     
     def has_add_permission(self, request, obj=None):
         # Tiers are auto-created, don't allow manual addition
@@ -125,7 +185,7 @@ class HMOTierInline(admin.TabularInline):
         return False
 
 
-@admin.register
+@admin.register(SystemHMO)
 class SystemHMOAdmin(admin.ModelAdmin):
     """
     Admin for System HMOs (master list).
@@ -141,9 +201,7 @@ class SystemHMOAdmin(admin.ModelAdmin):
     ]
     
     list_filter = ['is_active', 'created_at']
-    
     search_fields = ['name', 'nhis_number', 'email']
-    
     readonly_fields = ['created_at', 'updated_at']
     
     fieldsets = (
@@ -171,7 +229,7 @@ class SystemHMOAdmin(admin.ModelAdmin):
         }),
     )
     
-    # inlines = [HMOTierInline]  # Uncomment when integrating
+    inlines = [HMOTierInline]
     
     def tier_count(self, obj):
         """Display number of active tiers."""
@@ -186,7 +244,7 @@ class SystemHMOAdmin(admin.ModelAdmin):
     facility_count.short_description = 'Enabled At'
 
 
-@admin.register
+@admin.register(HMOTier)
 class HMOTierAdmin(admin.ModelAdmin):
     """
     Admin for HMO Tiers.
@@ -195,13 +253,14 @@ class HMOTierAdmin(admin.ModelAdmin):
     list_filter = ['system_hmo', 'level', 'is_active']
     search_fields = ['name', 'system_hmo__name']
     readonly_fields = ['created_at', 'updated_at']
+    raw_id_fields = ['system_hmo']
     
     def has_add_permission(self, request):
         # Tiers are auto-created when SystemHMO is created
         return False
 
 
-@admin.register
+@admin.register(FacilityHMO)
 class FacilityHMOAdmin(admin.ModelAdmin):
     """
     Admin for Facility-HMO relationships.
@@ -232,6 +291,8 @@ class FacilityHMOAdmin(admin.ModelAdmin):
         'updated_at',
         'relationship_updated_at',
     ]
+    
+    raw_id_fields = ['facility', 'owner', 'system_hmo', 'relationship_updated_by']
     
     fieldsets = (
         ('Scope', {
@@ -291,7 +352,7 @@ class FacilityHMOAdmin(admin.ModelAdmin):
     relationship_status_badge.short_description = 'Status'
 
 
-@admin.register
+@admin.register(PatientFacilityHMOApproval)
 class PatientFacilityHMOApprovalAdmin(admin.ModelAdmin):
     """
     Admin for Patient HMO Transfer Approvals.
@@ -324,6 +385,11 @@ class PatientFacilityHMOApprovalAdmin(admin.ModelAdmin):
         'updated_at',
         'requested_at',
         'decided_at',
+    ]
+    
+    raw_id_fields = [
+        'patient', 'facility', 'owner', 'system_hmo', 'tier',
+        'original_facility', 'original_provider', 'decided_by'
     ]
     
     fieldsets = (

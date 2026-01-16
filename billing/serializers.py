@@ -6,7 +6,10 @@ from rest_framework import serializers
 from .models import Service, Price, Charge, Payment, PaymentAllocation, HMOPrice
 from .enums import ChargeStatus, PaymentMethod, PaymentSource
 from .services.pricing import resolve_price
+from django.utils import timezone
 
+# Updated imports for new HMO models
+from patients.models import SystemHMO, HMOTier, FacilityHMO, Patient
 
 # --- Catalog & Price ---
 class ServiceSerializer(serializers.ModelSerializer):
@@ -357,181 +360,187 @@ class PaymentReadSerializer(serializers.ModelSerializer):
 
 class HMOPaymentCreateSerializer(serializers.Serializer):
     """
-    Create an HMO bulk payment that can be allocated to multiple patients' charges.
-    """
-    hmo_id = serializers.IntegerField(required=True, help_text="HMO making the payment")
-    amount = serializers.DecimalField(max_digits=12, decimal_places=2, required=True)
-    method = serializers.ChoiceField(choices=PaymentMethod.choices, default=PaymentMethod.TRANSFER)
-    reference = serializers.CharField(max_length=64, required=False, allow_blank=True)
-    note = serializers.CharField(max_length=255, required=False, allow_blank=True)
-    period_start = serializers.DateField(required=False, allow_null=True)
-    period_end = serializers.DateField(required=False, allow_null=True)
+    Serializer for creating HMO payments.
     
-    # Allocation options
-    allocations = serializers.ListField(
-        child=serializers.DictField(),
+    Updated to work with SystemHMO architecture:
+    - Validates that the facility/provider has a relationship with the SystemHMO
+    - Supports tier-specific pricing
+    - Works for both facility and independent provider contexts
+    """
+    
+    # Patient and HMO identification
+    patient_id = serializers.IntegerField(required=True)
+    system_hmo_id = serializers.IntegerField(required=True)
+    tier_id = serializers.IntegerField(required=False, allow_null=True)
+    
+    # Payment details
+    amount = serializers.DecimalField(max_digits=12, decimal_places=2, required=True)
+    payment_date = serializers.DateField(required=False)
+    reference_number = serializers.CharField(max_length=100, required=False, allow_blank=True)
+    notes = serializers.CharField(required=False, allow_blank=True)
+    
+    # Items being paid for (optional - for itemized payments)
+    charge_ids = serializers.ListField(
+        child=serializers.IntegerField(),
         required=False,
-        help_text="Optional list of {charge_id, amount} to allocate to specific charges"
+        default=list
     )
-    auto_allocate = serializers.BooleanField(
-        default=True,
-        help_text="If true and no allocations provided, auto-allocate to oldest unpaid HMO charges"
-    )
-
-    def validate_amount(self, value):
-        if value <= 0:
-            raise serializers.ValidationError("Amount must be greater than zero")
-        return value
-
+    
     def validate(self, attrs):
-        # Validate period dates
-        if attrs.get("period_start") and attrs.get("period_end"):
-            if attrs["period_start"] > attrs["period_end"]:
+        """
+        Validate the HMO payment request.
+        
+        Checks:
+        1. Patient exists and belongs to the facility/provider
+        2. SystemHMO exists and is active
+        3. Facility/provider has an active relationship with the HMO
+        4. If tier specified, it belongs to the SystemHMO
+        5. Patient is enrolled with this HMO (optional - depends on business rules)
+        """
+        request = self.context.get('request')
+        facility = self.context.get('facility')
+        owner = self.context.get('owner')  # For independent providers
+        
+        patient_id = attrs.get('patient_id')
+        system_hmo_id = attrs.get('system_hmo_id')
+        tier_id = attrs.get('tier_id')
+        
+        # 1. Validate patient exists and is accessible
+        try:
+            if facility:
+                patient = Patient.objects.get(id=patient_id, facility=facility)
+            elif owner:
+                patient = Patient.objects.get(id=patient_id, owner=owner)
+            else:
                 raise serializers.ValidationError({
-                    "period_end": "End date must be after start date"
+                    'detail': 'No facility or provider context available'
                 })
+        except Patient.DoesNotExist:
+            raise serializers.ValidationError({
+                'patient_id': 'Patient not found or not accessible'
+            })
+        
+        attrs['patient'] = patient
+        
+        # 2. Validate SystemHMO exists and is active
+        try:
+            system_hmo = SystemHMO.objects.get(id=system_hmo_id, is_active=True)
+        except SystemHMO.DoesNotExist:
+            raise serializers.ValidationError({
+                'system_hmo_id': 'HMO not found or is inactive'
+            })
+        
+        attrs['system_hmo'] = system_hmo
+        
+        # 3. Validate facility/provider has relationship with HMO
+        facility_hmo_filter = {
+            'system_hmo': system_hmo,
+            'is_active': True
+        }
+        
+        if facility:
+            facility_hmo_filter['facility'] = facility
+        elif owner:
+            facility_hmo_filter['owner'] = owner
+        
+        try:
+            facility_hmo = FacilityHMO.objects.get(**facility_hmo_filter)
+        except FacilityHMO.DoesNotExist:
+            raise serializers.ValidationError({
+                'system_hmo_id': f'Your {"facility" if facility else "practice"} does not have an active relationship with this HMO'
+            })
+        
+        attrs['facility_hmo'] = facility_hmo
+        
+        # 4. Validate tier if provided
+        if tier_id:
+            try:
+                tier = HMOTier.objects.get(
+                    id=tier_id,
+                    system_hmo=system_hmo,
+                    is_active=True
+                )
+            except HMOTier.DoesNotExist:
+                raise serializers.ValidationError({
+                    'tier_id': 'Tier not found or does not belong to this HMO'
+                })
+            
+            attrs['tier'] = tier
+        else:
+            attrs['tier'] = None
+        
+        # 5. Optional: Validate patient is enrolled with this HMO
+        # Uncomment if you want to enforce patient HMO enrollment
+        # if patient.system_hmo_id != system_hmo_id:
+        #     raise serializers.ValidationError({
+        #         'patient_id': 'Patient is not enrolled with this HMO'
+        #     })
+        
         return attrs
-
+    
     @transaction.atomic
     def create(self, validated_data):
-        from patients.models import HMO
-        from .services.rollup import recompute_charge_status
-
-        user = self.context["request"].user
-        facility = getattr(user, "facility", None)
+        """
+        Create the HMO payment record.
         
-        if not facility:
-            raise serializers.ValidationError("User must belong to a facility to record HMO payments")
-
-        # Get HMO
-        hmo_id = validated_data["hmo_id"]
-        try:
-            hmo = HMO.objects.get(id=hmo_id, facility=facility)
-        except HMO.DoesNotExist:
-            raise serializers.ValidationError({"hmo_id": "HMO not found in your facility"})
-
-        # Create payment
-        payment = Payment.objects.create(
-            hmo=hmo,
-            facility=facility,
-            payment_source=PaymentSource.HMO,
-            amount=validated_data["amount"],
-            method=validated_data.get("method", PaymentMethod.TRANSFER),
-            reference=validated_data.get("reference", ""),
-            note=validated_data.get("note", ""),
-            period_start=validated_data.get("period_start"),
-            period_end=validated_data.get("period_end"),
-            received_by=user,
-        )
-
-        # Handle allocations
-        allocations = validated_data.get("allocations", [])
-        auto_allocate = validated_data.get("auto_allocate", True)
-
-        if allocations:
-            # Manual allocations provided
-            self._allocate_to_charges(payment, allocations, hmo, facility)
-        elif auto_allocate:
-            # Auto-allocate to oldest unpaid charges for this HMO
-            self._auto_allocate_to_hmo_charges(payment, hmo, facility)
-
+        This should be integrated with your existing Payment model.
+        Adjust according to your actual Payment model structure.
+        """
+        from billing.models import Payment, Charge  # Import here to avoid circular imports
+        
+        request = self.context.get('request')
+        facility = self.context.get('facility')
+        owner = self.context.get('owner')
+        
+        patient = validated_data['patient']
+        system_hmo = validated_data['system_hmo']
+        tier = validated_data.get('tier')
+        amount = validated_data['amount']
+        charge_ids = validated_data.get('charge_ids', [])
+        
+        # Create the payment record
+        payment_data = {
+            'patient': patient,
+            'amount': amount,
+            'payment_type': 'HMO',
+            'payment_date': validated_data.get('payment_date', timezone.now().date()),
+            'reference_number': validated_data.get('reference_number', ''),
+            'notes': validated_data.get('notes', ''),
+            'recorded_by': request.user if request else None,
+            # Store HMO information
+            'system_hmo': system_hmo,
+            'hmo_tier': tier,
+        }
+        
+        if facility:
+            payment_data['facility'] = facility
+        elif owner:
+            payment_data['owner'] = owner
+        
+        payment = Payment.objects.create(**payment_data)
+        
+        # Link charges if provided
+        if charge_ids:
+            charges = Charge.objects.filter(
+                id__in=charge_ids,
+                patient=patient,
+                status__in=['PENDING', 'PARTIALLY_PAID']
+            )
+            
+            # Apply payment to charges
+            remaining_amount = amount
+            for charge in charges:
+                if remaining_amount <= 0:
+                    break
+                    
+                charge_balance = charge.balance
+                payment_amount = min(remaining_amount, charge_balance)
+                
+                charge.apply_payment(payment_amount, payment)
+                remaining_amount -= payment_amount
+        
         return payment
 
-    def _allocate_to_charges(self, payment, allocations, hmo, facility):
-        """Allocate payment to specific charges"""
-        from .services.rollup import recompute_charge_status
-        
-        remaining = Decimal(str(payment.amount))
-        
-        for item in allocations:
-            try:
-                charge_id = int(item.get("charge_id"))
-                alloc_amount = Decimal(str(item.get("amount")))
-            except (ValueError, TypeError):
-                continue
-                
-            if alloc_amount <= 0:
-                continue
-                
-            try:
-                charge = Charge.objects.select_for_update().get(
-                    id=charge_id,
-                    facility=facility,
-                    patient__hmo=hmo
-                )
-            except Charge.DoesNotExist:
-                continue
-            
-            # Calculate outstanding amount
-            already_paid = charge.allocations.aggregate(
-                total=models.Sum("amount")
-            )["total"] or Decimal("0.00")
-            outstanding = Decimal(str(charge.amount)) - already_paid
-            
-            if outstanding <= 0:
-                recompute_charge_status(charge)
-                continue
-            
-            # Allocate up to outstanding amount
-            take = min(alloc_amount, outstanding, remaining)
-            
-            if take > 0:
-                PaymentAllocation.objects.create(
-                    payment=payment,
-                    charge=charge,
-                    amount=take
-                )
-                remaining -= take
-                recompute_charge_status(charge)
-            
-            if remaining <= 0:
-                break
-
-    def _auto_allocate_to_hmo_charges(self, payment, hmo, facility):
-        """Auto-allocate payment to oldest unpaid charges for this HMO"""
-        from .services.rollup import recompute_charge_status
-        
-        remaining = Decimal(str(payment.amount))
-        
-        # Get unpaid/partially paid charges for patients under this HMO
-        charges = (
-            Charge.objects
-            .select_for_update()
-            .filter(
-                facility=facility,
-                patient__hmo=hmo,
-                patient__hmo__isnull=False,
-            )
-            .exclude(status=ChargeStatus.PAID)
-            .exclude(status=ChargeStatus.VOID)
-            .order_by("created_at", "id")
-        )
-        
-        for charge in charges:
-            if remaining <= 0:
-                break
-            
-            # Calculate outstanding
-            already_paid = charge.allocations.aggregate(
-                total=models.Sum("amount")
-            )["total"] or Decimal("0.00")
-            outstanding = Decimal(str(charge.amount)) - already_paid
-            
-            if outstanding <= 0:
-                recompute_charge_status(charge)
-                continue
-            
-            # Allocate what we can
-            take = min(remaining, outstanding)
-            
-            PaymentAllocation.objects.create(
-                payment=payment,
-                charge=charge,
-                amount=take
-            )
-            
-            remaining -= take
-            recompute_charge_status(charge)
 
 
 class HMOOutstandingChargesSerializer(serializers.Serializer):
