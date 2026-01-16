@@ -1,4 +1,4 @@
-from django.db.models import Q, Prefetch
+from django.db.models import Q, Prefetch, Count
 from django.utils import timezone
 from django.shortcuts import get_object_or_404
 from rest_framework import viewsets, mixins, status, permissions
@@ -34,18 +34,24 @@ from .permissions import IsSelfOrFacilityStaff, IsStaff, IsStaffOrGuardianForDep
 from accounts.enums import UserRole
 from .enums import InsuranceStatus
 
+
+# ============================================================================
+# PATIENT VIEWSET
+# ============================================================================
+
 class PatientViewSet(viewsets.GenericViewSet,
                      mixins.CreateModelMixin,
                      mixins.RetrieveModelMixin,
                      mixins.UpdateModelMixin,
                      mixins.ListModelMixin):
-    queryset = Patient.objects.select_related("user","facility","hmo").all().order_by("-created_at")
+    queryset = Patient.objects.select_related(
+        "user", "facility", "hmo", "system_hmo", "hmo_tier"
+    ).all().order_by("-created_at")
     authentication_classes = [JWTAuthentication]
     permission_classes = [IsAuthenticated]
 
     def get_serializer_class(self):
         if self.action in ("create",):
-            # staff creating patient in facility
             return PatientCreateByStaffSerializer
         return PatientSerializer
 
@@ -53,9 +59,8 @@ class PatientViewSet(viewsets.GenericViewSet,
         if self.action == "create":
             return [IsAuthenticated(), IsStaff()]
         elif self.action == "list":
-            # Allow both staff AND patients to list
             return [IsAuthenticated()]
-        elif self.action in ("retrieve","update","partial_update"):
+        elif self.action in ("retrieve", "update", "partial_update"):
             return [IsAuthenticated(), IsSelfOrFacilityStaff()]
         return super().get_permissions()
 
@@ -63,7 +68,7 @@ class PatientViewSet(viewsets.GenericViewSet,
         q = self.queryset
         u = request.user
 
-        # 🔧 FIX: PATIENT role users see only their own record
+        # PATIENT role users see only their own record
         if getattr(u, "role", None) == UserRole.PATIENT:
             patient_profile = getattr(u, "patient_profile", None)
             if patient_profile:
@@ -75,7 +80,6 @@ class PatientViewSet(viewsets.GenericViewSet,
             q = q.filter(facility_id=u.facility_id)
         else:
             # Independent staff users (no facility) must NOT see all patients.
-            # Scope to patients they are related to via appointments/encounters/labs/prescriptions.
             role = (getattr(u, "role", "") or "").upper()
             if role not in {"SUPER_ADMIN", "ADMIN"}:
                 uid = getattr(u, "id", None)
@@ -92,42 +96,39 @@ class PatientViewSet(viewsets.GenericViewSet,
                         | Q(provider_links__provider_id=uid)
                     ).distinct()
 
-        # basic search
+        # Basic search
         s = request.query_params.get("s")
         if s:
             q = q.filter(
                 Q(first_name__icontains=s) | Q(last_name__icontains=s) |
                 Q(email__icontains=s) | Q(phone__icontains=s)
             )
+        
         page = self.paginate_queryset(q)
         if page is not None:
-            ser = PatientSerializer(page, many=True)
+            ser = PatientSerializer(page, many=True, context={"request": request})
             return self.get_paginated_response(ser.data)
-        ser = PatientSerializer(q, many=True)
+        ser = PatientSerializer(q, many=True, context={"request": request})
         return Response(ser.data)
 
     def perform_create(self, serializer):
-        """On independent provider create, auto-link patient to the creator.
-
-        This prevents the provider workspace from having to auto-start an encounter
-        just to make the new patient visible in the provider patient list.
-        """
-
+        """On independent provider create, auto-link patient to the creator."""
         patient = serializer.save()
         u = self.request.user
+        
         # For independent provider staff (no facility), link the created patient
         if not getattr(u, "facility_id", None):
             role = (getattr(u, "role", "") or "").upper()
             if role not in {"SUPER_ADMIN", "ADMIN"} and role in {
-                "DOCTOR",
-                "NURSE",
-                "LAB",
-                "PHARMACY",
-                "FRONTDESK",
+                "DOCTOR", "NURSE", "LAB", "PHARMACY", "FRONTDESK",
             }:
                 PatientProviderLink.objects.get_or_create(patient=patient, provider=u)
         return patient
 
+    # =========================================================================
+    # DOCUMENT ACTIONS
+    # =========================================================================
+    
     @action(detail=True, methods=["post"], permission_classes=[IsAuthenticated, IsSelfOrFacilityStaff])
     def upload_document(self, request, pk=None):
         patient = self.get_object()
@@ -149,9 +150,13 @@ class PatientViewSet(viewsets.GenericViewSet,
         )
         return Response(PatientDocumentSerializer(obj).data, status=201)
 
+    # =========================================================================
+    # LEGACY HMO ACTIONS (Facility-scoped HMOs)
+    # =========================================================================
+    
     @action(detail=False, methods=["get"], permission_classes=[IsAuthenticated, IsStaff])
     def hmos(self, request):
-        """List active HMOs for the requester's facility."""
+        """List active HMOs for the requester's facility (legacy)."""
         facility_id = getattr(request.user, "facility_id", None)
         if not facility_id:
             return Response([])
@@ -160,7 +165,7 @@ class PatientViewSet(viewsets.GenericViewSet,
 
     @action(detail=False, methods=["post"], permission_classes=[IsAuthenticated, IsStaff])
     def seed_hmos(self, request):
-        """Bulk-create HMOs for the requester's facility (SUPER_ADMIN only)."""
+        """Bulk-create HMOs for the requester's facility (SUPER_ADMIN only, legacy)."""
         role = (getattr(request.user, "role", "") or "").upper()
         if role != UserRole.SUPER_ADMIN:
             return Response({"detail": "Only facility SUPER_ADMIN can create HMOs."}, status=403)
@@ -186,7 +191,7 @@ class PatientViewSet(viewsets.GenericViewSet,
 
     @action(detail=True, methods=["post"], url_path="attach-hmo", permission_classes=[IsAuthenticated, IsStaff])
     def attach_hmo(self, request, pk=None):
-        """Attach a patient to an HMO within the same facility."""
+        """Attach a patient to a facility-scoped HMO (legacy)."""
         patient = self.get_object()
 
         user_facility_id = getattr(request.user, "facility_id", None)
@@ -194,8 +199,6 @@ class PatientViewSet(viewsets.GenericViewSet,
             return Response({"detail": "Patient must belong to your facility."}, status=403)
 
         hmo_id = request.data.get("hmo_id")
-        
-        # Handle None values from JSON - use "or" to convert None to empty string
         insurance_number = (request.data.get("insurance_number") or "").strip()
         insurance_expiry = request.data.get("insurance_expiry") or None
         insurance_notes = (request.data.get("insurance_notes") or "").strip()
@@ -212,19 +215,15 @@ class PatientViewSet(viewsets.GenericViewSet,
         patient.insurance_notes = insurance_notes
         
         patient.save(update_fields=[
-            "hmo", 
-            "insurance_status", 
-            "insurance_number",
-            "insurance_expiry",
-            "insurance_notes",
-            "updated_at"
+            "hmo", "insurance_status", "insurance_number",
+            "insurance_expiry", "insurance_notes", "updated_at"
         ])
         
         return Response(PatientSerializer(patient, context={"request": request}).data)
 
     @action(detail=True, methods=["post"], url_path="clear-hmo", permission_classes=[IsAuthenticated, IsStaff])
     def clear_hmo(self, request, pk=None):
-        """Remove a patient's HMO attachment (marks as self-pay)."""
+        """Remove a patient's HMO attachment (legacy, marks as self-pay)."""
         patient = self.get_object()
 
         user_facility_id = getattr(request.user, "facility_id", None)
@@ -238,16 +237,385 @@ class PatientViewSet(viewsets.GenericViewSet,
         patient.insurance_notes = ""
         
         patient.save(update_fields=[
-            "hmo", 
-            "insurance_status",
-            "insurance_number",
-            "insurance_expiry",
-            "insurance_notes",
+            "hmo", "insurance_status", "insurance_number",
+            "insurance_expiry", "insurance_notes", "updated_at"
+        ])
+        
+        return Response(PatientSerializer(patient, context={"request": request}).data)
+
+    # =========================================================================
+    # SYSTEM HMO ACTIONS (New system-scoped HMOs with tiers)
+    # =========================================================================
+    
+    @action(
+        detail=True,
+        methods=['post'],
+        url_path='attach-system-hmo',
+        permission_classes=[IsAuthenticated, IsStaff]
+    )
+    def attach_system_hmo(self, request, pk=None):
+        """
+        Attach a patient to a System HMO with tier selection.
+        
+        POST /api/patients/{id}/attach-system-hmo/
+        
+        Body:
+        {
+            "system_hmo_id": 1,
+            "tier_id": 2,
+            "insurance_number": "INS-123456",
+            "insurance_expiry": "2025-12-31",
+            "insurance_notes": "Optional notes"
+        }
+        """
+        patient = self.get_object()
+        user = request.user
+        facility = getattr(user, 'facility', None)
+        
+        # Validate request data
+        serializer = PatientAttachHMOSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        
+        system_hmo_id = serializer.validated_data.get('system_hmo_id')
+        tier_id = serializer.validated_data.get('tier_id')
+        
+        # Get validated objects
+        try:
+            system_hmo = SystemHMO.objects.get(id=system_hmo_id, is_active=True)
+        except SystemHMO.DoesNotExist:
+            return Response(
+                {"system_hmo_id": "HMO not found or is inactive"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        try:
+            tier = HMOTier.objects.get(
+                id=tier_id,
+                system_hmo=system_hmo,
+                is_active=True
+            )
+        except HMOTier.DoesNotExist:
+            return Response(
+                {"tier_id": "Tier not found or does not belong to this HMO"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Check if facility/provider has enabled this HMO
+        hmo_enabled = FacilityHMO.objects.filter(
+            system_hmo=system_hmo,
+            is_active=True
+        )
+        if facility:
+            hmo_enabled = hmo_enabled.filter(facility=facility)
+        else:
+            hmo_enabled = hmo_enabled.filter(owner=user)
+        
+        if not hmo_enabled.exists():
+            return Response(
+                {"system_hmo_id": "This HMO is not enabled for your facility/practice. Please enable it first."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Check if patient is transferring from another facility with same HMO
+        needs_approval = False
+        if patient.system_hmo and patient.system_hmo_id == system_hmo.id:
+            # Same HMO, check if from different facility
+            if patient.hmo_enrollment_facility_id:
+                if facility and patient.hmo_enrollment_facility_id != facility.id:
+                    needs_approval = True
+                elif not facility and patient.hmo_enrollment_facility_id:
+                    needs_approval = True
+            elif patient.hmo_enrollment_provider_id:
+                if facility:
+                    needs_approval = True
+                elif not facility and patient.hmo_enrollment_provider_id != user.id:
+                    needs_approval = True
+        
+        if needs_approval:
+            # Create approval request instead of direct attachment
+            approval, created = PatientFacilityHMOApproval.objects.get_or_create(
+                patient=patient,
+                facility=facility if facility else None,
+                owner=user if not facility else None,
+                system_hmo=system_hmo,
+                status=PatientFacilityHMOApproval.Status.PENDING,
+                defaults={
+                    'tier': tier,
+                    'insurance_number': serializer.validated_data.get('insurance_number', '') or patient.insurance_number,
+                    'insurance_expiry': serializer.validated_data.get('insurance_expiry') or patient.insurance_expiry,
+                    'original_facility': patient.hmo_enrollment_facility,
+                    'original_provider': patient.hmo_enrollment_provider,
+                }
+            )
+            
+            return Response({
+                'status': 'approval_required',
+                'message': 'Patient has existing HMO enrollment from another facility. Approval request created.',
+                'approval_id': approval.id,
+            }, status=status.HTTP_202_ACCEPTED)
+        
+        # Direct enrollment (new HMO or first-time enrollment)
+        patient.system_hmo = system_hmo
+        patient.hmo_tier = tier
+        patient.insurance_status = InsuranceStatus.INSURED
+        patient.insurance_number = (serializer.validated_data.get('insurance_number') or '').strip()
+        patient.insurance_expiry = serializer.validated_data.get('insurance_expiry')
+        patient.insurance_notes = (serializer.validated_data.get('insurance_notes') or '').strip()
+        patient.hmo_enrollment_facility = facility if facility else None
+        patient.hmo_enrollment_provider = user if not facility else None
+        patient.hmo_enrolled_at = timezone.now()
+        
+        patient.save(update_fields=[
+            'system_hmo', 'hmo_tier', 'insurance_status',
+            'insurance_number', 'insurance_expiry', 'insurance_notes',
+            'hmo_enrollment_facility', 'hmo_enrollment_provider', 'hmo_enrolled_at',
+            'updated_at',
+        ])
+        
+        return Response(PatientSerializer(patient, context={'request': request}).data)
+
+    @action(
+        detail=True,
+        methods=['post'],
+        url_path='clear-system-hmo',
+        permission_classes=[IsAuthenticated, IsStaff]
+    )
+    def clear_system_hmo(self, request, pk=None):
+        """
+        Remove a patient's System HMO enrollment (marks as self-pay).
+        
+        POST /api/patients/{id}/clear-system-hmo/
+        """
+        patient = self.get_object()
+        user = request.user
+        facility = getattr(user, 'facility', None)
+        
+        # Check permission
+        if facility:
+            if patient.facility_id != facility.id:
+                return Response(
+                    {"detail": "Patient must belong to your facility."},
+                    status=status.HTTP_403_FORBIDDEN
+                )
+        
+        patient.system_hmo = None
+        patient.hmo_tier = None
+        patient.insurance_status = InsuranceStatus.SELF_PAY
+        patient.insurance_number = ''
+        patient.insurance_expiry = None
+        patient.insurance_notes = ''
+        # Keep enrollment history for audit purposes
+        
+        patient.save(update_fields=[
+            'system_hmo', 'hmo_tier', 'insurance_status',
+            'insurance_number', 'insurance_expiry', 'insurance_notes',
+            'updated_at',
+        ])
+        
+        return Response(PatientSerializer(patient, context={'request': request}).data)
+
+    @action(
+        detail=True,
+        methods=['get'],
+        url_path='check-hmo-transfer',
+        permission_classes=[IsAuthenticated, IsStaff]
+    )
+    def check_hmo_transfer(self, request, pk=None):
+        """
+        Check if a patient needs HMO transfer approval at this facility.
+        
+        GET /api/patients/{id}/check-hmo-transfer/
+        
+        Returns:
+        - needs_approval: bool
+        - existing_enrollment: HMO details if patient has one
+        - approval_status: If approval exists, its status
+        """
+        patient = self.get_object()
+        user = request.user
+        facility = getattr(user, 'facility', None)
+        
+        result = {
+            'needs_approval': False,
+            'existing_enrollment': None,
+            'approval_status': None,
+            'approval_id': None,
+        }
+        
+        # Check if patient has HMO enrollment
+        if not patient.system_hmo:
+            return Response(result)
+        
+        result['existing_enrollment'] = {
+            'system_hmo_id': patient.system_hmo_id,
+            'system_hmo_name': patient.system_hmo.name,
+            'tier_id': patient.hmo_tier_id if patient.hmo_tier else None,
+            'tier_name': patient.hmo_tier.name if patient.hmo_tier else None,
+            'insurance_number': patient.insurance_number,
+            'insurance_expiry': patient.insurance_expiry,
+            'enrollment_facility': patient.hmo_enrollment_facility.name if patient.hmo_enrollment_facility else None,
+            'enrollment_provider': str(patient.hmo_enrollment_provider) if patient.hmo_enrollment_provider else None,
+        }
+        
+        # Check if enrolled at different facility/provider
+        if facility:
+            is_different_source = (
+                patient.hmo_enrollment_facility_id and 
+                patient.hmo_enrollment_facility_id != facility.id
+            ) or (
+                patient.hmo_enrollment_provider_id is not None
+            )
+        else:
+            is_different_source = (
+                patient.hmo_enrollment_provider_id and 
+                patient.hmo_enrollment_provider_id != user.id
+            ) or (
+                patient.hmo_enrollment_facility_id is not None
+            )
+        
+        if is_different_source:
+            result['needs_approval'] = True
+            
+            # Check for existing approval
+            approval_q = PatientFacilityHMOApproval.objects.filter(
+                patient=patient,
+                system_hmo=patient.system_hmo,
+            )
+            
+            if facility:
+                approval_q = approval_q.filter(facility=facility)
+            else:
+                approval_q = approval_q.filter(owner=user)
+            
+            approval = approval_q.order_by('-requested_at').first()
+            
+            if approval:
+                result['approval_status'] = approval.status
+                result['approval_id'] = approval.id
+                
+                # If already approved, no new approval needed
+                if approval.status == PatientFacilityHMOApproval.Status.APPROVED:
+                    result['needs_approval'] = False
+        
+        return Response(result)
+
+    @action(
+        detail=True,
+        methods=["post"],
+        url_path="detach-hmo",
+        permission_classes=[IsAuthenticated]
+    )
+    def detach_hmo(self, request, pk=None):
+        """Allow patients to detach themselves from their HMO (self-service)."""
+        patient = self.get_object()
+        user = request.user
+
+        # Patients can only detach their own profile
+        if user.role == UserRole.PATIENT:
+            patient_profile = getattr(user, "patient_profile", None)
+            if not patient_profile or patient.id != patient_profile.id:
+                return Response(
+                    {"detail": "You can only detach your own HMO coverage."},
+                    status=403
+                )
+        # Staff can detach for any patient in their facility
+        elif user.facility_id and patient.facility_id != user.facility_id:
+            return Response(
+                {"detail": "Patient must belong to your facility."},
+                status=403
+            )
+        
+        # Check if patient has HMO to detach (check both legacy and system HMO)
+        if not patient.hmo and not patient.system_hmo:
+            return Response(
+                {"detail": "Patient does not have active HMO coverage."},
+                status=400
+            )
+
+        # Clear both legacy and system HMO
+        patient.hmo = None
+        patient.system_hmo = None
+        patient.hmo_tier = None
+        patient.insurance_status = InsuranceStatus.SELF_PAY
+        patient.insurance_number = ""
+        patient.insurance_expiry = None
+        patient.insurance_notes = ""
+        
+        patient.save(update_fields=[
+            "hmo", "system_hmo", "hmo_tier",
+            "insurance_status", "insurance_number",
+            "insurance_expiry", "insurance_notes",
             "updated_at"
         ])
         
         return Response(PatientSerializer(patient, context={"request": request}).data)
 
+    @action(
+        detail=True,
+        methods=['get'],
+        url_path='hmo-info',
+        permission_classes=[IsAuthenticated]
+    )
+    def hmo_info(self, request, pk=None):
+        """
+        Get detailed HMO information for a patient.
+        
+        GET /api/patients/{id}/hmo-info/
+        """
+        patient = self.get_object()
+        
+        # Build response
+        data = {
+            'has_legacy_hmo': patient.hmo_id is not None,
+            'has_system_hmo': patient.system_hmo_id is not None,
+            'insurance_status': patient.insurance_status,
+            'insurance_number': patient.insurance_number,
+            'insurance_expiry': patient.insurance_expiry,
+            'insurance_notes': patient.insurance_notes,
+        }
+        
+        # Legacy HMO info
+        if patient.hmo:
+            data['legacy_hmo'] = {
+                'id': patient.hmo.id,
+                'name': patient.hmo.name,
+                'facility_id': patient.hmo.facility_id,
+            }
+        
+        # System HMO info
+        if patient.system_hmo:
+            data['system_hmo'] = {
+                'id': patient.system_hmo.id,
+                'name': patient.system_hmo.name,
+                'nhis_number': patient.system_hmo.nhis_number,
+            }
+            
+            if patient.hmo_tier:
+                data['tier'] = {
+                    'id': patient.hmo_tier.id,
+                    'name': patient.hmo_tier.name,
+                    'level': patient.hmo_tier.level,
+                }
+            
+            # Enrollment info
+            data['enrollment'] = {
+                'enrolled_at': patient.hmo_enrolled_at,
+                'enrollment_type': 'facility' if patient.hmo_enrollment_facility else 'provider' if patient.hmo_enrollment_provider else None,
+            }
+            
+            if patient.hmo_enrollment_facility:
+                data['enrollment']['facility_id'] = patient.hmo_enrollment_facility_id
+                data['enrollment']['facility_name'] = patient.hmo_enrollment_facility.name
+            elif patient.hmo_enrollment_provider:
+                data['enrollment']['provider_id'] = patient.hmo_enrollment_provider_id
+                data['enrollment']['provider_name'] = f"{patient.hmo_enrollment_provider.first_name} {patient.hmo_enrollment_provider.last_name}".strip()
+        
+        return Response(data)
+
+
+# ============================================================================
+# SELF REGISTRATION
+# ============================================================================
 
 @api_view(["POST"])
 @permission_classes([AllowAny])
@@ -261,22 +629,13 @@ def self_register(request):
     return Response({"patient_id": patient.id}, status=201)
 
 
-# --- Dependent endpoints / viewset below ---
+# ============================================================================
+# DEPENDENT VIEWSET
+# ============================================================================
 
 class DependentViewSet(viewsets.ModelViewSet):
     """
     CRUD for dependents (Patients with parent_patient set).
-
-    Collection endpoints:
-
-      - GET  /api/patients/dependents/
-      - POST /api/patients/dependents/
-
-    Item endpoints:
-
-      - GET    /api/patients/dependents/{id}/
-      - PATCH  /api/patients/dependents/{id}/
-      - DELETE /api/patients/dependents/{id}/
     """
 
     queryset = Patient.objects.select_related("parent_patient").filter(
@@ -307,7 +666,7 @@ class DependentViewSet(viewsets.ModelViewSet):
                 return qs.filter(parent_patient__facility_id=user.facility_id)
             return qs
 
-        # Patient user / guardian → only their own dependents
+        # Patient/guardian → only their own dependents
         patient_profile = getattr(user, "patient_profile", None)
         if patient_profile:
             return qs.filter(parent_patient_id=patient_profile.id)
@@ -316,8 +675,7 @@ class DependentViewSet(viewsets.ModelViewSet):
 
     def perform_create(self, serializer):
         """
-        Attach the correct parent_patient based on who is logged in,
-        and propagate guardian_user + facility.
+        Attach the correct parent_patient based on who is logged in.
         """
         user = self.request.user
 
@@ -329,30 +687,23 @@ class DependentViewSet(viewsets.ModelViewSet):
         ):
             parent_id = self.request.data.get("parent_patient_id")
             if not parent_id:
-                raise ValidationError(
-                    {
-                        "parent_patient_id": [
-                            "This field is required when staff create a dependent."
-                        ]
-                    }
-                )
+                raise ValidationError({
+                    "parent_patient_id": [
+                        "This field is required when staff create a dependent."
+                    ]
+                })
             parent_patient = get_object_or_404(Patient, pk=parent_id)
-
         else:
             # Patient/guardian path → attach to their own patient profile
             patient_profile = getattr(user, "patient_profile", None)
             if not patient_profile:
-                raise ValidationError(
-                    {
-                        "detail": "You do not have a patient profile to attach dependents to."
-                    }
-                )
+                raise ValidationError({
+                    "detail": "You do not have a patient profile to attach dependents to."
+                })
             parent_patient = patient_profile
 
-        # guardian_user = current user only if they are a patient/guardian
         guardian_user = user if getattr(user, "patient_profile", None) else None
 
-        # facility: prefer user's facility, fall back to parent's facility
         facility = getattr(user, "facility", None)
         if facility is None and getattr(parent_patient, "facility_id", None):
             facility = parent_patient.facility
@@ -364,44 +715,31 @@ class DependentViewSet(viewsets.ModelViewSet):
         )
 
 
-# patch the existing PatientViewSet to add nested dependents action
+# Patch the existing PatientViewSet to add nested dependents action
 def add_dependents_actions_to_patient_viewset(viewset_cls):
     """
-    Dynamically attach nested dependents actions to PatientViewSet:
-
-      - GET  /api/patients/{pk}/dependents/
-      - POST /api/patients/{pk}/dependents/
-
-    This is mainly for facility / staff flows where you want to see or add
-    dependents for a specific patient from the patient detail context.
+    Dynamically attach nested dependents actions to PatientViewSet.
     """
 
     @action(detail=True, methods=["get"], url_path="dependents")
     def dependents(self, request, pk=None):
-        # List dependents whose parent_patient is this patient
         qs = (
             Patient.objects.select_related("parent_patient")
             .filter(parent_patient_id=pk)
             .order_by("-id")
         )
-        serializer = DependentSerializer(
-            qs, many=True, context={"request": request}
-        )
+        serializer = DependentSerializer(qs, many=True, context={"request": request})
         return Response(serializer.data)
 
     @dependents.mapping.post
     def add_dependent(self, request, pk=None):
-        # Create a new dependent for this patient (used mainly by staff)
         parent_patient = get_object_or_404(Patient, pk=pk)
 
         create_serializer = DependentCreateSerializer(data=request.data)
         create_serializer.is_valid(raise_exception=True)
 
-        # guardian_user: staff may leave this null; patient users can be guardian
         user = request.user
         guardian_user = user if getattr(user, "patient_profile", None) else None
-
-        # facility: prefer parent's facility
         facility = getattr(parent_patient, "facility", None)
 
         dependent = create_serializer.save(
@@ -410,12 +748,9 @@ def add_dependents_actions_to_patient_viewset(viewset_cls):
             facility=facility,
         )
 
-        detail = DependentSerializer(
-            dependent, context={"request": request}
-        )
+        detail = DependentSerializer(dependent, context={"request": request})
         return Response(detail.data, status=status.HTTP_201_CREATED)
 
-    # Attach the actions to the given viewset class
     setattr(viewset_cls, "dependents", dependents)
     setattr(viewset_cls, "add_dependent", add_dependent)
 
@@ -424,17 +759,13 @@ def add_dependents_actions_to_patient_viewset(viewset_cls):
 PatientViewSet = add_dependents_actions_to_patient_viewset(PatientViewSet)
 
 
+# ============================================================================
+# PATIENT DOCUMENT VIEWSET
+# ============================================================================
+
 class PatientDocumentViewSet(viewsets.ModelViewSet):
     """
     Patient-attached documents (lab results, imaging, prescriptions, etc.).
-
-    - PATIENT role:
-        * GET /api/patients/documents/ → own documents
-        * POST /api/patients/documents/ → upload to own record
-        * DELETE /api/patients/documents/{id}/ → delete own doc (optional)
-    - Staff (DOCTOR/NURSE/etc):
-        * GET /api/patients/documents/?patient=<patient_id>
-          → all docs for that patient, regardless of facility
     """
 
     serializer_class = PatientDocumentSerializer
@@ -457,20 +788,13 @@ class PatientDocumentViewSet(viewsets.ModelViewSet):
         if patient_id:
             return qs.filter(patient_id=patient_id)
 
-        # No patient filter → don't leak anything
         return qs.none()
 
     def create(self, request, *args, **kwargs):
-        """
-        Override create to handle patient assignment before validation.
-        """
         user = request.user
-        
-        # Determine which patient this document belongs to
         patient = None
         
         if getattr(user, "role", None) == UserRole.PATIENT:
-            # Patient uploads to their own record
             patient = getattr(user, "patient_profile", None)
             if patient is None:
                 return Response(
@@ -478,7 +802,6 @@ class PatientDocumentViewSet(viewsets.ModelViewSet):
                     status=status.HTTP_400_BAD_REQUEST
                 )
         else:
-            # Staff upload - get patient from request
             patient_id = request.data.get("patient")
             if not patient_id:
                 return Response(
@@ -494,18 +817,14 @@ class PatientDocumentViewSet(viewsets.ModelViewSet):
                     status=status.HTTP_400_BAD_REQUEST
                 )
         
-        # Now validate and create the document
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         
-        # Determine uploaded_by_role
-        role_value = getattr(user, "role", None)
         if getattr(user, "role", None) == UserRole.PATIENT:
             uploaded_by_role = PatientDocument.UploadedBy.PATIENT
         else:
             uploaded_by_role = self._guess_uploaded_by_role(user)
         
-        # Save with patient
         document = serializer.save(
             patient=patient,
             uploaded_by=user,
@@ -513,11 +832,7 @@ class PatientDocumentViewSet(viewsets.ModelViewSet):
         )
         
         headers = self.get_success_headers(serializer.data)
-        return Response(
-            serializer.data,
-            status=status.HTTP_201_CREATED,
-            headers=headers
-        )
+        return Response(serializer.data, status=status.HTTP_201_CREATED, headers=headers)
 
     def _guess_uploaded_by_role(self, user):
         role = (getattr(user, "role", "") or "").upper()
@@ -526,24 +841,13 @@ class PatientDocumentViewSet(viewsets.ModelViewSet):
         return PatientDocument.UploadedBy.SYSTEM
 
 
-# --- Allergy ViewSet ---
+# ============================================================================
+# ALLERGY VIEWSET
+# ============================================================================
 
 class AllergyViewSet(viewsets.ModelViewSet):
     """
     CRUD for patient allergies.
-    
-    Endpoints:
-      - GET    /api/patients/allergies/           → List allergies (patient: own, staff: by patient param)
-      - POST   /api/patients/allergies/           → Create allergy
-      - GET    /api/patients/allergies/{id}/      → Retrieve allergy
-      - PATCH  /api/patients/allergies/{id}/      → Update allergy
-      - DELETE /api/patients/allergies/{id}/      → Delete allergy
-    
-    Query params (for staff):
-      - patient: Filter by patient ID
-      - is_active: Filter by active status (true/false)
-      - allergy_type: Filter by type (DRUG, FOOD, etc.)
-      - severity: Filter by severity (MILD, MODERATE, SEVERE, LIFE_THREATENING)
     """
     
     queryset = Allergy.objects.select_related("patient", "recorded_by").all()
@@ -574,7 +878,6 @@ class AllergyViewSet(viewsets.ModelViewSet):
         if patient_id:
             qs = qs.filter(patient_id=patient_id)
         elif getattr(user, "facility_id", None):
-            # Scope to facility's patients
             qs = qs.filter(patient__facility_id=user.facility_id)
         
         # Additional filters
@@ -593,17 +896,10 @@ class AllergyViewSet(viewsets.ModelViewSet):
         return qs.order_by("-created_at")
     
     def create(self, request, *args, **kwargs):
-        """
-        Create a new allergy record.
-        Patient is determined by:
-          - PATIENT role: own patient profile
-          - Staff: explicit patient ID in request data
-        """
         user = request.user
         patient = None
         
         if getattr(user, "role", None) == UserRole.PATIENT:
-            # Patient creates for themselves
             patient = getattr(user, "patient_profile", None)
             if patient is None:
                 return Response(
@@ -611,7 +907,6 @@ class AllergyViewSet(viewsets.ModelViewSet):
                     status=status.HTTP_400_BAD_REQUEST
                 )
         else:
-            # Staff creates for a specific patient
             patient_id = request.data.get("patient")
             if not patient_id:
                 return Response(
@@ -641,18 +936,12 @@ class AllergyViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST
             )
         
-        allergy = serializer.save(
-            patient=patient,
-            recorded_by=user,
-        )
+        allergy = serializer.save(patient=patient, recorded_by=user)
         
         output_serializer = AllergySerializer(allergy)
         return Response(output_serializer.data, status=status.HTTP_201_CREATED)
     
     def update(self, request, *args, **kwargs):
-        """
-        Update an allergy record.
-        """
         partial = kwargs.pop("partial", False)
         instance = self.get_object()
         
@@ -676,121 +965,11 @@ class AllergyViewSet(viewsets.ModelViewSet):
         
         output_serializer = AllergySerializer(instance)
         return Response(output_serializer.data)
-    
-    def destroy(self, request, *args, **kwargs):
-        """
-        Delete an allergy record.
-        """
-        instance = self.get_object()
-        self.perform_destroy(instance)
-        return Response(status=status.HTTP_204_NO_CONTENT)
 
-    @action(
-        detail=True,
-        methods=['post'],
-        url_path='attach-system-hmo',
-        permission_classes=[IsAuthenticated]
-    )
-    def attach_system_hmo(self, request, pk=None):
-        """
-        Attach a patient to a System HMO with tier selection.
-        
-        This replaces the old attach_hmo action.
-        
-        POST /api/patients/{id}/attach-system-hmo/
-        
-        Body:
-        {
-            "system_hmo_id": 1,
-            "tier_id": 2,
-            "insurance_number": "INS-123456",
-            "insurance_expiry": "2025-12-31",
-            "insurance_notes": "Optional notes"
-        }
-        """
-        from .views_hmo import patient_attach_system_hmo
-        return patient_attach_system_hmo(self, request, pk)
-    
-    @action(
-        detail=True,
-        methods=['post'],
-        url_path='clear-system-hmo',
-        permission_classes=[IsAuthenticated]
-    )
-    def clear_system_hmo(self, request, pk=None):
-        """
-        Remove a patient's HMO enrollment (marks as self-pay).
-        
-        POST /api/patients/{id}/clear-system-hmo/
-        """
-        from .views_hmo import patient_clear_system_hmo
-        return patient_clear_system_hmo(self, request, pk)
-    
-    @action(
-        detail=True,
-        methods=['get'],
-        url_path='check-hmo-transfer',
-        permission_classes=[IsAuthenticated]
-    )
-    def check_hmo_transfer(self, request, pk=None):
-        """
-        Check if a patient needs HMO transfer approval at this facility.
-        
-        GET /api/patients/{id}/check-hmo-transfer/
-        
-        Returns:
-        - needs_approval: bool
-        - existing_enrollment: HMO details if patient has one
-        - approval_status: If approval exists, its status
-        """
-        from .views_hmo import patient_check_hmo_transfer
-        return patient_check_hmo_transfer(self, request, pk)
-    
-    @action(detail=True, methods=["post"], url_path="detach-hmo", permission_classes=[IsAuthenticated])
-    def detach_hmo(self, request, pk=None):
-        """Allow patients to detach themselves from their HMO (self-service)."""
-        patient = self.get_object()
-        user = request.user
 
-        # Patients can only detach their own profile
-        if user.role == UserRole.PATIENT:
-            patient_profile = getattr(user, "patient_profile", None)
-            if not patient_profile or patient.id != patient_profile.id:
-                return Response(
-                    {"detail": "You can only detach your own HMO coverage."},
-                    status=403
-                )
-        # Staff can detach for any patient in their facility
-        elif user.facility_id and patient.facility_id != user.facility_id:
-            return Response(
-                {"detail": "Patient must belong to your facility."},
-                status=403
-            )
-        
-        # Check if patient has HMO to detach
-        if not patient.hmo:
-            return Response(
-                {"detail": "Patient does not have active HMO coverage."},
-                status=400
-            )
-
-        patient.hmo = None
-        patient.insurance_status = InsuranceStatus.SELF_PAY
-        patient.insurance_number = ""
-        patient.insurance_expiry = None
-        patient.insurance_notes = ""
-        
-        patient.save(update_fields=[
-            "hmo", 
-            "insurance_status",
-            "insurance_number",
-            "insurance_expiry",
-            "insurance_notes",
-            "updated_at"
-        ])
-        
-        return Response(PatientSerializer(patient, context={"request": request}).data)
-    
+# ============================================================================
+# PERMISSION CLASSES
+# ============================================================================
 
 class IsSystemAdmin(permissions.BasePermission):
     """
@@ -826,7 +1005,7 @@ class CanManageHMO(permissions.BasePermission):
 
 
 # ============================================================================
-# SYSTEM HMO VIEWS (Master List)
+# SYSTEM HMO VIEWSET (Master List)
 # ============================================================================
 
 class SystemHMOViewSet(
@@ -844,11 +1023,12 @@ class SystemHMOViewSet(
     - Delete: Not allowed (deactivate instead)
     
     Endpoints:
-    - GET    /api/hmo/system/              - List all active system HMOs
-    - GET    /api/hmo/system/{id}/         - Get HMO details with tiers
-    - POST   /api/hmo/system/              - Create new HMO (admin only)
-    - PATCH  /api/hmo/system/{id}/         - Update HMO (admin only)
-    - GET    /api/hmo/system/all/          - List all HMOs including inactive (admin only)
+    - GET    /api/patients/hmo/system/              - List all active system HMOs
+    - GET    /api/patients/hmo/system/{id}/         - Get HMO details with tiers
+    - POST   /api/patients/hmo/system/              - Create new HMO (admin only)
+    - PATCH  /api/patients/hmo/system/{id}/         - Update HMO (admin only)
+    - GET    /api/patients/hmo/system/all/          - List all HMOs including inactive (admin only)
+    - GET    /api/patients/hmo/system/dropdown/     - Simple list for dropdowns
     """
     
     queryset = SystemHMO.objects.prefetch_related(
@@ -941,7 +1121,7 @@ class SystemHMOViewSet(
 
 
 # ============================================================================
-# FACILITY HMO VIEWS
+# FACILITY HMO VIEWSET
 # ============================================================================
 
 class FacilityHMOViewSet(
@@ -959,11 +1139,11 @@ class FacilityHMOViewSet(
     - View which HMOs are available for patient enrollment
     
     Endpoints:
-    - GET    /api/facilities/hmos/                     - List enabled HMOs
-    - POST   /api/facilities/hmos/enable/              - Enable a system HMO
-    - DELETE /api/facilities/hmos/{id}/                - Disable an HMO
-    - POST   /api/facilities/hmos/{id}/relationship/   - Update relationship status
-    - GET    /api/facilities/hmos/available/           - List available system HMOs to enable
+    - GET    /api/patients/hmo/facility/                     - List enabled HMOs
+    - POST   /api/patients/hmo/facility/enable/              - Enable a system HMO
+    - DELETE /api/patients/hmo/facility/{id}/                - Disable an HMO
+    - POST   /api/patients/hmo/facility/{id}/relationship/   - Update relationship status
+    - GET    /api/patients/hmo/facility/available/           - List available system HMOs to enable
     """
     
     serializer_class = FacilityHMOSerializer
@@ -993,6 +1173,9 @@ class FacilityHMOViewSet(
         is_active = self.request.query_params.get('is_active')
         if is_active is not None:
             qs = qs.filter(is_active=is_active.lower() == 'true')
+        else:
+            # Default to showing only active
+            qs = qs.filter(is_active=True)
         
         return qs.order_by('system_hmo__name')
     
@@ -1015,12 +1198,64 @@ class FacilityHMOViewSet(
             "contract_reference": "CONTRACT-001"
         }
         """
-        serializer = FacilityHMOCreateSerializer(
-            data=request.data,
-            context={'request': request}
+        user = request.user
+        facility = getattr(user, 'facility', None)
+        
+        # Validate system_hmo_id
+        system_hmo_id = request.data.get('system_hmo_id')
+        if not system_hmo_id:
+            return Response(
+                {"system_hmo_id": "This field is required."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        try:
+            system_hmo = SystemHMO.objects.get(id=system_hmo_id, is_active=True)
+        except SystemHMO.DoesNotExist:
+            return Response(
+                {"system_hmo_id": "HMO not found or is inactive."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Check if already enabled
+        existing_q = FacilityHMO.objects.filter(system_hmo=system_hmo)
+        if facility:
+            existing_q = existing_q.filter(facility=facility)
+        else:
+            existing_q = existing_q.filter(owner=user)
+        
+        existing = existing_q.first()
+        
+        if existing:
+            if existing.is_active:
+                return Response(
+                    {"system_hmo_id": "This HMO is already enabled for your facility/practice."},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+            else:
+                # Reactivate
+                existing.is_active = True
+                existing.relationship_notes = request.data.get('relationship_notes', existing.relationship_notes)
+                existing.contract_start_date = request.data.get('contract_start_date', existing.contract_start_date)
+                existing.contract_end_date = request.data.get('contract_end_date', existing.contract_end_date)
+                existing.contract_reference = request.data.get('contract_reference', existing.contract_reference)
+                existing.save()
+                
+                output = FacilityHMOSerializer(existing)
+                return Response(output.data, status=status.HTTP_200_OK)
+        
+        # Create new relationship
+        facility_hmo = FacilityHMO.objects.create(
+            facility=facility if facility else None,
+            owner=user if not facility else None,
+            system_hmo=system_hmo,
+            relationship_status=request.data.get('relationship_status', FacilityHMO.RelationshipStatus.GOOD),
+            relationship_notes=request.data.get('relationship_notes', ''),
+            contract_start_date=request.data.get('contract_start_date'),
+            contract_end_date=request.data.get('contract_end_date'),
+            contract_reference=request.data.get('contract_reference', ''),
+            is_active=True,
         )
-        serializer.is_valid(raise_exception=True)
-        facility_hmo = serializer.save()
         
         output = FacilityHMOSerializer(facility_hmo)
         return Response(output.data, status=status.HTTP_201_CREATED)
@@ -1038,13 +1273,17 @@ class FacilityHMOViewSet(
         """
         facility_hmo = self.get_object()
         
-        serializer = FacilityHMOUpdateRelationshipSerializer(
-            facility_hmo,
-            data=request.data,
-            context={'request': request}
-        )
-        serializer.is_valid(raise_exception=True)
-        serializer.save()
+        relationship_status = request.data.get('relationship_status')
+        if relationship_status and relationship_status in dict(FacilityHMO.RelationshipStatus.choices):
+            facility_hmo.relationship_status = relationship_status
+        
+        relationship_notes = request.data.get('relationship_notes')
+        if relationship_notes is not None:
+            facility_hmo.relationship_notes = relationship_notes
+        
+        facility_hmo.relationship_updated_at = timezone.now()
+        facility_hmo.relationship_updated_by = request.user
+        facility_hmo.save()
         
         output = FacilityHMOSerializer(facility_hmo)
         return Response(output.data)
@@ -1057,7 +1296,7 @@ class FacilityHMOViewSet(
         user = request.user
         facility = getattr(user, 'facility', None)
         
-        # Get already enabled HMO IDs
+        # Get already enabled HMO IDs (both active and inactive, to avoid duplicates)
         if facility:
             enabled_ids = FacilityHMO.objects.filter(
                 facility=facility
@@ -1081,7 +1320,6 @@ class FacilityHMOViewSet(
     def toggle_active(self, request, pk=None):
         """
         Toggle the active status of a facility-HMO relationship.
-        Used to temporarily disable an HMO without removing the relationship.
         """
         facility_hmo = self.get_object()
         facility_hmo.is_active = not facility_hmo.is_active
@@ -1108,7 +1346,7 @@ class FacilityHMOViewSet(
 
 
 # ============================================================================
-# PATIENT HMO APPROVAL VIEWS
+# PATIENT HMO APPROVAL VIEWSET
 # ============================================================================
 
 class PatientHMOApprovalViewSet(
@@ -1178,16 +1416,65 @@ class PatientHMOApprovalViewSet(
             "patient_id": 123,
             "notes": "Optional notes"
         }
-        
-        This is typically called automatically when a patient with existing
-        HMO registers at a new facility.
         """
-        serializer = PatientFacilityHMOApprovalCreateSerializer(
-            data=request.data,
-            context={'request': request}
+        user = request.user
+        facility = getattr(user, 'facility', None)
+        
+        patient_id = request.data.get('patient_id')
+        if not patient_id:
+            return Response(
+                {"patient_id": "This field is required."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        try:
+            patient = Patient.objects.select_related(
+                'system_hmo', 'hmo_tier',
+                'hmo_enrollment_facility', 'hmo_enrollment_provider'
+            ).get(id=patient_id)
+        except Patient.DoesNotExist:
+            return Response(
+                {"patient_id": "Patient not found."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        if not patient.system_hmo:
+            return Response(
+                {"patient_id": "Patient does not have an HMO enrollment to transfer."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Check for existing pending approval
+        existing_q = PatientFacilityHMOApproval.objects.filter(
+            patient=patient,
+            status=PatientFacilityHMOApproval.Status.PENDING,
         )
-        serializer.is_valid(raise_exception=True)
-        approval = serializer.save()
+        
+        if facility:
+            existing_q = existing_q.filter(facility=facility)
+        else:
+            existing_q = existing_q.filter(owner=user)
+        
+        if existing_q.exists():
+            return Response(
+                {"patient_id": "There is already a pending HMO approval request for this patient."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Create the approval request
+        approval = PatientFacilityHMOApproval.objects.create(
+            patient=patient,
+            facility=facility if facility else None,
+            owner=user if not facility else None,
+            system_hmo=patient.system_hmo,
+            tier=patient.hmo_tier,
+            insurance_number=patient.insurance_number,
+            insurance_expiry=patient.insurance_expiry,
+            original_facility=patient.hmo_enrollment_facility,
+            original_provider=patient.hmo_enrollment_provider,
+            status=PatientFacilityHMOApproval.Status.PENDING,
+            request_notes=request.data.get('notes', ''),
+        )
         
         output = PatientFacilityHMOApprovalSerializer(approval)
         return Response(output.data, status=status.HTTP_201_CREATED)
@@ -1205,17 +1492,42 @@ class PatientHMOApprovalViewSet(
         """
         approval = self.get_object()
         
-        serializer = PatientTransferHMOApprovalSerializer(
-            data=request.data,
-            context={'request': request, 'approval': approval}
-        )
-        serializer.is_valid(raise_exception=True)
+        if approval.status != PatientFacilityHMOApproval.Status.PENDING:
+            return Response(
+                {"detail": "This request has already been processed."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
         
-        action_type = serializer.validated_data['action']
-        notes = serializer.validated_data.get('notes', '')
+        action_type = request.data.get('action')
+        if action_type not in ('approve', 'reject'):
+            return Response(
+                {"action": "Must be 'approve' or 'reject'."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        notes = request.data.get('notes', '')
         
         if action_type == 'approve':
             approval.approve(request.user, notes)
+            
+            # Update patient's enrollment to this facility
+            patient = approval.patient
+            facility = approval.facility
+            
+            if facility:
+                patient.hmo_enrollment_facility = facility
+                patient.hmo_enrollment_provider = None
+            else:
+                patient.hmo_enrollment_facility = None
+                patient.hmo_enrollment_provider = approval.owner
+            
+            patient.hmo_enrolled_at = timezone.now()
+            patient.save(update_fields=[
+                'hmo_enrollment_facility',
+                'hmo_enrollment_provider',
+                'hmo_enrolled_at',
+                'updated_at',
+            ])
         else:
             approval.reject(request.user, notes)
         
@@ -1237,204 +1549,3 @@ class PatientHMOApprovalViewSet(
         }
         
         return Response(summary)
-
-
-# ============================================================================
-# PATIENT HMO ENROLLMENT ACTIONS
-# ============================================================================
-# 
-# These functions should be added as actions to the existing PatientViewSet
-# 
-
-def patient_attach_system_hmo(viewset, request, pk=None):
-    """
-    Attach a patient to a System HMO with tier selection.
-    
-    This replaces the old attach_hmo action.
-    
-    POST /api/patients/{id}/attach-system-hmo/
-    
-    Body:
-    {
-        "system_hmo_id": 1,
-        "tier_id": 2,
-        "insurance_number": "INS-123456",
-        "insurance_expiry": "2025-12-31",
-        "insurance_notes": "Optional notes"
-    }
-    """
-    from .models import Patient
-    from .serializers import PatientSerializer
-    
-    patient = viewset.get_object()
-    user = request.user
-    facility = getattr(user, 'facility', None)
-    
-    # Validate request data
-    serializer = PatientAttachHMOSerializer(
-        data=request.data,
-        context={'request': request}
-    )
-    serializer.is_valid(raise_exception=True)
-    
-    system_hmo = serializer.context.get('system_hmo')
-    tier = serializer.context.get('tier')
-    
-    # Check if patient is transferring from another facility with same HMO
-    needs_approval = False
-    if patient.system_hmo and patient.system_hmo_id == system_hmo.id:
-        # Same HMO, check if from different facility
-        if patient.hmo_enrollment_facility_id and patient.hmo_enrollment_facility_id != (facility.id if facility else None):
-            needs_approval = True
-        elif patient.hmo_enrollment_provider_id and patient.hmo_enrollment_provider_id != (user.id if not facility else None):
-            needs_approval = True
-    
-    if needs_approval:
-        # Create approval request instead of direct attachment
-        approval, created = PatientFacilityHMOApproval.objects.get_or_create(
-            patient=patient,
-            facility=facility if facility else None,
-            owner=user if not facility else None,
-            system_hmo=system_hmo,
-            defaults={
-                'tier': tier,
-                'insurance_number': serializer.validated_data.get('insurance_number', patient.insurance_number),
-                'insurance_expiry': serializer.validated_data.get('insurance_expiry', patient.insurance_expiry),
-                'original_facility': patient.hmo_enrollment_facility,
-                'original_provider': patient.hmo_enrollment_provider,
-                'status': PatientFacilityHMOApproval.Status.PENDING,
-            }
-        )
-        
-        return Response({
-            'status': 'approval_required',
-            'message': 'Patient has existing HMO enrollment from another facility. Approval request created.',
-            'approval_id': approval.id,
-        }, status=status.HTTP_202_ACCEPTED)
-    
-    # Direct enrollment (new HMO or first-time enrollment)
-    patient.system_hmo = system_hmo
-    patient.hmo_tier = tier
-    patient.insurance_status = InsuranceStatus.INSURED
-    patient.insurance_number = serializer.validated_data.get('insurance_number', '').strip()
-    patient.insurance_expiry = serializer.validated_data.get('insurance_expiry')
-    patient.insurance_notes = serializer.validated_data.get('insurance_notes', '').strip()
-    patient.hmo_enrollment_facility = facility if facility else None
-    patient.hmo_enrollment_provider = user if not facility else None
-    patient.hmo_enrolled_at = timezone.now()
-    
-    patient.save(update_fields=[
-        'system_hmo', 'hmo_tier', 'insurance_status',
-        'insurance_number', 'insurance_expiry', 'insurance_notes',
-        'hmo_enrollment_facility', 'hmo_enrollment_provider', 'hmo_enrolled_at',
-        'updated_at',
-    ])
-    
-    return Response(PatientSerializer(patient, context={'request': request}).data)
-
-
-def patient_clear_system_hmo(viewset, request, pk=None):
-    """
-    Remove a patient's HMO enrollment (marks as self-pay).
-    
-    POST /api/patients/{id}/clear-system-hmo/
-    """
-    from .models import Patient
-    from .serializers import PatientSerializer
-    
-    patient = viewset.get_object()
-    
-    patient.system_hmo = None
-    patient.hmo_tier = None
-    patient.insurance_status = InsuranceStatus.SELF_PAY
-    patient.insurance_number = ''
-    patient.insurance_expiry = None
-    patient.insurance_notes = ''
-    # Keep enrollment history for audit purposes
-    # patient.hmo_enrollment_facility = None
-    # patient.hmo_enrollment_provider = None
-    # patient.hmo_enrolled_at = None
-    
-    patient.save(update_fields=[
-        'system_hmo', 'hmo_tier', 'insurance_status',
-        'insurance_number', 'insurance_expiry', 'insurance_notes',
-        'updated_at',
-    ])
-    
-    return Response(PatientSerializer(patient, context={'request': request}).data)
-
-
-def patient_check_hmo_transfer(viewset, request, pk=None):
-    """
-    Check if a patient needs HMO transfer approval at this facility.
-    
-    GET /api/patients/{id}/check-hmo-transfer/
-    
-    Returns:
-    - needs_approval: bool
-    - existing_enrollment: HMO details if patient has one
-    - approval_status: If approval exists, its status
-    """
-    patient = viewset.get_object()
-    user = request.user
-    facility = getattr(user, 'facility', None)
-    
-    result = {
-        'needs_approval': False,
-        'existing_enrollment': None,
-        'approval_status': None,
-        'approval_id': None,
-    }
-    
-    # Check if patient has HMO enrollment
-    if not patient.system_hmo:
-        return Response(result)
-    
-    result['existing_enrollment'] = {
-        'system_hmo_id': patient.system_hmo_id,
-        'system_hmo_name': patient.system_hmo.name,
-        'tier_id': patient.hmo_tier_id if patient.hmo_tier else None,
-        'tier_name': patient.hmo_tier.name if patient.hmo_tier else None,
-        'insurance_number': patient.insurance_number,
-        'insurance_expiry': patient.insurance_expiry,
-        'enrollment_facility': patient.hmo_enrollment_facility.name if patient.hmo_enrollment_facility else None,
-        'enrollment_provider': str(patient.hmo_enrollment_provider) if patient.hmo_enrollment_provider else None,
-    }
-    
-    # Check if enrolled at different facility/provider
-    if facility:
-        is_different_source = (
-            patient.hmo_enrollment_facility_id and 
-            patient.hmo_enrollment_facility_id != facility.id
-        )
-    else:
-        is_different_source = (
-            patient.hmo_enrollment_provider_id and 
-            patient.hmo_enrollment_provider_id != user.id
-        )
-    
-    if is_different_source:
-        result['needs_approval'] = True
-        
-        # Check for existing approval
-        approval_q = PatientFacilityHMOApproval.objects.filter(
-            patient=patient,
-            system_hmo=patient.system_hmo,
-        )
-        
-        if facility:
-            approval_q = approval_q.filter(facility=facility)
-        else:
-            approval_q = approval_q.filter(owner=user)
-        
-        approval = approval_q.order_by('-requested_at').first()
-        
-        if approval:
-            result['approval_status'] = approval.status
-            result['approval_id'] = approval.id
-            
-            # If already approved, no new approval needed
-            if approval.status == PatientFacilityHMOApproval.Status.APPROVED:
-                result['needs_approval'] = False
-    
-    return Response(result)

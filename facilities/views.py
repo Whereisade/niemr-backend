@@ -5,7 +5,6 @@ from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 from django.db.models import Count, Sum, Q, Prefetch
-from django.utils import timezone
 
 from patients.models import SystemHMO, HMOTier, FacilityHMO, PatientFacilityHMOApproval, Patient
 from patients.serializers import (
@@ -16,7 +15,7 @@ from patients.serializers import (
     PatientFacilityHMOApprovalSerializer,
 )
 from facilities.models import Facility
-from .permissions import IsFacilityStaff, HasFacilityPermission
+from .permissions import IsFacilityStaff, IsFacilitySuperAdmin, IsFacilityAdmin
 from rest_framework import viewsets, mixins, status, filters
 from rest_framework.views import APIView
 from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
@@ -48,12 +47,14 @@ from .serializers import (
     FacilityExtraDocumentSerializer,
     FacilityAdminSignupSerializer,
     BedAssignmentSerializer,
-    FacilityHMOSerializer,
+    FacilityHMOSerializer as FacilityLegacyHMOSerializer,  # Renamed to avoid conflict
     FacilityRolePermissionSerializer,
 )
-from .permissions import IsFacilityAdmin, IsFacilityStaff, IsFacilitySuperAdmin
 
 
+# ============================================================================
+# FACILITY SYSTEM HMO VIEWSET
+# ============================================================================
 
 class FacilitySystemHMOViewSet(viewsets.ReadOnlyModelViewSet):
     """
@@ -70,6 +71,7 @@ class FacilitySystemHMOViewSet(viewsets.ReadOnlyModelViewSet):
     
     serializer_class = SystemHMOSerializer
     permission_classes = [IsAuthenticated, IsFacilityStaff]
+    authentication_classes = [JWTAuthentication]
     
     def get_queryset(self):
         """Return active SystemHMOs with tier counts."""
@@ -94,7 +96,11 @@ class FacilitySystemHMOViewSet(viewsets.ReadOnlyModelViewSet):
         return Response(serializer.data)
 
 
-class FacilityHMOViewSet(viewsets.ModelViewSet):
+# ============================================================================
+# FACILITY HMO MANAGEMENT VIEWSET (Nested under facility)
+# ============================================================================
+
+class FacilityHMOManagementViewSet(viewsets.ModelViewSet):
     """
     ViewSet for managing a facility's HMO relationships.
     
@@ -110,6 +116,7 @@ class FacilityHMOViewSet(viewsets.ModelViewSet):
     """
     
     permission_classes = [IsAuthenticated, IsFacilityStaff]
+    authentication_classes = [JWTAuthentication]
     
     def get_serializer_class(self):
         if self.action == 'create':
@@ -118,7 +125,13 @@ class FacilityHMOViewSet(viewsets.ModelViewSet):
     
     def get_queryset(self):
         """Return HMOs enabled for this facility."""
+        # Get facility from URL or user
         facility_id = self.kwargs.get('facility_id')
+        if not facility_id:
+            facility_id = getattr(self.request.user, 'facility_id', None)
+        
+        if not facility_id:
+            return FacilityHMO.objects.none()
         
         return FacilityHMO.objects.filter(
             facility_id=facility_id
@@ -130,24 +143,25 @@ class FacilityHMOViewSet(viewsets.ModelViewSet):
                 'system_hmo__tiers',
                 queryset=HMOTier.objects.filter(is_active=True).order_by('level')
             )
-        ).annotate(
-            patient_count=Count(
-                'system_hmo__patients',
-                filter=Q(
-                    system_hmo__patients__facility_id=facility_id,
-                    system_hmo__patients__is_active=True
-                )
-            )
         ).order_by('system_hmo__name')
     
     def get_serializer_context(self):
         context = super().get_serializer_context()
-        context['facility_id'] = self.kwargs.get('facility_id')
+        facility_id = self.kwargs.get('facility_id')
+        if not facility_id:
+            facility_id = getattr(self.request.user, 'facility_id', None)
+        context['facility_id'] = facility_id
         return context
     
     def perform_create(self, serializer):
         """Enable an HMO for the facility."""
         facility_id = self.kwargs.get('facility_id')
+        if not facility_id:
+            facility_id = getattr(self.request.user, 'facility_id', None)
+        
+        if not facility_id:
+            raise ValueError("No facility ID found")
+        
         facility = Facility.objects.get(id=facility_id)
         serializer.save(facility=facility)
     
@@ -194,6 +208,12 @@ class FacilityHMOViewSet(viewsets.ModelViewSet):
         List SystemHMOs that are NOT yet enabled for this facility.
         Useful for the "Add HMO" dropdown.
         """
+        if not facility_id:
+            facility_id = getattr(request.user, 'facility_id', None)
+        
+        if not facility_id:
+            return Response([])
+        
         enabled_hmo_ids = FacilityHMO.objects.filter(
             facility_id=facility_id,
             is_active=True
@@ -215,18 +235,29 @@ class FacilityHMOViewSet(viewsets.ModelViewSet):
         """Get patients enrolled with this HMO at this facility."""
         instance = self.get_object()
         
+        if not facility_id:
+            facility_id = getattr(request.user, 'facility_id', None)
+        
         patients = Patient.objects.filter(
             facility_id=facility_id,
             system_hmo=instance.system_hmo,
-            is_active=True
         ).select_related(
             'hmo_tier'
         ).order_by('last_name', 'first_name')
         
-        # Use your existing PatientListSerializer
-        from patients.serializers import PatientListSerializer
-        serializer = PatientListSerializer(patients, many=True)
-        return Response(serializer.data)
+        # Return simplified patient list
+        data = [
+            {
+                'id': p.id,
+                'first_name': p.first_name,
+                'last_name': p.last_name,
+                'insurance_number': p.insurance_number,
+                'tier': p.hmo_tier.name if p.hmo_tier else None,
+            }
+            for p in patients
+        ]
+        
+        return Response(data)
     
     @action(detail=True, methods=['get'])
     def pricing(self, request, pk=None, facility_id=None):
@@ -234,6 +265,9 @@ class FacilityHMOViewSet(viewsets.ModelViewSet):
         from billing.models import HMOPrice
         
         instance = self.get_object()
+        
+        if not facility_id:
+            facility_id = getattr(request.user, 'facility_id', None)
         
         prices = HMOPrice.objects.filter(
             facility_id=facility_id,
@@ -253,12 +287,16 @@ class FacilityHMOViewSet(viewsets.ModelViewSet):
                 'service_name': price.service.name,
                 'tier_id': price.tier_id,
                 'tier_name': price.tier.name if price.tier else 'All Tiers',
-                'price': str(price.price),
+                'amount': str(price.amount),
                 'is_active': price.is_active,
             })
         
         return Response(pricing_data)
 
+
+# ============================================================================
+# FACILITY HMO APPROVAL VIEWSET
+# ============================================================================
 
 class FacilityHMOApprovalViewSet(viewsets.ModelViewSet):
     """
@@ -276,9 +314,15 @@ class FacilityHMOApprovalViewSet(viewsets.ModelViewSet):
     
     serializer_class = PatientFacilityHMOApprovalSerializer
     permission_classes = [IsAuthenticated, IsFacilityStaff]
+    authentication_classes = [JWTAuthentication]
     
     def get_queryset(self):
         facility_id = self.kwargs.get('facility_id')
+        if not facility_id:
+            facility_id = getattr(self.request.user, 'facility_id', None)
+        
+        if not facility_id:
+            return PatientFacilityHMOApproval.objects.none()
         
         queryset = PatientFacilityHMOApproval.objects.filter(
             facility_id=facility_id
@@ -318,10 +362,19 @@ class FacilityHMOApprovalViewSet(viewsets.ModelViewSet):
         instance.save()
         
         # Update patient's HMO enrollment to this facility
+        if not facility_id:
+            facility_id = getattr(request.user, 'facility_id', None)
+        
         patient = instance.patient
         patient.hmo_enrollment_facility_id = facility_id
         patient.hmo_enrollment_provider = None
-        patient.save(update_fields=['hmo_enrollment_facility', 'hmo_enrollment_provider'])
+        patient.hmo_enrolled_at = timezone.now()
+        patient.save(update_fields=[
+            'hmo_enrollment_facility', 
+            'hmo_enrollment_provider',
+            'hmo_enrolled_at',
+            'updated_at'
+        ])
         
         serializer = self.get_serializer(instance)
         return Response(serializer.data)
@@ -356,6 +409,12 @@ class FacilityHMOApprovalViewSet(viewsets.ModelViewSet):
     @action(detail=False, methods=['get'])
     def pending_count(self, request, facility_id=None):
         """Get count of pending approvals for dashboard."""
+        if not facility_id:
+            facility_id = getattr(request.user, 'facility_id', None)
+        
+        if not facility_id:
+            return Response({'pending_count': 0})
+        
         count = PatientFacilityHMOApproval.objects.filter(
             facility_id=facility_id,
             status='PENDING'
@@ -364,6 +423,9 @@ class FacilityHMOApprovalViewSet(viewsets.ModelViewSet):
         return Response({'pending_count': count})
 
 
+# ============================================================================
+# FACILITY VIEWSET
+# ============================================================================
 
 class FacilityViewSet(
     viewsets.GenericViewSet,
@@ -391,8 +453,7 @@ class FacilityViewSet(
         # Check if user is a patient (not staff or provider)
         is_patient = (
             hasattr(user, 'patient_profile') and 
-            not hasattr(user, 'provider_profile') and
-            not hasattr(user, 'facility_staff')
+            getattr(user, 'role', None) == UserRole.PATIENT
         )
         
         # Patients only see publicly visible facilities
@@ -507,7 +568,6 @@ class FacilityViewSet(
             beds = list(w.beds.all())
             bed_count = len(beds)
 
-            # Using the new status field
             occupied = sum(
                 1 for b in beds if b.status == Bed.BedStatus.OCCUPIED
             )
@@ -583,11 +643,15 @@ class FacilityViewSet(
         u.save()
         return Response({"ok": True})
     
+    # =========================================================================
+    # PERMISSIONS ACTIONS
+    # =========================================================================
+    
     @action(
-    detail=False,  # ✅ Changed from True
-    methods=['get'],
-    url_path="permissions",  # ✅ Changed from "role-permissions"
-    permission_classes=[IsAuthenticated, IsFacilitySuperAdmin],
+        detail=False,
+        methods=['get'],
+        url_path="permissions",
+        permission_classes=[IsAuthenticated, IsFacilitySuperAdmin],
     )
     def permissions(self, request):
         """
@@ -595,8 +659,6 @@ class FacilityViewSet(
         
         List all permission configurations for the current user's facility.
         Super Admin only.
-        
-        Returns array of permission objects.
         """
         user = request.user
         
@@ -606,22 +668,18 @@ class FacilityViewSet(
                 status=status.HTTP_400_BAD_REQUEST
             )
         
-        # Get all permissions for this facility
         perms = FacilityRolePermission.objects.filter(
             facility=user.facility
         ).order_by('role')
         
-        # Serialize to match frontend expectations
         result = []
         for perm in perms:
-            # Get all permission fields from the model
             perm_fields = {
                 field.name: getattr(perm, field.name)
                 for field in FacilityRolePermission._meta.fields
                 if field.name.startswith('can_')
             }
             
-            # Add each permission field as a separate object
             for permission_name, enabled in perm_fields.items():
                 result.append({
                     'id': f"{perm.id}-{permission_name}",
@@ -636,84 +694,72 @@ class FacilityViewSet(
         return Response(result)
 
     @action(
-        detail=False,  # ✅ Changed from True
+        detail=False,
         methods=['post'],
-        url_path="permissions/bulk_update",  # ✅ New action
+        url_path="permissions/bulk_update",
         permission_classes=[IsAuthenticated, IsFacilitySuperAdmin],
     )
     def bulk_update_permissions(self, request):
-            """
-            POST /api/facilities/permissions/bulk_update/
+        """
+        POST /api/facilities/permissions/bulk_update/
+        
+        Bulk update permissions for one or more roles.
+        """
+        user = request.user
+        
+        if not user.facility:
+            return Response(
+                {'error': 'User not associated with a facility'}, 
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        permissions_data = request.data.get('permissions', [])
+        
+        if not isinstance(permissions_data, list):
+            return Response(
+                {'error': 'permissions must be a list'}, 
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        updates_by_role = {}
+        for perm_data in permissions_data:
+            role = perm_data.get('role')
+            permission = perm_data.get('permission')
+            enabled = perm_data.get('enabled', True)
             
-            Bulk update permissions for one or more roles.
+            if not role or not permission:
+                continue
             
-            Body: {
-                "permissions": [
-                    {"role": "DOCTOR", "permission": "can_view_patients", "enabled": true},
-                    {"role": "DOCTOR", "permission": "can_edit_patients", "enabled": false},
-                    ...
-                ]
-            }
-            """
-            user = request.user
+            if role not in updates_by_role:
+                updates_by_role[role] = {}
+            updates_by_role[role][permission] = enabled
+        
+        updated_count = 0
+        for role, perms_dict in updates_by_role.items():
+            perm_obj, created = FacilityRolePermission.objects.get_or_create(
+                facility=user.facility,
+                role=role,
+                defaults={'updated_by': user}
+            )
             
-            if not user.facility:
-                return Response(
-                    {'error': 'User not associated with a facility'}, 
-                    status=status.HTTP_400_BAD_REQUEST
-                )
+            for permission_name, enabled_value in perms_dict.items():
+                if hasattr(perm_obj, permission_name):
+                    setattr(perm_obj, permission_name, enabled_value)
+                    updated_count += 1
             
-            permissions_data = request.data.get('permissions', [])
-            
-            if not isinstance(permissions_data, list):
-                return Response(
-                    {'error': 'permissions must be a list'}, 
-                    status=status.HTTP_400_BAD_REQUEST
-                )
-            
-            # Group permissions by role
-            updates_by_role = {}
-            for perm_data in permissions_data:
-                role = perm_data.get('role')
-                permission = perm_data.get('permission')
-                enabled = perm_data.get('enabled', True)
-                
-                if not role or not permission:
-                    continue
-                
-                if role not in updates_by_role:
-                    updates_by_role[role] = {}
-                updates_by_role[role][permission] = enabled
-            
-            # Update or create permissions for each role
-            updated_count = 0
-            for role, perms_dict in updates_by_role.items():
-                # Get or create the permission object for this role
-                perm_obj, created = FacilityRolePermission.objects.get_or_create(
-                    facility=user.facility,
-                    role=role,
-                    defaults={'updated_by': user}
-                )
-                
-                # Update each permission field
-                for permission_name, enabled_value in perms_dict.items():
-                    if hasattr(perm_obj, permission_name):
-                        setattr(perm_obj, permission_name, enabled_value)
-                        updated_count += 1
-                
-                perm_obj.updated_by = user
-                perm_obj.save()
-            
-            return Response({
-                'message': f'Updated {updated_count} permissions',
-                'count': updated_count,
-                'roles_affected': list(updates_by_role.keys())
-            })
+            perm_obj.updated_by = user
+            perm_obj.save()
+        
+        return Response({
+            'message': f'Updated {updated_count} permissions',
+            'count': updated_count,
+            'roles_affected': list(updates_by_role.keys())
+        })
 
     @action(
-        detail=False,  # ✅ Changed from True
+        detail=False,
         methods=['post'],
-        url_path="permissions/reset_role",  # ✅ Changed URL pattern
+        url_path="permissions/reset_role",
         permission_classes=[IsAuthenticated, IsFacilitySuperAdmin],
     )
     def reset_role_permissions(self, request):
@@ -721,8 +767,6 @@ class FacilityViewSet(
         POST /api/facilities/permissions/reset_role/
         
         Reset a role's permissions to defaults (delete custom config).
-        
-        Body: {"role": "DOCTOR"}
         """
         user = request.user
         
@@ -740,7 +784,6 @@ class FacilityViewSet(
                 status=status.HTTP_400_BAD_REQUEST
             )
         
-        # Delete all custom permissions for this role
         deleted_count, _ = FacilityRolePermission.objects.filter(
             facility=user.facility,
             role=role
@@ -763,14 +806,12 @@ class FacilityViewSet(
         GET /api/facilities/my-permissions/
         
         Get the current user's effective permissions in their facility.
-        All authenticated users can call this.
         """
         from facilities.permissions_utils import get_user_permissions
         
         user = request.user
         permissions = get_user_permissions(user)
         
-        # Check if custom permissions exist
         has_custom = False
         if user.facility_id and user.role != UserRole.SUPER_ADMIN:
             has_custom = FacilityRolePermission.objects.filter(
@@ -787,6 +828,10 @@ class FacilityViewSet(
             'has_custom_permissions': has_custom,
         })
 
+
+# ============================================================================
+# BED ASSIGNMENT VIEWSET
+# ============================================================================
 
 class BedAssignmentViewSet(viewsets.ModelViewSet):
     """
@@ -835,9 +880,7 @@ class BedAssignmentViewSet(viewsets.ModelViewSet):
                 {"detail": "You do not have permission to discharge patients."},
                 status=status.HTTP_403_FORBIDDEN
             )
-        """
-        Mark this bed assignment as discharged (free the bed).
-        """
+        
         assignment = self.get_object()
         if assignment.discharged_at is not None:
             return Response(
@@ -858,7 +901,6 @@ class BedAssignmentViewSet(viewsets.ModelViewSet):
     def transfer(self, request, pk=None):
         """
         Move an active bed assignment to a different bed (within same facility).
-        Body: {"bed": <new_bed_id>}
         """
         assignment = self.get_object()
         if assignment.discharged_at is not None:
@@ -887,7 +929,6 @@ class BedAssignmentViewSet(viewsets.ModelViewSet):
             )
 
         user = request.user
-        # Facility scoping
         if getattr(user, "facility_id", None):
             if new_bed.ward.facility_id != user.facility_id:
                 return Response(
@@ -895,7 +936,6 @@ class BedAssignmentViewSet(viewsets.ModelViewSet):
                     status=status.HTTP_403_FORBIDDEN,
                 )
 
-        # Ensure no active assignment on new bed
         if new_bed.assignments.filter(discharged_at__isnull=True).exists():
             return Response(
                 {"detail": "Target bed already has an active assignment."},
@@ -906,7 +946,6 @@ class BedAssignmentViewSet(viewsets.ModelViewSet):
         assignment.bed = new_bed
         assignment.save()
 
-        # Refresh both beds
         refresh_bed_status(old_bed)
         refresh_bed_status(new_bed)
 
@@ -914,8 +953,14 @@ class BedAssignmentViewSet(viewsets.ModelViewSet):
         return Response(serializer.data)
 
 
-# --- NIEMR: Public endpoint to create Facility + Super Admin and return tokens ---
+# ============================================================================
+# FACILITY ADMIN REGISTER VIEW (PUBLIC)
+# ============================================================================
+
 class FacilityAdminRegisterView(APIView):
+    """
+    Public endpoint to create Facility + Super Admin and return tokens.
+    """
     permission_classes = [AllowAny]
     authentication_classes = []
     parser_classes = [MultiPartParser, FormParser, JSONParser]
@@ -925,7 +970,37 @@ class FacilityAdminRegisterView(APIView):
             data=request.data, context={"request": request}
         )
         s.is_valid(raise_exception=True)
-        payload = s.save()  # dict with facility, user, tokens
+        payload = s.save()
         return Response(payload, status=status.HTTP_201_CREATED)
 
 
+# ============================================================================
+# LEGACY HMO VIEWSET (For backward compatibility)
+# ============================================================================
+
+class FacilityHMOViewSet(viewsets.ModelViewSet):
+    """
+    Legacy HMO ViewSet - manages facility-scoped HMOs.
+    
+    This is kept for backward compatibility with existing code.
+    New implementations should use the System HMO endpoints.
+    """
+    
+    serializer_class = FacilityLegacyHMOSerializer
+    authentication_classes = [JWTAuthentication]
+    permission_classes = [IsAuthenticated, IsFacilityStaff]
+    
+    def get_queryset(self):
+        user = self.request.user
+        facility_id = getattr(user, 'facility_id', None)
+        
+        if not facility_id:
+            return HMO.objects.none()
+        
+        return HMO.objects.filter(
+            facility_id=facility_id
+        ).order_by('name')
+    
+    def perform_create(self, serializer):
+        user = self.request.user
+        serializer.save(facility=user.facility)

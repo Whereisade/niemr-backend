@@ -6,10 +6,12 @@ from accounts.enums import UserRole
 from .models import Patient, PatientDocument, HMO, Allergy
 from .enums import BloodGroup, Genotype, InsuranceStatus, AllergyType, AllergySeverity
 from rest_framework import serializers as rf_serializers
-from .models import SystemHMO, HMOTier, FacilityHMO, PatientFacilityHMOApproval, Patient
+from .models import SystemHMO, HMOTier, FacilityHMO, PatientFacilityHMOApproval
 
 
-
+# ============================================================================
+# LEGACY HMO SERIALIZER (Facility-scoped)
+# ============================================================================
 
 class HMOSerializer(serializers.ModelSerializer):
     """
@@ -44,10 +46,32 @@ class HMOSerializer(serializers.ModelSerializer):
         return obj.get_primary_contact()
 
 
-class PatientSerializer(serializers.ModelSerializer):
-    hmo = HMOSerializer(read_only=True)
-    hmo_id = serializers.PrimaryKeyRelatedField(source="hmo", queryset=HMO.objects.none(), write_only=True, required=False, allow_null=True)
+# ============================================================================
+# PATIENT SERIALIZERS
+# ============================================================================
 
+class PatientSerializer(serializers.ModelSerializer):
+    # Legacy HMO (facility-scoped)
+    hmo = HMOSerializer(read_only=True)
+    hmo_id = serializers.PrimaryKeyRelatedField(
+        source="hmo", 
+        queryset=HMO.objects.none(), 
+        write_only=True, 
+        required=False, 
+        allow_null=True
+    )
+    
+    # System HMO fields (new)
+    system_hmo_name = serializers.CharField(source='system_hmo.name', read_only=True)
+    hmo_tier_name = serializers.CharField(source='hmo_tier.name', read_only=True)
+    hmo_tier_level = serializers.IntegerField(source='hmo_tier.level', read_only=True)
+    
+    # HMO enrollment info
+    hmo_enrollment_facility_name = serializers.CharField(
+        source='hmo_enrollment_facility.name', 
+        read_only=True
+    )
+    
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         # Scope HMO choices to the requester's facility.
@@ -62,18 +86,29 @@ class PatientSerializer(serializers.ModelSerializer):
     class Meta:
         model = Patient
         fields = [
-            "id","user","facility","guardian_user",
-            "first_name","last_name","middle_name","dob","gender",
-            "email","phone","country","state","lga","address",
-            "insurance_status","hmo","hmo_id","hmo_plan",
-            "insurance_number","insurance_expiry","insurance_notes",
-            "blood_group","blood_group_other","genotype","genotype_other",
-            "weight_kg","height_cm","bmi",
-            "patient_status","default_encounter_type",
-            "emergency_contact_name","emergency_contact_phone",
-            "created_at","updated_at",
+            "id", "user", "facility", "guardian_user",
+            "first_name", "last_name", "middle_name", "dob", "gender",
+            "email", "phone", "country", "state", "lga", "address",
+            # Insurance (legacy)
+            "insurance_status", "hmo", "hmo_id", "hmo_plan",
+            "insurance_number", "insurance_expiry", "insurance_notes",
+            # System HMO (new)
+            "system_hmo", "system_hmo_name",
+            "hmo_tier", "hmo_tier_name", "hmo_tier_level",
+            "hmo_enrollment_facility", "hmo_enrollment_facility_name",
+            "hmo_enrollment_provider", "hmo_enrolled_at",
+            # Clinical
+            "blood_group", "blood_group_other", "genotype", "genotype_other",
+            "weight_kg", "height_cm", "bmi",
+            "patient_status", "default_encounter_type",
+            "emergency_contact_name", "emergency_contact_phone",
+            "created_at", "updated_at",
         ]
-        read_only_fields = ["bmi","created_at","updated_at","user"]
+        read_only_fields = [
+            "bmi", "created_at", "updated_at", "user",
+            "system_hmo_name", "hmo_tier_name", "hmo_tier_level",
+            "hmo_enrollment_facility_name",
+        ]
 
 
 class PatientCreateByStaffSerializer(PatientSerializer):
@@ -112,7 +147,6 @@ class SelfRegisterSerializer(serializers.Serializer):
 
     @transaction.atomic
     def create(self, validated):
-        # 1) Create User with PATIENT role
         email = validated["email"].strip().lower()
         password = validated["password"]
         if User.objects.filter(email__iexact=email).exists():
@@ -126,11 +160,14 @@ class SelfRegisterSerializer(serializers.Serializer):
             role=UserRole.PATIENT,
         )
 
-        # 2) Create Patient linked to user
-        p_fields = {k: v for k, v in validated.items() if k not in ("email","password")}
+        p_fields = {k: v for k, v in validated.items() if k not in ("email", "password")}
         patient = Patient.objects.create(user=user, **p_fields)
         return patient
 
+
+# ============================================================================
+# PATIENT DOCUMENT SERIALIZERS
+# ============================================================================
 
 class PatientDocumentSerializer(serializers.ModelSerializer):
     uploaded_by_name = serializers.SerializerMethodField(read_only=True)
@@ -167,27 +204,14 @@ class PatientDocumentSerializer(serializers.ModelSerializer):
         return str(user)
 
 
-# --- Dependent serializers ---
+# ============================================================================
+# DEPENDENT SERIALIZERS
+# ============================================================================
 
 class DependentCreateSerializer(serializers.ModelSerializer):
     """
     Serializer used when creating a dependent under a parent patient.
-
-    Incoming payload (from frontend) can use:
-      - first_name
-      - last_name
-      - dob
-      - gender
-      - relationship  (e.g. "Son", "Daughter")
-      - phone
-
-    Internally we:
-      - store `relationship` into `relationship_to_guardian`
-      - set `parent_patient` from the view (perform_create / nested action)
-      - optionally set `guardian_user` from request.user
     """
-
-    # Expose a simple "relationship" field to the client
     relationship = serializers.CharField(
         max_length=32,
         required=False,
@@ -197,7 +221,6 @@ class DependentCreateSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Patient
-        # NOTE: No `relationship_to_guardian` here; we map manually.
         fields = [
             "first_name",
             "last_name",
@@ -208,9 +231,6 @@ class DependentCreateSerializer(serializers.ModelSerializer):
         ]
 
     def validate(self, attrs):
-        """
-        Keep the existing guard: block attempts to attach a User directly.
-        """
         if self.initial_data.get("user") or self.initial_data.get("user_id"):
             raise rf_serializers.ValidationError(
                 "Dependents cannot be created with a linked user."
@@ -218,25 +238,16 @@ class DependentCreateSerializer(serializers.ModelSerializer):
         return attrs
 
     def create(self, validated_data):
-        """
-        Map `relationship` → `relationship_to_guardian`,
-        and let the view inject `parent_patient`, `guardian_user`, `facility`
-        via the `.save()` call.
-        """
         relationship = validated_data.pop("relationship", "").strip()
         if relationship:
             validated_data["relationship_to_guardian"] = relationship
-
-        # parent_patient / guardian_user / facility come from serializer.save(...)
         return Patient.objects.create(**validated_data)
 
 
 class DependentSerializer(serializers.ModelSerializer):
     """
     Read serializer for dependent records.
-    Exposes `relationship` as a friendly alias of `relationship_to_guardian`.
     """
-
     relationship = serializers.CharField(
         source="relationship_to_guardian",
         read_only=True,
@@ -259,7 +270,6 @@ class DependentUpdateSerializer(serializers.ModelSerializer):
     """
     Update serializer so clients can PATCH relationship as well.
     """
-
     relationship = serializers.CharField(
         max_length=32,
         required=False,
@@ -285,7 +295,9 @@ class DependentUpdateSerializer(serializers.ModelSerializer):
         return super().update(instance, validated_data)
 
 
-# --- Allergy serializers ---
+# ============================================================================
+# ALLERGY SERIALIZERS
+# ============================================================================
 
 class AllergySerializer(serializers.ModelSerializer):
     """
@@ -339,7 +351,6 @@ class AllergySerializer(serializers.ModelSerializer):
 class AllergyCreateSerializer(serializers.ModelSerializer):
     """
     Serializer for creating allergies.
-    Patient is set by the view based on context.
     """
     
     class Meta:
@@ -377,6 +388,9 @@ class AllergyUpdateSerializer(serializers.ModelSerializer):
         ]
 
 
+# ============================================================================
+# SYSTEM HMO SERIALIZERS
+# ============================================================================
 
 class HMOTierSerializer(serializers.ModelSerializer):
     """Serializer for HMO Tiers."""
@@ -408,9 +422,8 @@ class SystemHMOSerializer(serializers.ModelSerializer):
     """Serializer for SystemHMO with tier summary."""
     
     tiers = HMOTierMinimalSerializer(many=True, read_only=True)
-    tier_count = serializers.IntegerField(read_only=True)
-    facility_count = serializers.IntegerField(read_only=True)
-    patient_count = serializers.IntegerField(read_only=True)
+    tier_count = serializers.SerializerMethodField()
+    facility_count = serializers.SerializerMethodField()
     
     class Meta:
         model = SystemHMO
@@ -430,11 +443,17 @@ class SystemHMOSerializer(serializers.ModelSerializer):
             'tiers',
             'tier_count',
             'facility_count',
-            'patient_count',
             'created_at',
             'updated_at',
         ]
-        read_only_fields = ['id', 'created_at', 'updated_at', 'tiers', 'tier_count', 'facility_count', 'patient_count']
+        read_only_fields = ['id', 'created_at', 'updated_at', 'tiers', 'tier_count', 'facility_count']
+    
+    def get_tier_count(self, obj):
+        return obj.tiers.filter(is_active=True).count()
+    
+    def get_facility_count(self, obj):
+        return obj.facility_links.filter(is_active=True).count()
+
 
 class SystemHMODetailSerializer(SystemHMOSerializer):
     """Detailed SystemHMO serializer with full tier information."""
@@ -448,6 +467,7 @@ class SystemHMOMinimalSerializer(serializers.ModelSerializer):
     class Meta:
         model = SystemHMO
         fields = ['id', 'name', 'nhis_number']
+
 
 class SystemHMOListSerializer(serializers.ModelSerializer):
     """
@@ -531,11 +551,8 @@ class FacilityHMOSerializer(serializers.ModelSerializer):
     )
     facility_name = serializers.CharField(source='facility.name', read_only=True)
     owner_name = serializers.SerializerMethodField()
-    relationship_updated_by_name = serializers.CharField(
-        source='relationship_updated_by.get_full_name',
-        read_only=True
-    )
-    patient_count = serializers.IntegerField(read_only=True)
+    relationship_updated_by_name = serializers.SerializerMethodField()
+    patient_count = serializers.SerializerMethodField()
     scope = serializers.SerializerMethodField()
     
     class Meta:
@@ -568,8 +585,27 @@ class FacilityHMOSerializer(serializers.ModelSerializer):
     
     def get_owner_name(self, obj):
         if obj.owner:
-            return obj.owner.get_full_name() or obj.owner.username
+            return f"{obj.owner.first_name} {obj.owner.last_name}".strip() or obj.owner.email
         return None
+    
+    def get_relationship_updated_by_name(self, obj):
+        if obj.relationship_updated_by:
+            return f"{obj.relationship_updated_by.first_name} {obj.relationship_updated_by.last_name}".strip() or obj.relationship_updated_by.email
+        return None
+    
+    def get_patient_count(self, obj):
+        # Count patients enrolled with this HMO at this facility/provider
+        if obj.facility:
+            return Patient.objects.filter(
+                system_hmo=obj.system_hmo,
+                hmo_enrollment_facility=obj.facility
+            ).count()
+        elif obj.owner:
+            return Patient.objects.filter(
+                system_hmo=obj.system_hmo,
+                hmo_enrollment_provider=obj.owner
+            ).count()
+        return 0
     
     def get_scope(self, obj):
         if obj.facility:
@@ -597,24 +633,6 @@ class FacilityHMOCreateSerializer(serializers.ModelSerializer):
             'contract_end_date',
             'contract_reference',
         ]
-    
-    def validate_system_hmo_id(self, value):
-        """Ensure HMO is not already enabled for this facility."""
-        facility_id = self.context.get('facility_id')
-        owner = self.context.get('owner')
-        
-        filter_kwargs = {'system_hmo': value, 'is_active': True}
-        if facility_id:
-            filter_kwargs['facility_id'] = facility_id
-        elif owner:
-            filter_kwargs['owner'] = owner
-        
-        if FacilityHMO.objects.filter(**filter_kwargs).exists():
-            raise serializers.ValidationError(
-                'This HMO is already enabled for your facility/practice'
-            )
-        
-        return value
 
 
 class FacilityHMOUpdateRelationshipSerializer(serializers.Serializer):
@@ -657,7 +675,7 @@ class PatientAttachHMOSerializer(serializers.Serializer):
     tier_id = serializers.IntegerField(required=True)
     insurance_number = serializers.CharField(max_length=120, required=False, allow_blank=True)
     insurance_expiry = serializers.DateField(required=False, allow_null=True)
-    notes = serializers.CharField(required=False, allow_blank=True)
+    insurance_notes = serializers.CharField(required=False, allow_blank=True)
     
     def validate_system_hmo_id(self, value):
         if not SystemHMO.objects.filter(id=value, is_active=True).exists():
@@ -683,23 +701,9 @@ class PatientAttachHMOSerializer(serializers.Serializer):
 class PatientTransferHMOApprovalSerializer(serializers.Serializer):
     """
     Serializer for approving/rejecting a patient's HMO transfer.
-    
-    Used when a patient with existing HMO registers at a new facility.
     """
     action = serializers.ChoiceField(choices=['approve', 'reject'], required=True)
     notes = serializers.CharField(required=False, allow_blank=True)
-    
-    def validate(self, attrs):
-        request = self.context.get('request')
-        approval = self.context.get('approval')
-        
-        if not approval:
-            raise serializers.ValidationError("Approval record not found.")
-        
-        if approval.status != PatientFacilityHMOApproval.Status.PENDING:
-            raise serializers.ValidationError("This request has already been processed.")
-        
-        return attrs
 
 
 # ============================================================================
@@ -719,10 +723,7 @@ class PatientFacilityHMOApprovalSerializer(serializers.ModelSerializer):
         read_only=True
     )
     original_provider_name = serializers.SerializerMethodField()
-    decided_by_name = serializers.CharField(
-        source='decided_by.get_full_name',
-        read_only=True
-    )
+    decided_by_name = serializers.SerializerMethodField()
     status_display = serializers.CharField(source='get_status_display', read_only=True)
     
     class Meta:
@@ -762,16 +763,23 @@ class PatientFacilityHMOApprovalSerializer(serializers.ModelSerializer):
         ]
     
     def get_patient_name(self, obj):
-        return obj.patient.full_name if obj.patient else None
+        if obj.patient:
+            return f"{obj.patient.first_name} {obj.patient.last_name}"
+        return None
     
     def get_owner_name(self, obj):
         if obj.owner:
-            return obj.owner.get_full_name() or obj.owner.username
+            return f"{obj.owner.first_name} {obj.owner.last_name}".strip() or obj.owner.email
         return None
     
     def get_original_provider_name(self, obj):
         if obj.original_provider:
-            return obj.original_provider.get_full_name() or obj.original_provider.username
+            return f"{obj.original_provider.first_name} {obj.original_provider.last_name}".strip() or obj.original_provider.email
+        return None
+    
+    def get_decided_by_name(self, obj):
+        if obj.decided_by:
+            return f"{obj.decided_by.first_name} {obj.decided_by.last_name}".strip() or obj.decided_by.email
         return None
 
 
@@ -781,77 +789,6 @@ class PatientFacilityHMOApprovalCreateSerializer(serializers.Serializer):
     """
     patient_id = serializers.IntegerField(required=True)
     notes = serializers.CharField(required=False, allow_blank=True)
-    
-    def validate_patient_id(self, value):
-        from .models import Patient
-        
-        try:
-            patient = Patient.objects.select_related(
-                'system_hmo', 'hmo_tier',
-                'hmo_enrollment_facility', 'hmo_enrollment_provider'
-            ).get(id=value)
-            self.context['patient'] = patient
-            return value
-        except Patient.DoesNotExist:
-            raise serializers.ValidationError("Patient not found.")
-    
-    def validate(self, attrs):
-        request = self.context.get('request')
-        user = request.user
-        patient = self.context.get('patient')
-        
-        if not patient:
-            raise serializers.ValidationError("Patient not found.")
-        
-        # Patient must have an existing HMO
-        if not patient.system_hmo:
-            raise serializers.ValidationError({
-                "patient_id": "Patient does not have an HMO enrollment to transfer."
-            })
-        
-        # Check for existing pending approval at this facility/provider
-        facility = getattr(user, 'facility', None)
-        
-        existing_q = PatientFacilityHMOApproval.objects.filter(
-            patient=patient,
-            status=PatientFacilityHMOApproval.Status.PENDING,
-        )
-        
-        if facility:
-            existing_q = existing_q.filter(facility=facility)
-        else:
-            existing_q = existing_q.filter(owner=user)
-        
-        if existing_q.exists():
-            raise serializers.ValidationError({
-                "patient_id": "There is already a pending HMO approval request for this patient."
-            })
-        
-        return attrs
-    
-    @transaction.atomic
-    def create(self, validated_data):
-        request = self.context.get('request')
-        user = request.user
-        patient = self.context.get('patient')
-        
-        facility = getattr(user, 'facility', None)
-        
-        approval = PatientFacilityHMOApproval.objects.create(
-            patient=patient,
-            facility=facility if facility else None,
-            owner=user if not facility else None,
-            system_hmo=patient.system_hmo,
-            tier=patient.hmo_tier,
-            insurance_number=patient.insurance_number,
-            insurance_expiry=patient.insurance_expiry,
-            original_facility=patient.hmo_enrollment_facility,
-            original_provider=patient.hmo_enrollment_provider,
-            status=PatientFacilityHMOApproval.Status.PENDING,
-            request_notes=validated_data.get('notes', ''),
-        )
-        
-        return approval
 
 
 # ============================================================================
@@ -902,7 +839,7 @@ class PatientHMOInfoSerializer(serializers.Serializer):
             return {
                 'type': 'INDEPENDENT',
                 'id': obj['enrollment_provider'].id,
-                'name': obj['enrollment_provider'].get_full_name(),
+                'name': f"{obj['enrollment_provider'].first_name} {obj['enrollment_provider'].last_name}".strip(),
             }
         return None
 
@@ -942,7 +879,7 @@ class PatientHMOMixin(serializers.Serializer):
         elif obj.hmo_enrollment_provider:
             info['source_type'] = 'INDEPENDENT'
             info['source_id'] = obj.hmo_enrollment_provider_id
-            info['source_name'] = obj.hmo_enrollment_provider.get_full_name()
+            info['source_name'] = f"{obj.hmo_enrollment_provider.first_name} {obj.hmo_enrollment_provider.last_name}".strip()
         
         return info
     
