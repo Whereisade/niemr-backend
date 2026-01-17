@@ -12,7 +12,7 @@ from rest_framework.response import Response
 from rest_framework_simplejwt.authentication import JWTAuthentication
 from facilities.permissions_utils import has_facility_permission
 from accounts.enums import UserRole
-from patients.models import HMO
+from patients.models import SystemHMO, HMOTier
 from .models import Drug, StockItem, StockTxn, Prescription
 from .serializers import (
     DrugSerializer,
@@ -232,70 +232,104 @@ class DrugViewSet(
         Get facility pharmacy catalog with HMO-specific prices.
         
         Query params:
-        - hmo or hmo_id: Required HMO ID
+        - hmo_id: SystemHMO ID (required)
+        - tier_id: HMOTier ID (optional) - returns tier-specific pricing if provided
         
         Returns:
         - Full drug catalog with hmo_price field showing HMO override (if any)
-        - All columns from general catalog plus HMO pricing
+        - Tier information if tier_id is provided
+        - Pricing resolution: tier-specific → HMO-level default → facility default
         
-        Example:
+        Examples:
         GET /api/pharmacy/catalog/hmo-catalog/?hmo_id=1
+        GET /api/pharmacy/catalog/hmo-catalog/?hmo_id=1&tier_id=2
         """
-        u = request.user
-        facility_id = getattr(u, "facility_id", None)
+        facility_id = getattr(request.user, "facility_id", None)
         if not facility_id:
             return Response({"detail": "HMO catalogs are only available for facility accounts."}, status=400)
 
         hmo_id = request.query_params.get("hmo") or request.query_params.get("hmo_id")
+        tier_id = request.query_params.get("tier_id")
+        
         if not hmo_id:
             return Response({"detail": "hmo (or hmo_id) query param is required"}, status=400)
 
-        from patients.models import HMO
-        hmo = get_object_or_404(HMO, id=hmo_id, facility_id=facility_id, is_active=True)
-
-        # Get facility drugs
-        qs = Drug.objects.filter(facility_id=facility_id, is_active=True).order_by("name", "code")
+        # Get SystemHMO (system-wide, no facility filter)
+        system_hmo = get_object_or_404(SystemHMO, id=hmo_id, is_active=True)
         
+        # Get tier if specified
+        tier = None
+        if tier_id:
+            tier = get_object_or_404(HMOTier, id=tier_id, system_hmo=system_hmo, is_active=True)
+
+        # Get facility's drug catalog
+        drugs = Drug.objects.filter(facility_id=facility_id, is_active=True).order_by("name")
+
         # Fetch HMO price overrides
         from billing.models import HMOPrice, Service
-        drugs_data = []
-        
-        for drug in qs:
-            svc_code = f"DRUG:{drug.code}"
-            
-            # Get HMO price override if it exists
+
+        result = []
+        for drug in drugs:
+            # Get or create service for this drug
+            service_code = f"DRUG:{drug.code}"
+            service, _ = Service.objects.get_or_create(
+                code=service_code,
+                defaults={"name": f"Drug: {drug.name}", "default_price": drug.unit_price},
+            )
+
+            # Get HMO price override - try tier-specific first, fall back to HMO-level
             hmo_price = None
-            try:
-                service = Service.objects.filter(code=svc_code).first()
-                if service:
-                    hmo_price_obj = HMOPrice.objects.filter(
-                        facility_id=facility_id,
-                        hmo=hmo,
-                        service=service,
-                        is_active=True,
-                    ).first()
-                    if hmo_price_obj:
-                        hmo_price = str(hmo_price_obj.amount)
-            except Exception:
-                pass
+            hmo_price_obj = None
+            has_tier_specific = False
             
-            # Build response with complete data and clear field names
-            drugs_data.append({
-                "drug_id": drug.id,
-                "drug_code": drug.code,
-                "drug_name": drug.name,
-                "strength": drug.strength,
-                "form": drug.form,
-                "route": drug.route,
-                "qty_per_unit": drug.qty_per_unit,
-                "catalog_price": str(drug.unit_price),
-                "is_active": drug.is_active,
-                "hmo_id": hmo.id,
-                "hmo_name": hmo.name,
-                "hmo_price": hmo_price,  # None if no override
-            })
-        
-        return Response(drugs_data)
+            if tier:
+                # Try tier-specific price first
+                hmo_price_obj = HMOPrice.objects.filter(
+                    facility_id=facility_id,
+                    system_hmo=system_hmo,
+                    tier=tier,
+                    service=service,
+                    is_active=True
+                ).first()
+                
+                if hmo_price_obj:
+                    hmo_price = str(hmo_price_obj.amount)
+                    has_tier_specific = True
+            
+            if not hmo_price_obj:
+                # Fall back to HMO-level default (no tier)
+                hmo_price_obj = HMOPrice.objects.filter(
+                    facility_id=facility_id,
+                    system_hmo=system_hmo,
+                    tier__isnull=True,
+                    service=service,
+                    is_active=True
+                ).first()
+                
+                if hmo_price_obj:
+                    hmo_price = str(hmo_price_obj.amount)
+
+            result.append(
+                {
+                    "id": drug.id,
+                    "code": drug.code,
+                    "name": drug.name,
+                    "strength": drug.strength,
+                    "form": drug.form,
+                    "route": drug.route,
+                    "qty_per_unit": drug.qty_per_unit,
+                    "unit_price": str(drug.unit_price),
+                    "hmo_id": system_hmo.id,
+                    "hmo_name": system_hmo.name,
+                    "tier_id": tier.id if tier else None,
+                    "tier_name": tier.name if tier else None,
+                    "hmo_price": hmo_price,  # None if no override
+                    "has_tier_specific_price": has_tier_specific,
+                    "service_id": service.id,
+                }
+            )
+
+        return Response(result)
 
     @action(detail=False, methods=["post"], permission_classes=[IsAuthenticated, IsPharmacyStaff], url_path="set-hmo-price")
     def set_hmo_price(self, request):
@@ -304,69 +338,79 @@ class DrugViewSet(
         
         Body:
         {
-        "hmo_id": 1,
-        "code": "PARA_500_TAB",  // OR "drug_id": 123
-        "amount": 150.00  // OR "price": 150.00
+            "hmo_id": 1,           # SystemHMO ID (required)
+            "tier_id": 2,          # HMOTier ID (optional) - if provided, sets tier-specific price
+            "drug_id": 5,
+            "amount": "500.00"
         }
         
-        Accepts both drug_id and code for flexibility.
+        Pricing levels:
+        - No tier_id: Sets HMO-level default (applies to all tiers unless overridden)
+        - With tier_id: Sets tier-specific price (only for that tier)
         """
-        u = request.user
-        facility_id = getattr(u, "facility_id", None)
+        facility_id = getattr(request.user, "facility_id", None)
         if not facility_id:
             return Response({"detail": "HMO pricing is only available for facility accounts."}, status=400)
 
         hmo_id = request.data.get("hmo_id") or request.data.get("hmo")
-        code = request.data.get("code")
+        tier_id = request.data.get("tier_id")
         drug_id = request.data.get("drug_id")
-        amount = request.data.get("amount") or request.data.get("price")
+        amount = request.data.get("amount")
 
         if not hmo_id:
             return Response({"detail": "hmo_id is required"}, status=400)
-        
-        if not (code or drug_id):
-            return Response({"detail": "Either code or drug_id is required"}, status=400)
-        
-        if amount is None:
+        if not drug_id:
+            return Response({"detail": "drug_id is required"}, status=400)
+        if not amount:
             return Response({"detail": "amount is required"}, status=400)
 
-        from patients.models import HMO
-        hmo = get_object_or_404(HMO, id=hmo_id, facility_id=facility_id, is_active=True)
+        # Get SystemHMO (system-wide, no facility filter)
+        system_hmo = get_object_or_404(SystemHMO, id=hmo_id, is_active=True)
         
-        # Get drug by ID or code
-        if drug_id:
-            drug = get_object_or_404(Drug, id=drug_id, facility_id=facility_id, is_active=True)
-        else:
-            drug = get_object_or_404(Drug, facility_id=facility_id, code=str(code).strip(), is_active=True)
+        # Get tier if specified
+        tier = None
+        if tier_id:
+            tier = get_object_or_404(HMOTier, id=tier_id, system_hmo=system_hmo, is_active=True)
+
+        # Get drug
+        drug = get_object_or_404(Drug, id=drug_id, facility_id=facility_id)
 
         from billing.models import Service, HMOPrice
 
-        # Create/update service code
-        svc_code = f"DRUG:{drug.code}"
+        # Get or create service for this drug
+        service_code = f"DRUG:{drug.code}"
         service, _ = Service.objects.get_or_create(
-            code=svc_code,
-            defaults={
-                "name": drug.name or svc_code,
-                "default_price": drug.unit_price or 0,
-            },
+            code=service_code,
+            defaults={"name": f"Drug: {drug.name}", "default_price": drug.unit_price},
         )
-        
-        # Create/update HMO price override
+
+        # Create/update HMO price override with tier support
         hp, created = HMOPrice.objects.update_or_create(
             facility_id=facility_id,
-            hmo=hmo,
+            system_hmo=system_hmo,
+            tier=tier,  # Can be None for HMO-level default
             service=service,
-            defaults={"amount": amount, "currency": "NGN", "is_active": True},
+            defaults={
+                "amount": amount,
+                "is_active": True
+            }
         )
-        
-        return Response({
-            "ok": True,
-            "drug_id": drug.id,
-            "drug_code": drug.code,
-            "service": service.code,
-            "hmo_price": str(hp.amount),
-            "created": created
-        })
+
+        return Response(
+            {
+                "success": True,
+                "drug_id": drug.id,
+                "drug_name": drug.name,
+                "hmo_id": system_hmo.id,
+                "hmo_name": system_hmo.name,
+                "tier_id": tier.id if tier else None,
+                "tier_name": tier.name if tier else None,
+                "hmo_price": str(hp.amount),
+                "is_tier_specific": bool(tier),
+                "created": created,
+                "message": f"{'Created' if created else 'Updated'} {'tier-specific' if tier else 'HMO-level default'} price"
+            }
+        )
 
     @action(detail=False, methods=["post"], permission_classes=[IsAuthenticated, IsPharmacyStaff], url_path="import-hmo-file")
     def import_hmo_file(self, request):

@@ -9,6 +9,7 @@ from rest_framework_simplejwt.authentication import JWTAuthentication
 from django.contrib.auth import get_user_model
 from billing.models import Service, Price, Charge
 from accounts.enums import UserRole
+from patients.models import SystemHMO, HMOTier
 from facilities.permissions_utils import has_facility_permission
 from billing.services.pricing import get_service_price_info, resolve_price
 from .models import Appointment
@@ -915,215 +916,259 @@ class AppointmentViewSet(
         Return appointment services with HMO-specific pricing.
         
         Query params:
-        - hmo_id (required): HMO to get pricing for
+        - hmo_id (required): SystemHMO ID to get pricing for
+        - tier_id (optional): HMOTier ID for tier-specific pricing
         
-        Returns list of appointment types with:
-        - service_id, service_code, service_name
-        - appt_type
-        - catalog_price (facility/owner base price)
+        Returns list of appointment services with:
+        - catalog_price (facility's default price)
         - hmo_price (HMO-specific override or falls back to catalog)
-        - discount_percent (calculated)
+        - tier information if tier_id is provided
+        - pricing resolution: tier-specific → HMO-default → facility-default
         """
         from billing.models import HMOPrice
-        from billing.services.pricing import get_service_price_info
-        from patients.models import HMO
-        from decimal import Decimal
 
         hmo_id = request.query_params.get("hmo_id")
+        tier_id = request.query_params.get("tier_id")
+        
         if not hmo_id:
             return Response({"detail": "hmo_id is required"}, status=400)
 
+        # Get SystemHMO (system-wide, no facility filter)
         try:
-            hmo = HMO.objects.get(id=hmo_id)
-        except HMO.DoesNotExist:
+            system_hmo = SystemHMO.objects.get(id=hmo_id, is_active=True)
+        except SystemHMO.DoesNotExist:
             return Response({"detail": "HMO not found"}, status=404)
+        
+        # Get tier if specified
+        tier = None
+        if tier_id:
+            try:
+                tier = HMOTier.objects.get(id=tier_id, system_hmo=system_hmo, is_active=True)
+            except HMOTier.DoesNotExist:
+                return Response({"detail": "Tier not found or doesn't belong to this HMO"}, status=404)
 
-        user = request.user
-        facility = getattr(user, "facility", None)
-        owner = None if facility else user
+        # Get facility if user is facility-scoped
+        facility_id = getattr(request.user, "facility_id", None)
 
-        # Get all appointment service codes
+        # Appointment service codes
         service_codes = [
-            "APPT:CONSULTATION",
-            "APPT:FOLLOW_UP",
-            "APPT:PROCEDURE",
-            "APPT:DIAGNOSTIC_NON_LAB",
-            "APPT:NURSING_CARE",
-            "APPT:THERAPY_REHAB",
-            "APPT:MENTAL_HEALTH",
+            "APPT:CONSULT_STD",
+            "APPT:CONSULT_FOLLOW_UP",
+            "APPT:CONSULT_EMERGENCY",
+            "APPT:CONSULT_SPECIALIST",
+            "APPT:CONSULT_PEDIATRIC",
+            "APPT:ANNUAL_CHECKUP",
+            "APPT:PHYSICAL_EXAM",
+            "APPT:WELLNESS_VISIT",
             "APPT:IMMUNIZATION",
-            "APPT:MATERNAL_CHILD_CARE",
-            "APPT:SURGICAL_PRE_POST",
-            "APPT:EMERGENCY_NON_ER",
-            "APPT:TELEMEDICINE",
-            "APPT:HOME_VISIT",
+            "APPT:LAB_COLLECTION",
+            "APPT:X_RAY_SCREENING",
+            "APPT:DENTAL_CHECKUP",
+            "APPT:VISION_SCREENING",
+            "APPT:HEARING_TEST",
+            "APPT:COUNSELING_SESSION",
+            "APPT:NUTRITION_CONSULT",
+            "APPT:THERAPY_SESSION",
             "APPT:ADMIN_HMO_REVIEW",
-            "APPT:LAB",
-            "APPT:IMAGING",
-            "APPT:PHARMACY",
-            "APPT:OTHER",
         ]
 
-        # Appointment type display names
-        appt_type_names = {
-            "CONSULTATION": "Consultation",
-            "FOLLOW_UP": "Follow-up Visit",
-            "PROCEDURE": "Procedure",
-            "DIAGNOSTIC_NON_LAB": "Diagnostic (Non-Lab)",
-            "NURSING_CARE": "Nursing Care",
-            "THERAPY_REHAB": "Therapy/Rehabilitation",
-            "MENTAL_HEALTH": "Mental Health",
+        # Service name mapping
+        service_names = {
+            "CONSULT_STD": "Standard Consultation",
+            "CONSULT_FOLLOW_UP": "Follow-up Consultation",
+            "CONSULT_EMERGENCY": "Emergency Consultation",
+            "CONSULT_SPECIALIST": "Specialist Consultation",
+            "CONSULT_PEDIATRIC": "Pediatric Consultation",
+            "ANNUAL_CHECKUP": "Annual Health Checkup",
+            "PHYSICAL_EXAM": "Physical Examination",
+            "WELLNESS_VISIT": "Wellness Visit",
             "IMMUNIZATION": "Immunization/Vaccination",
-            "MATERNAL_CHILD_CARE": "Maternal/Child Care",
-            "SURGICAL_PRE_POST": "Surgical (Pre/Post-op)",
-            "EMERGENCY_NON_ER": "Emergency (Non-ER)",
-            "TELEMEDICINE": "Telemedicine",
-            "HOME_VISIT": "Home Visit",
+            "LAB_COLLECTION": "Lab Sample Collection",
+            "X_RAY_SCREENING": "X-Ray Screening",
+            "DENTAL_CHECKUP": "Dental Checkup",
+            "VISION_SCREENING": "Vision Screening",
+            "HEARING_TEST": "Hearing Test",
+            "COUNSELING_SESSION": "Counseling Session",
+            "NUTRITION_CONSULT": "Nutrition Consultation",
+            "THERAPY_SESSION": "Therapy Session (Physical/Occupational)",
             "ADMIN_HMO_REVIEW": "Administrative/HMO Review",
-            "LAB": "Lab Visit",
-            "IMAGING": "Imaging Visit",
-            "PHARMACY": "Pharmacy Pickup",
-            "OTHER": "Other",
         }
 
-        results = []
+        result = []
+        for code in service_codes:
+            # Get service
+            service = Service.objects.filter(code=code).first()
+            if not service:
+                continue
 
-        for service_code in service_codes:
-            try:
-                service = Service.objects.filter(code=service_code).first()
-                if not service:
-                    continue
+            # Get facility price if applicable
+            catalog_price = service.default_price
+            if facility_id:
+                facility_price = Price.objects.filter(
+                    facility_id=facility_id, service=service
+                ).first()
+                if facility_price:
+                    catalog_price = facility_price.amount
 
-                appt_type = service_code.replace("APPT:", "")
-                service_name = appt_type_names.get(appt_type, appt_type)
-
-                # Get base catalog price (facility/owner)
-                price_info = get_service_price_info(
-                    service=service,
-                    facility=facility,
-                    owner=owner
-                )
-                catalog_price = price_info.get("facility_price") or Decimal("0.00")
-
-                # Get HMO-specific price if exists
+            # Get HMO price - try tier-specific first, fall back to HMO-level
+            hmo_price_obj = None
+            has_tier_specific = False
+            
+            if tier and facility_id:
+                # Try tier-specific price first
                 hmo_price_obj = HMOPrice.objects.filter(
+                    facility_id=facility_id,
+                    system_hmo=system_hmo,
+                    tier=tier,
                     service=service,
-                    hmo=hmo,
-                    facility=facility,
+                    is_active=True
+                ).first()
+                
+                if hmo_price_obj:
+                    has_tier_specific = True
+            
+            if not hmo_price_obj and facility_id:
+                # Fall back to HMO-level default (no tier)
+                hmo_price_obj = HMOPrice.objects.filter(
+                    facility_id=facility_id,
+                    system_hmo=system_hmo,
+                    tier__isnull=True,
+                    service=service,
                     is_active=True
                 ).first()
 
-                hmo_price = hmo_price_obj.amount if hmo_price_obj else catalog_price
+            hmo_price = hmo_price_obj.amount if hmo_price_obj else catalog_price
 
-                # Calculate discount percentage
-                discount_percent = 0
-                if catalog_price > 0:
-                    discount_percent = int(
-                        ((catalog_price - hmo_price) / catalog_price) * 100
-                    )
+            # Calculate discount if HMO price is different
+            discount = 0
+            if hmo_price < catalog_price:
+                discount = ((catalog_price - hmo_price) / catalog_price) * 100
 
-                results.append({
-                    "service_id": service.id,
-                    "service_code": service_code,
-                    "service_name": service_name,
-                    "appt_type": appt_type,
+            # Extract service type from code
+            service_type = code.replace("APPT:", "")
+
+            result.append(
+                {
+                    "service_code": code,
+                    "service_type": service_type,
+                    "name": service_names.get(service_type, service.name),
                     "catalog_price": str(catalog_price),
+                    "hmo_id": system_hmo.id,
+                    "hmo_name": system_hmo.name,
+                    "tier_id": tier.id if tier else None,
+                    "tier_name": tier.name if tier else None,
                     "hmo_price": str(hmo_price),
-                    "discount_percent": discount_percent,
-                })
+                    "has_tier_specific_price": has_tier_specific,
+                    "discount": round(discount, 2),
+                    "service_id": service.id,
+                }
+            )
 
-            except Exception as e:
-                print(f"Error processing service {service_code}: {e}")
-                continue
-
-        return Response(results, status=200)
+        return Response(result)
 
     @action(detail=False, methods=["post"], url_path="set-hmo-price", permission_classes=[IsAuthenticated, IsStaff])
     def set_hmo_price(self, request):
         """
         Set HMO-specific price for an appointment service.
         
-        Payload:
-        - hmo_id (required)
-        - service_id (required)
-        - amount (required)
+        Body:
+        {
+            "hmo_id": 1,           # SystemHMO ID (required)
+            "tier_id": 2,          # HMOTier ID (optional) - if provided, sets tier-specific price
+            "service_id": 5,       # or service_code
+            "amount": "2000.00"
+        }
         
-        Admin-only endpoint.
+        Pricing levels:
+        - No tier_id: Sets HMO-level default (applies to all tiers unless overridden)
+        - With tier_id: Sets tier-specific price (only for that tier)
         """
         from billing.models import HMOPrice
-        from billing.services.pricing import get_or_create_price_override
-        from patients.models import HMO
-        from decimal import Decimal
 
-        # Admin check
-        if request.user.role not in (UserRole.SUPER_ADMIN, UserRole.ADMIN):
+        # Only admins can set HMO prices
+        if not request.user.is_superuser:
             return Response(
                 {"detail": "Only admins can set HMO prices"},
-                status=403
+                status=403,
             )
 
         hmo_id = request.data.get("hmo_id")
+        tier_id = request.data.get("tier_id")
         service_id = request.data.get("service_id")
+        service_code = request.data.get("service_code")
         amount = request.data.get("amount")
 
-        if not all([hmo_id, service_id, amount]):
+        if not all([hmo_id, (service_id or service_code), amount]):
             return Response(
-                {"detail": "hmo_id, service_id, and amount are required"},
-                status=400
+                {"detail": "hmo_id, (service_id or service_code), and amount are required"},
+                status=400,
             )
 
+        # Get SystemHMO (system-wide, no facility filter)
         try:
-            hmo = HMO.objects.get(id=hmo_id)
-        except HMO.DoesNotExist:
+            system_hmo = SystemHMO.objects.get(id=hmo_id, is_active=True)
+        except SystemHMO.DoesNotExist:
             return Response({"detail": "HMO not found"}, status=404)
+        
+        # Get tier if specified
+        tier = None
+        if tier_id:
+            try:
+                tier = HMOTier.objects.get(id=tier_id, system_hmo=system_hmo, is_active=True)
+            except HMOTier.DoesNotExist:
+                return Response({"detail": "Tier not found or doesn't belong to this HMO"}, status=404)
 
-        try:
-            service = Service.objects.get(id=service_id)
-        except Service.DoesNotExist:
-            return Response({"detail": "Service not found"}, status=404)
+        # Get service
+        if service_id:
+            try:
+                service = Service.objects.get(id=service_id)
+            except Service.DoesNotExist:
+                return Response({"detail": "Service not found"}, status=404)
+        else:
+            try:
+                service = Service.objects.get(code=service_code)
+            except Service.DoesNotExist:
+                return Response({"detail": "Service not found"}, status=404)
 
-        try:
-            amount_decimal = Decimal(str(amount))
-            if amount_decimal < 0:
-                raise ValueError("Amount cannot be negative")
-        except (ValueError, TypeError) as e:
-            return Response(
-                {"detail": f"Invalid amount: {e}"},
-                status=400
-            )
-
-        user = request.user
-        facility = getattr(user, "facility", None)
-
-        if not facility:
+        # Get facility - required for HMO pricing
+        facility_id = getattr(request.user, "facility_id", None)
+        if not facility_id:
             return Response(
                 {"detail": "Facility is required for HMO pricing"},
-                status=400
+                status=400,
             )
 
-        # Create or update HMO price
+        # Create or update HMO price with tier support
         try:
-            price_obj = get_or_create_price_override(
+            hp, created = HMOPrice.objects.update_or_create(
+                facility_id=facility_id,
+                system_hmo=system_hmo,
+                tier=tier,  # Can be None for HMO-level default
                 service=service,
-                amount=amount_decimal,
-                facility=facility,
-                hmo=hmo,
-                currency="NGN"
+                defaults={
+                    "amount": amount,
+                    "is_active": True
+                }
             )
 
-            return Response({
-                "id": price_obj.id,
-                "service_id": service.id,
-                "hmo_id": hmo.id,
-                "amount": str(price_obj.amount),
-                "message": "HMO price set successfully"
-            }, status=200)
-
-        except Exception as e:
             return Response(
-                {"detail": f"Failed to set HMO price: {str(e)}"},
-                status=500
+                {
+                    "success": True,
+                    "service_id": service.id,
+                    "service_code": service.code,
+                    "service_name": service.name,
+                    "hmo_id": system_hmo.id,
+                    "hmo_name": system_hmo.name,
+                    "tier_id": tier.id if tier else None,
+                    "tier_name": tier.name if tier else None,
+                    "hmo_price": str(hp.amount),
+                    "is_tier_specific": bool(tier),
+                    "created": created,
+                    "message": f"{'Created' if created else 'Updated'} {'tier-specific' if tier else 'HMO-level default'} price"
+                }
             )
+        except Exception as e:
+            return Response({"detail": str(e)}, status=500)
 
     @action(detail=False, methods=["post"], url_path="import-hmo-file", permission_classes=[IsAuthenticated, IsStaff])
     def import_hmo_file(self, request):
