@@ -182,25 +182,208 @@ class FacilityHMOManagementViewSet(viewsets.ModelViewSet):
         serializer = self.get_serializer(instance)
         return Response(serializer.data)
     
-    @action(detail=True, methods=['patch'])
-    def update_relationship(self, request, pk=None, facility_id=None):
-        """Update the relationship status and notes."""
+    def retrieve(self, request, pk=None, facility_pk=None):
+        """
+        Get HMO relationship details with financial summary.
+        
+        Query Parameters:
+        - patient: Filter charges by patient ID
+        - start: Start date for charges (YYYY-MM-DD)
+        - end: End date for charges (YYYY-MM-DD)
+        - status: Filter by charge status (PAID, UNPAID, PARTIALLY_PAID, VOID)
+        
+        Returns HMO data with financial summary, charges list, and patients list.
+        """
+        from billing.models import Charge, Payment
+        from billing.serializers import ChargeReadSerializer
+        from patients.serializers import PatientSerializer
+        from decimal import Decimal
+        from django.utils.dateparse import parse_date
+        from django.db.models import Sum, Count
+        from django.db.models.functions import Coalesce
+        
+        # Get the HMO relationship
+        hmo_relationship = self.get_object()
+        
+        # Use facility_pk from URL, fallback to user's facility
+        if not facility_pk:
+            facility_pk = getattr(request.user, 'facility_id', None)
+        
+        # Get all patients enrolled in this HMO at this facility
+        # NOTE: Patient model doesn't have is_active field, just filter by system_hmo
+        patients_qs = Patient.objects.filter(
+            facility_id=facility_pk,
+            system_hmo=hmo_relationship.system_hmo,
+        ).select_related('user', 'hmo_tier')
+        
+        # Get patient IDs for charge filtering
+        patient_ids = list(patients_qs.values_list('id', flat=True))
+        
+        # Get charges for these patients with allocated_total annotation
+        # NOTE: allocated_total must be annotated, it's not a model field
+        charges_qs = Charge.objects.filter(
+            patient_id__in=patient_ids,
+            facility_id=facility_pk
+        ).select_related(
+            'patient',
+            'patient__user',
+            'patient__system_hmo',
+            'patient__hmo_tier',
+            'facility',
+            'owner',
+            'service',
+            'created_by'
+        ).prefetch_related(
+            'allocations'
+        ).annotate(
+            # This annotation is required by ChargeReadSerializer
+            allocated_total=Coalesce(Sum('allocations__amount'), Decimal('0.00'))
+        )
+        
+        # Apply filters from query parameters
+        start_date = request.query_params.get('start')
+        end_date = request.query_params.get('end')
+        status_filter = request.query_params.get('status')
+        patient_filter = request.query_params.get('patient')
+        
+        if start_date:
+            try:
+                start_parsed = parse_date(start_date)
+                if start_parsed:
+                    charges_qs = charges_qs.filter(created_at__date__gte=start_parsed)
+            except:
+                pass
+        
+        if end_date:
+            try:
+                end_parsed = parse_date(end_date)
+                if end_parsed:
+                    charges_qs = charges_qs.filter(created_at__date__lte=end_parsed)
+            except:
+                pass
+        
+        if status_filter:
+            charges_qs = charges_qs.filter(status=status_filter)
+        
+        if patient_filter:
+            try:
+                patient_id = int(patient_filter)
+                charges_qs = charges_qs.filter(patient_id=patient_id)
+                # Also filter patients list
+                patients_qs = patients_qs.filter(id=patient_id)
+            except (ValueError, TypeError):
+                pass
+        
+        # Calculate summary statistics
+        # The queryset already has allocated_total annotated
+        charge_aggregates = charges_qs.aggregate(
+            total_amount=Sum('amount'),
+            total_allocated=Sum('allocated_total'),
+            count=Count('id')
+        )
+        
+        total_charges = charge_aggregates['total_amount'] or Decimal('0.00')
+        total_allocated = charge_aggregates['total_allocated'] or Decimal('0.00')
+        outstanding = total_charges - total_allocated
+        charges_count = charge_aggregates['count'] or 0
+        
+        # Get total payments for this HMO
+        # NOTE: Payment.hmo might reference legacy HMO model
+        # Try filtering by system_hmo first, fall back to checking patient's system_hmo
+        payment_total = Payment.objects.filter(
+            facility_id=facility_pk,
+            patient__system_hmo=hmo_relationship.system_hmo,
+            payment_source='HMO'
+        ).aggregate(total=Sum('amount'))['total'] or Decimal('0.00')
+        
+        # Serialize charges
+        # ChargeReadSerializer expects allocated_total to be present (we annotated it)
+        charges_data = ChargeReadSerializer(charges_qs, many=True).data
+        
+        # Serialize patients
+        patients_data = PatientSerializer(patients_qs, many=True).data
+        
+        # Get the HMO serializer data
+        hmo_serializer = self.get_serializer(hmo_relationship)
+        hmo_data = hmo_serializer.data
+        
+        # Add SystemHMO contact fields to the response
+        # These fields come from the related SystemHMO
+        if hmo_relationship.system_hmo:
+            system_hmo = hmo_relationship.system_hmo
+            hmo_data.update({
+                'name': system_hmo.name,
+                'email': system_hmo.email or '',
+                'nhis_number': system_hmo.nhis_number or '',
+                'addresses': system_hmo.addresses or [],
+                'contact_numbers': system_hmo.contact_numbers or [],
+                'contact_person_name': system_hmo.contact_person_name or '',
+                'contact_person_phone': system_hmo.contact_person_phone or '',
+                'contact_person_email': system_hmo.contact_person_email or '',
+            })
+        
+        # Build complete response
+        response_data = {
+            'hmo': hmo_data,
+            'summary': {
+                'total_patients': patients_qs.count(),
+                'charges_total': float(total_charges),
+                'charges_count': charges_count,
+                'payments_total': float(payment_total),
+                'outstanding': float(outstanding),
+            },
+            'charges': charges_data,
+            'patients': patients_data,
+        }
+        
+        return Response(response_data)
+
+    @action(detail=True, methods=['post'])
+    def update_relationship(self, request, pk=None, facility_pk=None):
+        """
+        Update the relationship status and notes.
+        
+        Body:
+        {
+            "status": "GOOD",     # Maps to relationship_status
+            "notes": "Updated..."  # Maps to relationship_notes
+        }
+        """
         instance = self.get_object()
         
-        relationship_status = request.data.get('relationship_status')
-        relationship_notes = request.data.get('relationship_notes')
+        # Frontend sends 'status' and 'notes', map to model fields
+        status_value = request.data.get('status')
+        notes_value = request.data.get('notes')
         
-        if relationship_status:
-            instance.relationship_status = relationship_status
-        if relationship_notes is not None:
-            instance.relationship_notes = relationship_notes
+        # Also support the old field names for backward compatibility
+        if not status_value:
+            status_value = request.data.get('relationship_status')
+        if notes_value is None:
+            notes_value = request.data.get('relationship_notes')
+        
+        if status_value:
+            # Validate status
+            valid_statuses = ['EXCELLENT', 'GOOD', 'FAIR', 'POOR', 'BAD']
+            if status_value not in valid_statuses:
+                return Response(
+                    {'detail': f'Invalid status. Must be one of: {", ".join(valid_statuses)}'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+            instance.relationship_status = status_value
+        
+        if notes_value is not None:
+            instance.relationship_notes = notes_value
         
         instance.relationship_updated_by = request.user
         instance.relationship_updated_at = timezone.now()
         instance.save()
         
         serializer = self.get_serializer(instance)
-        return Response(serializer.data)
+        return Response({
+            'status': 'success',
+            'message': 'Relationship status updated successfully',
+            'data': serializer.data
+        })
     
     @action(detail=False, methods=['get'])
     def available(self, request, facility_id=None):
