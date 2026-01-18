@@ -310,17 +310,7 @@ class FacilityHMOManagementViewSet(viewsets.ModelViewSet):
         # Add SystemHMO contact fields to the response
         # These fields come from the related SystemHMO
         if hmo_relationship.system_hmo:
-            system_hmo = hmo_relationship.system_hmo
-            hmo_data.update({
-                'name': system_hmo.name,
-                'email': system_hmo.email or '',
-                'nhis_number': system_hmo.nhis_number or '',
-                'addresses': system_hmo.addresses or [],
-                'contact_numbers': system_hmo.contact_numbers or [],
-                'contact_person_name': system_hmo.contact_person_name or '',
-                'contact_person_phone': system_hmo.contact_person_phone or '',
-                'contact_person_email': system_hmo.contact_person_email or '',
-            })
+            hmo_data['name'] = hmo_relationship.system_hmo.name
         
         # Build complete response
         response_data = {

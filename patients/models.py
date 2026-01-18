@@ -450,6 +450,60 @@ class FacilityHMO(models.Model):
         help_text='Contract reference number'
     )
     
+    # ========================================================================
+    # FACILITY-SPECIFIC CONTACT INFORMATION
+    # ========================================================================
+    # These fields override the SystemHMO contact info for this specific facility
+    # This allows each facility to have their own local HMO office contact details
+    
+    email = models.EmailField(
+        max_length=254,
+        blank=True,
+        default='',
+        help_text='Facility-specific HMO email address'
+    )
+    
+    addresses = models.JSONField(
+        default=list,
+        blank=True,
+        help_text='Facility-specific HMO office addresses (JSON array)'
+    )
+    
+    contact_numbers = models.JSONField(
+        default=list,
+        blank=True,
+        help_text='Facility-specific contact phone numbers (JSON array)'
+    )
+    
+    contact_person_name = models.CharField(
+        max_length=255,
+        blank=True,
+        default='',
+        help_text='Name of facility-specific HMO contact person'
+    )
+    
+    contact_person_phone = models.CharField(
+        max_length=20,
+        blank=True,
+        default='',
+        help_text='Facility-specific contact person phone number'
+    )
+    
+    contact_person_email = models.EmailField(
+        max_length=254,
+        blank=True,
+        default='',
+        help_text='Facility-specific contact person email address'
+    )
+    
+    nhis_number = models.CharField(
+        max_length=120,
+        blank=True,
+        default='',
+        help_text='Facility-specific NHIS number (if different from system HMO)'
+    )
+    # ========================================================================
+    
     # Status
     is_active = models.BooleanField(
         default=True,
@@ -509,6 +563,18 @@ class FacilityHMO(models.Model):
             self.RelationshipStatus.BAD: "red",
         }
         return colors.get(self.relationship_status, "slate")
+    
+    def get_primary_address(self):
+        """Return the first address or empty string"""
+        if self.addresses and len(self.addresses) > 0:
+            return self.addresses[0]
+        return ""
+    
+    def get_primary_contact(self):
+        """Return the first contact number or empty string"""
+        if self.contact_numbers and len(self.contact_numbers) > 0:
+            return self.contact_numbers[0]
+        return ""
 
 
 class PatientFacilityHMOApproval(models.Model):

@@ -45,7 +45,7 @@ class PatientViewSet(viewsets.GenericViewSet,
                      mixins.UpdateModelMixin,
                      mixins.ListModelMixin):
     queryset = Patient.objects.select_related(
-        "user", "facility", "hmo", "system_hmo", "hmo_tier"
+        "user", "facility", "hmo", "system_hmo", "hmo_tier", 'hmo_enrollment_facility'
     ).all().order_by("-created_at")
     authentication_classes = [JWTAuthentication]
     permission_classes = [IsAuthenticated]
@@ -1239,6 +1239,14 @@ class FacilityHMOViewSet(
                 existing.contract_start_date = request.data.get('contract_start_date', existing.contract_start_date)
                 existing.contract_end_date = request.data.get('contract_end_date', existing.contract_end_date)
                 existing.contract_reference = request.data.get('contract_reference', existing.contract_reference)
+                # Contact Information
+                existing.email = request.data.get('email', existing.email)
+                existing.addresses = request.data.get('addresses', existing.addresses)
+                existing.contact_numbers = request.data.get('contact_numbers', existing.contact_numbers)
+                existing.contact_person_name = request.data.get('contact_person_name', existing.contact_person_name)
+                existing.contact_person_phone = request.data.get('contact_person_phone', existing.contact_person_phone)
+                existing.contact_person_email = request.data.get('contact_person_email', existing.contact_person_email)
+                existing.nhis_number = request.data.get('nhis_number', existing.nhis_number)
                 existing.save()
                 
                 output = FacilityHMOSerializer(existing)
@@ -1254,6 +1262,14 @@ class FacilityHMOViewSet(
             contract_start_date=request.data.get('contract_start_date'),
             contract_end_date=request.data.get('contract_end_date'),
             contract_reference=request.data.get('contract_reference', ''),
+            # Contact Information
+            email=request.data.get('email', ''),
+            addresses=request.data.get('addresses', []),
+            contact_numbers=request.data.get('contact_numbers', []),
+            contact_person_name=request.data.get('contact_person_name', ''),
+            contact_person_phone=request.data.get('contact_person_phone', ''),
+            contact_person_email=request.data.get('contact_person_email', ''),
+            nhis_number=request.data.get('nhis_number', ''),
             is_active=True,
         )
         

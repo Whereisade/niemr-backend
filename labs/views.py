@@ -461,6 +461,8 @@ class LabTestViewSet(viewsets.GenericViewSet, mixins.ListModelMixin, mixins.Crea
         if not hmo_id:
             return Response({"detail": "hmo (or hmo_id) query param is required"}, status=400)
 
+        from patients.models import SystemHMO, HMOTier
+        
         # Get SystemHMO (system-wide, no facility filter)
         system_hmo = get_object_or_404(SystemHMO, id=hmo_id, is_active=True)
         
@@ -516,21 +518,27 @@ class LabTestViewSet(viewsets.GenericViewSet, mixins.ListModelMixin, mixins.Crea
                 if hmo_price_obj:
                     hmo_price = str(hmo_price_obj.amount)
 
+            # ✅ CORRECTED FIELD NAMES - Frontend expects these exact names
             result.append(
                 {
-                    "id": test.id,
-                    "code": test.code,
-                    "name": test.name,
+                    # Frontend expects test_ prefix
+                    "test_id": test.id,                      # ✅ Was: id
+                    "test_code": test.code,                  # ✅ Was: code
+                    "test_name": test.name,                  # ✅ Was: name
                     "unit": test.unit or "",
                     "ref_low": str(test.ref_low) if test.ref_low else None,
                     "ref_high": str(test.ref_high) if test.ref_high else None,
-                    "price": str(test.price),
+                    "catalog_price": str(test.price),        # ✅ Was: price
+                    
+                    # HMO pricing
                     "hmo_id": system_hmo.id,
                     "hmo_name": system_hmo.name,
                     "tier_id": tier.id if tier else None,
                     "tier_name": tier.name if tier else None,
                     "hmo_price": hmo_price,  # None if no override
                     "has_tier_specific_price": has_tier_specific,
+                    
+                    # Service ID for updates
                     "service_id": service.id,
                 }
             )
@@ -570,6 +578,8 @@ class LabTestViewSet(viewsets.GenericViewSet, mixins.ListModelMixin, mixins.Crea
         if not amount:
             return Response({"detail": "amount is required"}, status=400)
 
+        from patients.models import SystemHMO, HMOTier
+        
         # Get SystemHMO (system-wide, no facility filter)
         system_hmo = get_object_or_404(SystemHMO, id=hmo_id, is_active=True)
         

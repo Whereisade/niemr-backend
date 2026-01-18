@@ -254,6 +254,8 @@ class DrugViewSet(
         if not hmo_id:
             return Response({"detail": "hmo (or hmo_id) query param is required"}, status=400)
 
+        from patients.models import SystemHMO, HMOTier
+        
         # Get SystemHMO (system-wide, no facility filter)
         system_hmo = get_object_or_404(SystemHMO, id=hmo_id, is_active=True)
         
@@ -309,22 +311,28 @@ class DrugViewSet(
                 if hmo_price_obj:
                     hmo_price = str(hmo_price_obj.amount)
 
+            # ✅ CORRECTED FIELD NAMES - Frontend expects these exact names
             result.append(
                 {
-                    "id": drug.id,
-                    "code": drug.code,
-                    "name": drug.name,
+                    # Frontend expects drug_ prefix
+                    "drug_id": drug.id,                      # ✅ Was: id
+                    "drug_code": drug.code,                  # ✅ Was: code
+                    "drug_name": drug.name,                  # ✅ Was: name
                     "strength": drug.strength,
                     "form": drug.form,
                     "route": drug.route,
                     "qty_per_unit": drug.qty_per_unit,
-                    "unit_price": str(drug.unit_price),
+                    "catalog_price": str(drug.unit_price),   # ✅ Was: unit_price
+                    
+                    # HMO pricing
                     "hmo_id": system_hmo.id,
                     "hmo_name": system_hmo.name,
                     "tier_id": tier.id if tier else None,
                     "tier_name": tier.name if tier else None,
                     "hmo_price": hmo_price,  # None if no override
                     "has_tier_specific_price": has_tier_specific,
+                    
+                    # Service ID for updates
                     "service_id": service.id,
                 }
             )
@@ -364,6 +372,8 @@ class DrugViewSet(
         if not amount:
             return Response({"detail": "amount is required"}, status=400)
 
+        from patients.models import SystemHMO, HMOTier
+        
         # Get SystemHMO (system-wide, no facility filter)
         system_hmo = get_object_or_404(SystemHMO, id=hmo_id, is_active=True)
         

@@ -20,6 +20,8 @@ from .serializers import (
 )
 from .permissions import IsStaff, CanViewAppointment
 from .enums import ApptStatus
+from decimal import Decimal
+from billing.models import Service
 from .services.notify import (
     send_confirmation,
     send_reminder,
@@ -54,6 +56,48 @@ class AppointmentViewSet(
         if self.action in ("update", "partial_update"):
             return AppointmentUpdateSerializer
         return AppointmentSerializer
+
+
+    def ensure_appointment_services():
+        """
+        Create all 18 appointment service types if they don't exist.
+        Call this once during deployment or add to migration.
+        """
+        SERVICE_TYPES = {
+            "APPT:CONSULT_STD": ("Standard Consultation", 5000),
+            "APPT:CONSULT_FOLLOW_UP": ("Follow-up Consultation", 3000),
+            "APPT:CONSULT_EMERGENCY": ("Emergency Consultation", 10000),
+            "APPT:CONSULT_SPECIALIST": ("Specialist Consultation", 8000),
+            "APPT:CONSULT_PEDIATRIC": ("Pediatric Consultation", 6000),
+            "APPT:ANNUAL_CHECKUP": ("Annual Health Checkup", 15000),
+            "APPT:PHYSICAL_EXAM": ("Physical Examination", 5000),
+            "APPT:WELLNESS_VISIT": ("Wellness Visit", 4000),
+            "APPT:IMMUNIZATION": ("Immunization/Vaccination", 3000),
+            "APPT:LAB_COLLECTION": ("Lab Sample Collection", 2000),
+            "APPT:X_RAY_SCREENING": ("X-Ray Screening", 5000),
+            "APPT:DENTAL_CHECKUP": ("Dental Checkup", 4000),
+            "APPT:VISION_SCREENING": ("Vision Screening", 3000),
+            "APPT:HEARING_TEST": ("Hearing Test", 3000),
+            "APPT:COUNSELING_SESSION": ("Counseling Session", 6000),
+            "APPT:NUTRITION_CONSULT": ("Nutrition Consultation", 5000),
+            "APPT:THERAPY_SESSION": ("Therapy Session (Physical/Occupational)", 7000),
+            "APPT:ADMIN_HMO_REVIEW": ("Administrative/HMO Review", 1000),
+        }
+        
+        created_count = 0
+        for code, (name, price) in SERVICE_TYPES.items():
+            service, created = Service.objects.get_or_create(
+                code=code,
+                defaults={
+                    "name": name,
+                    "default_price": Decimal(str(price)),
+                    "is_active": True
+                }
+            )
+            if created:
+                created_count += 1
+        
+        return created_count
 
     def get_queryset(self):
         q = self.queryset
@@ -925,7 +969,8 @@ class AppointmentViewSet(
         - tier information if tier_id is provided
         - pricing resolution: tier-specific → HMO-default → facility-default
         """
-        from billing.models import HMOPrice
+        from billing.models import HMOPrice, Service, Price
+        from patients.models import SystemHMO, HMOTier
 
         hmo_id = request.query_params.get("hmo_id")
         tier_id = request.query_params.get("tier_id")
@@ -950,29 +995,13 @@ class AppointmentViewSet(
         # Get facility if user is facility-scoped
         facility_id = getattr(request.user, "facility_id", None)
 
-        # Appointment service codes
-        service_codes = [
-            "APPT:CONSULT_STD",
-            "APPT:CONSULT_FOLLOW_UP",
-            "APPT:CONSULT_EMERGENCY",
-            "APPT:CONSULT_SPECIALIST",
-            "APPT:CONSULT_PEDIATRIC",
-            "APPT:ANNUAL_CHECKUP",
-            "APPT:PHYSICAL_EXAM",
-            "APPT:WELLNESS_VISIT",
-            "APPT:IMMUNIZATION",
-            "APPT:LAB_COLLECTION",
-            "APPT:X_RAY_SCREENING",
-            "APPT:DENTAL_CHECKUP",
-            "APPT:VISION_SCREENING",
-            "APPT:HEARING_TEST",
-            "APPT:COUNSELING_SESSION",
-            "APPT:NUTRITION_CONSULT",
-            "APPT:THERAPY_SESSION",
-            "APPT:ADMIN_HMO_REVIEW",
-        ]
+        # ✅ FIX: Query all appointment services dynamically
+        services = Service.objects.filter(
+            code__startswith="APPT:",
+            is_active=True
+        ).order_by('code')
 
-        # Service name mapping
+        # Service name mapping for friendly names
         service_names = {
             "CONSULT_STD": "Standard Consultation",
             "CONSULT_FOLLOW_UP": "Follow-up Consultation",
@@ -995,11 +1024,9 @@ class AppointmentViewSet(
         }
 
         result = []
-        for code in service_codes:
-            # Get service
-            service = Service.objects.filter(code=code).first()
-            if not service:
-                continue
+        for service in services:
+            code = service.code
+            service_type = code.replace("APPT:", "")
 
             # Get facility price if applicable
             catalog_price = service.default_price
@@ -1044,25 +1071,24 @@ class AppointmentViewSet(
             if hmo_price < catalog_price:
                 discount = ((catalog_price - hmo_price) / catalog_price) * 100
 
-            # Extract service type from code
-            service_type = code.replace("APPT:", "")
-
-            result.append(
-                {
-                    "service_code": code,
-                    "service_type": service_type,
-                    "name": service_names.get(service_type, service.name),
-                    "catalog_price": str(catalog_price),
-                    "hmo_id": system_hmo.id,
-                    "hmo_name": system_hmo.name,
-                    "tier_id": tier.id if tier else None,
-                    "tier_name": tier.name if tier else None,
-                    "hmo_price": str(hmo_price),
-                    "has_tier_specific_price": has_tier_specific,
-                    "discount": round(discount, 2),
-                    "service_id": service.id,
-                }
-            )
+            # ✅ FIX: Correct field names for frontend
+            result.append({
+                "service_id": service.id,        # ✅ Frontend expects this
+                "service_code": code,
+                "service_type": service_type,
+                "service_name": service_names.get(service_type, service.name),  # ✅ Renamed from 'name'
+                "catalog_price": str(catalog_price),
+                "duration": None,  # ✅ Frontend expects this field
+                
+                # HMO pricing
+                "hmo_id": system_hmo.id,
+                "hmo_name": system_hmo.name,
+                "tier_id": tier.id if tier else None,
+                "tier_name": tier.name if tier else None,
+                "hmo_price": str(hmo_price),
+                "has_tier_specific_price": has_tier_specific,
+                "discount": round(discount, 2),
+            })
 
         return Response(result)
 
@@ -1086,11 +1112,8 @@ class AppointmentViewSet(
         from billing.models import HMOPrice
 
         # Only admins can set HMO prices
-        if not request.user.is_superuser:
-            return Response(
-                {"detail": "Only admins can set HMO prices"},
-                status=403,
-            )
+        if request.user.role not in (UserRole.SUPER_ADMIN, UserRole.ADMIN):
+            return Response({"detail": "Only admins can set HMO prices"}, status=403)
 
         hmo_id = request.data.get("hmo_id")
         tier_id = request.data.get("tier_id")

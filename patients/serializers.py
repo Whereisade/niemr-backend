@@ -47,6 +47,59 @@ class HMOSerializer(serializers.ModelSerializer):
 
 
 # ============================================================================
+# SYSTEM HMO SERIALIZERS (moved before PatientSerializer)
+# ============================================================================
+
+class HMOTierMinimalSerializer(serializers.ModelSerializer):
+    """Minimal tier serializer for nested use in patient data."""
+    
+    class Meta:
+        model = HMOTier
+        fields = [
+            'id',
+            'name',
+            'level',
+            'description',
+            'is_active'
+        ]
+
+
+class SystemHMOMinimalSerializer(serializers.ModelSerializer):
+    """Minimal HMO serializer with contact info for patient views."""
+    
+    primary_address = serializers.SerializerMethodField()
+    primary_contact = serializers.SerializerMethodField()
+    
+    class Meta:
+        model = SystemHMO
+        fields = [
+            'id',
+            'name',
+            'nhis_number',
+            'email',
+            'addresses',
+            'contact_numbers',
+            'primary_address',
+            'primary_contact',
+            'contact_person_name',
+            'contact_person_phone',
+            'contact_person_email'
+        ]
+    
+    def get_primary_address(self, obj):
+        """Return first address or empty string"""
+        if obj.addresses and len(obj.addresses) > 0:
+            return obj.addresses[0]
+        return ""
+    
+    def get_primary_contact(self, obj):
+        """Return first contact number or empty string"""
+        if obj.contact_numbers and len(obj.contact_numbers) > 0:
+            return obj.contact_numbers[0]
+        return ""
+
+
+# ============================================================================
 # PATIENT SERIALIZERS
 # ============================================================================
 
@@ -61,7 +114,11 @@ class PatientSerializer(serializers.ModelSerializer):
         allow_null=True
     )
     
-    # System HMO fields (new)
+    # System HMO fields (UPDATED - use nested serializers)
+    system_hmo = SystemHMOMinimalSerializer(read_only=True)
+    hmo_tier = HMOTierMinimalSerializer(read_only=True)
+    
+    # Also keep computed fields for backward compatibility
     system_hmo_name = serializers.CharField(source='system_hmo.name', read_only=True)
     hmo_tier_name = serializers.CharField(source='hmo_tier.name', read_only=True)
     hmo_tier_level = serializers.IntegerField(source='hmo_tier.level', read_only=True)
@@ -411,11 +468,17 @@ class HMOTierSerializer(serializers.ModelSerializer):
 
 
 class HMOTierMinimalSerializer(serializers.ModelSerializer):
-    """Minimal tier serializer for nested use."""
+    """Minimal tier serializer for nested use in patient data."""
     
     class Meta:
         model = HMOTier
-        fields = ['id', 'name', 'level']
+        fields = [
+            'id',
+            'name',
+            'level',
+            'description',
+            'is_active'
+        ]
 
 
 class SystemHMOSerializer(serializers.ModelSerializer):
@@ -462,11 +525,38 @@ class SystemHMODetailSerializer(SystemHMOSerializer):
 
 
 class SystemHMOMinimalSerializer(serializers.ModelSerializer):
-    """Minimal HMO serializer for nested use."""
+    """Minimal HMO serializer with contact info for patient views."""
+    
+    primary_address = serializers.SerializerMethodField()
+    primary_contact = serializers.SerializerMethodField()
     
     class Meta:
         model = SystemHMO
-        fields = ['id', 'name', 'nhis_number']
+        fields = [
+            'id',
+            'name',
+            'nhis_number',
+            'email',
+            'addresses',
+            'contact_numbers',
+            'primary_address',
+            'primary_contact',
+            'contact_person_name',
+            'contact_person_phone',
+            'contact_person_email'
+        ]
+    
+    def get_primary_address(self, obj):
+        """Return first address or empty string"""
+        if obj.addresses and len(obj.addresses) > 0:
+            return obj.addresses[0]
+        return ""
+    
+    def get_primary_contact(self, obj):
+        """Return first contact number or empty string"""
+        if obj.contact_numbers and len(obj.contact_numbers) > 0:
+            return obj.contact_numbers[0]
+        return ""
 
 
 class SystemHMOListSerializer(serializers.ModelSerializer):
@@ -543,45 +633,70 @@ class SystemHMOCreateSerializer(serializers.ModelSerializer):
 class FacilityHMOSerializer(serializers.ModelSerializer):
     """Serializer for FacilityHMO relationships."""
     
-    system_hmo = SystemHMOSerializer(read_only=True)
-    system_hmo_id = serializers.PrimaryKeyRelatedField(
-        queryset=SystemHMO.objects.filter(is_active=True),
-        source='system_hmo',
-        write_only=True
-    )
-    facility_name = serializers.CharField(source='facility.name', read_only=True)
+    system_hmo = SystemHMOMinimalSerializer(read_only=True)
+    facility_name = serializers.CharField(source='facility.name', read_only=True, allow_null=True)
     owner_name = serializers.SerializerMethodField()
     relationship_updated_by_name = serializers.SerializerMethodField()
-    patient_count = serializers.SerializerMethodField()
-    scope = serializers.SerializerMethodField()
+    
+    # Add computed fields for primary contact info
+    primary_address = serializers.SerializerMethodField()
+    primary_contact = serializers.SerializerMethodField()
     
     class Meta:
         model = FacilityHMO
         fields = [
             'id',
-            'system_hmo',
-            'system_hmo_id',
             'facility',
             'facility_name',
             'owner',
             'owner_name',
-            'scope',
+            'system_hmo',
+            
+            # Contact Information
+            'email',
+            'addresses',
+            'contact_numbers',
+            'primary_address',
+            'primary_contact',
+            'contact_person_name',
+            'contact_person_phone',
+            'contact_person_email',
+            'nhis_number',
+            
+            # Relationship tracking
             'relationship_status',
             'relationship_notes',
             'relationship_updated_at',
+            'relationship_updated_by',
             'relationship_updated_by_name',
+            
+            # Contract details
             'contract_start_date',
             'contract_end_date',
             'contract_reference',
+            
+            # Status
             'is_active',
-            'patient_count',
             'created_at',
             'updated_at',
         ]
         read_only_fields = [
-            'id', 'facility', 'owner', 'created_at', 'updated_at',
-            'relationship_updated_at', 'patient_count'
+            'id', 'created_at', 'updated_at',
+            'relationship_updated_at', 'relationship_updated_by',
+            'primary_address', 'primary_contact'
         ]
+    
+    def get_primary_address(self, obj):
+        """Get the first address from the list"""
+        if obj.addresses and len(obj.addresses) > 0:
+            return obj.addresses[0]
+        return ''
+    
+    def get_primary_contact(self, obj):
+        """Get the first contact number from the list"""
+        if obj.contact_numbers and len(obj.contact_numbers) > 0:
+            return obj.contact_numbers[0]
+        return ''
     
     def get_owner_name(self, obj):
         if obj.owner:
@@ -590,28 +705,7 @@ class FacilityHMOSerializer(serializers.ModelSerializer):
     
     def get_relationship_updated_by_name(self, obj):
         if obj.relationship_updated_by:
-            return f"{obj.relationship_updated_by.first_name} {obj.relationship_updated_by.last_name}".strip() or obj.relationship_updated_by.email
-        return None
-    
-    def get_patient_count(self, obj):
-        # Count patients enrolled with this HMO at this facility/provider
-        if obj.facility:
-            return Patient.objects.filter(
-                system_hmo=obj.system_hmo,
-                hmo_enrollment_facility=obj.facility
-            ).count()
-        elif obj.owner:
-            return Patient.objects.filter(
-                system_hmo=obj.system_hmo,
-                hmo_enrollment_provider=obj.owner
-            ).count()
-        return 0
-    
-    def get_scope(self, obj):
-        if obj.facility:
-            return 'FACILITY'
-        elif obj.owner:
-            return 'INDEPENDENT'
+            return f"{obj.relationship_updated_by.first_name} {obj.relationship_updated_by.last_name}".strip()
         return None
 
 
