@@ -545,7 +545,8 @@ class AppointmentViewSet(
                         service=service,
                         facility=facility,
                         owner=owner,
-                        hmo=appointment.patient.hmo if hasattr(appointment.patient, 'hmo') and appointment.patient.hmo else None,
+                        system_hmo=appointment.patient.system_hmo if hasattr(appointment.patient, 'system_hmo') and appointment.patient.system_hmo else None,
+                        tier=appointment.patient.hmo_tier if hasattr(appointment.patient, 'hmo_tier') and appointment.patient.hmo_tier else None,
                     )
                     
                     # If price is None or 0, it means no price has been set
@@ -968,6 +969,8 @@ class AppointmentViewSet(
         - hmo_price (HMO-specific override or falls back to catalog)
         - tier information if tier_id is provided
         - pricing resolution: tier-specific → HMO-default → facility-default
+        
+        ✅ FIXED: Now returns exactly 18 appointment services
         """
         from billing.models import HMOPrice, Service, Price
         from patients.models import SystemHMO, HMOTier
@@ -995,14 +998,66 @@ class AppointmentViewSet(
         # Get facility if user is facility-scoped
         facility_id = getattr(request.user, "facility_id", None)
 
-        # ✅ FIX: Query all appointment services dynamically
+        # ✅ FIX #1: Query only the 18 original appointment services (not all APPT:* services)
+        # This prevents showing 25 services when there are extra services in the database
+        APPOINTMENT_SERVICE_CODES = [
+            "APPT:CONSULTATION",
+            "APPT:FOLLOW_UP",
+            "APPT:PROCEDURE",
+            "APPT:DIAGNOSTIC_NON_LAB",
+            "APPT:NURSING_CARE",
+            "APPT:THERAPY_REHAB",
+            "APPT:MENTAL_HEALTH",
+            "APPT:IMMUNIZATION",
+            "APPT:MATERNAL_CHILD_CARE",
+            "APPT:SURGICAL_PRE_POST",
+            "APPT:EMERGENCY_NON_ER",
+            "APPT:TELEMEDICINE",
+            "APPT:HOME_VISIT",
+            "APPT:ADMIN_HMO_REVIEW",
+            "APPT:LAB",
+            "APPT:IMAGING",
+            "APPT:PHARMACY",
+            "APPT:OTHER",
+        ]
+        
+        # OLD CODE (fetched all APPT:* services - could be 25+):
+        # services = Service.objects.filter(
+        #     code__startswith="APPT:",
+        #     is_active=True
+        # ).order_by('code')
+        
+        # NEW CODE (fetches only the 18 original services):
         services = Service.objects.filter(
-            code__startswith="APPT:",
+            code__in=APPOINTMENT_SERVICE_CODES,
             is_active=True
         ).order_by('code')
 
-        # Service name mapping for friendly names
+        # ✅ FIX #2: Updated service name mapping for original service codes
+        # The old mapping only had alternative service names (CONSULT_STD, etc.)
+        # This now includes the original service codes (CONSULTATION, FOLLOW_UP, etc.)
         service_names = {
+            # Original service codes from seed_appointment_services.py
+            "CONSULTATION": "Consultation",
+            "FOLLOW_UP": "Follow-up Visit",
+            "PROCEDURE": "Procedure",
+            "DIAGNOSTIC_NON_LAB": "Diagnostic (Non-Lab)",
+            "NURSING_CARE": "Nursing Care",
+            "THERAPY_REHAB": "Therapy/Rehabilitation",
+            "MENTAL_HEALTH": "Mental Health",
+            "IMMUNIZATION": "Immunization/Vaccination",
+            "MATERNAL_CHILD_CARE": "Maternal/Child Care",
+            "SURGICAL_PRE_POST": "Surgical (Pre/Post-op)",
+            "EMERGENCY_NON_ER": "Emergency (Non-ER)",
+            "TELEMEDICINE": "Telemedicine",
+            "HOME_VISIT": "Home Visit",
+            "ADMIN_HMO_REVIEW": "Administrative/HMO Review",
+            "LAB": "Lab Visit",
+            "IMAGING": "Imaging Visit",
+            "PHARMACY": "Pharmacy Pickup",
+            "OTHER": "Other",
+            
+            # Alternative service codes (kept for backward compatibility)
             "CONSULT_STD": "Standard Consultation",
             "CONSULT_FOLLOW_UP": "Follow-up Consultation",
             "CONSULT_EMERGENCY": "Emergency Consultation",
@@ -1011,7 +1066,6 @@ class AppointmentViewSet(
             "ANNUAL_CHECKUP": "Annual Health Checkup",
             "PHYSICAL_EXAM": "Physical Examination",
             "WELLNESS_VISIT": "Wellness Visit",
-            "IMMUNIZATION": "Immunization/Vaccination",
             "LAB_COLLECTION": "Lab Sample Collection",
             "X_RAY_SCREENING": "X-Ray Screening",
             "DENTAL_CHECKUP": "Dental Checkup",
@@ -1020,7 +1074,6 @@ class AppointmentViewSet(
             "COUNSELING_SESSION": "Counseling Session",
             "NUTRITION_CONSULT": "Nutrition Consultation",
             "THERAPY_SESSION": "Therapy Session (Physical/Occupational)",
-            "ADMIN_HMO_REVIEW": "Administrative/HMO Review",
         }
 
         result = []
@@ -1071,14 +1124,14 @@ class AppointmentViewSet(
             if hmo_price < catalog_price:
                 discount = ((catalog_price - hmo_price) / catalog_price) * 100
 
-            # ✅ FIX: Correct field names for frontend
+            # ✅ UNCHANGED: Return format remains the same, frontend compatibility maintained
             result.append({
-                "service_id": service.id,        # ✅ Frontend expects this
+                "service_id": service.id,
                 "service_code": code,
                 "service_type": service_type,
-                "service_name": service_names.get(service_type, service.name),  # ✅ Renamed from 'name'
+                "service_name": service_names.get(service_type, service.name),
                 "catalog_price": str(catalog_price),
-                "duration": None,  # ✅ Frontend expects this field
+                "duration": None,
                 
                 # HMO pricing
                 "hmo_id": system_hmo.id,

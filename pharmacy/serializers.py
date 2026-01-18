@@ -647,15 +647,18 @@ class DispenseSerializer(serializers.Serializer):
                 except Exception:
                     pass
 
-                patient_hmo = None
+                patient_system_hmo = None
+                patient_tier = None
                 if rx.patient:
-                    patient_hmo = getattr(rx.patient, 'hmo', None)
+                    patient_system_hmo = getattr(rx.patient, 'system_hmo', None)
+                    patient_tier = getattr(rx.patient, 'hmo_tier', None)
 
                 unit_price = resolve_price(
                     service=service, 
                     facility=billing_facility, 
                     owner=billing_owner,
-                    hmo=patient_hmo
+                    system_hmo=patient_system_hmo,
+                    tier=patient_tier
                 )
                 amount = (unit_price or Decimal("0")) * Decimal(take)
 

@@ -279,8 +279,9 @@ class LabOrderCreateSerializer(serializers.ModelSerializer):
                         billing_owner = user
 
                 if billing_facility or billing_owner:
-                    # 🔥 FIX: Get patient's HMO for pricing resolution
-                    patient_hmo = getattr(patient, "hmo", None)
+                    # 🔥 FIX: Get patient's HMO and tier for pricing resolution
+                    patient_system_hmo = getattr(patient, "system_hmo", None)
+                    patient_tier = getattr(patient, "hmo_tier", None)
                     
                     for it in order.items.select_related("test").all():
                         if not getattr(it, "test_id", None):
@@ -318,12 +319,13 @@ class LabOrderCreateSerializer(serializers.ModelSerializer):
                         except Exception as e:
                             logger.warning(f"Failed to create price override for service {code}: {e}")
 
-                        # 🔥 FIX: Pass patient's HMO to resolve_price
+                        # 🔥 FIX: Pass patient's HMO and tier to resolve_price
                         unit_price = resolve_price(
                             service=service, 
                             facility=billing_facility, 
                             owner=billing_owner, 
-                            hmo=patient_hmo
+                            system_hmo=patient_system_hmo,
+                            tier=patient_tier
                         )
                         
                         # 🔥 FIX: Handle None pricing gracefully - use test price as fallback
@@ -331,7 +333,7 @@ class LabOrderCreateSerializer(serializers.ModelSerializer):
                             unit_price = getattr(test, "price", 0) or Decimal("0.00")
                             logger.warning(
                                 f"No price configured for lab test {test.code} "
-                                f"(facility={billing_facility}, hmo={patient_hmo}). "
+                                f"(facility={billing_facility}, system_hmo={patient_system_hmo}). "
                                 f"Using test default price: {unit_price}"
                             )
                         
@@ -357,7 +359,7 @@ class LabOrderCreateSerializer(serializers.ModelSerializer):
                         
                         logger.info(
                             f"Created billing charge for lab order {order.id}, test {test.code}: "
-                            f"₦{amount} (patient HMO: {patient_hmo.name if patient_hmo else 'None'})"
+                            f"₦{amount} (patient HMO: {patient_system_hmo.name if patient_system_hmo else 'None'})"
                         )
         except Exception as e:
             # Log the error but don't fail the lab order creation
