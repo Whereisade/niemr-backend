@@ -633,7 +633,7 @@ class SystemHMOCreateSerializer(serializers.ModelSerializer):
 class FacilityHMOSerializer(serializers.ModelSerializer):
     """Serializer for FacilityHMO relationships."""
     
-    system_hmo = SystemHMOMinimalSerializer(read_only=True)
+    system_hmo = SystemHMOListSerializer(read_only=True)
     facility_name = serializers.CharField(source='facility.name', read_only=True, allow_null=True)
     owner_name = serializers.SerializerMethodField()
     relationship_updated_by_name = serializers.SerializerMethodField()
