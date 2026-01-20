@@ -145,6 +145,7 @@ INSTALLED_APPS = [
     "drf_spectacular",
     "drf_spectacular_sidecar",
     "storages",
+    "drf-nested-routers",
     # "corsheaders",
 ]
 
