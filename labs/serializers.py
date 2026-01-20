@@ -210,157 +210,163 @@ class LabOrderCreateSerializer(serializers.ModelSerializer):
         if value in (None, "", 0):
             return None
 
-        user = User.objects.filter(id=value).first()
-        if not user:
-            raise serializers.ValidationError("Invalid outsourced_to user id")
-
-        role = (getattr(user, "role", "") or "").upper()
-        if role != UserRole.LAB:
-            raise serializers.ValidationError("outsourced_to must be a LAB user")
-
-        # Outsourcing should target independent providers (no facility)
-        if getattr(user, "facility_id", None):
-            raise serializers.ValidationError("outsourced_to must be an independent LAB (facility must be null)")
-
-        return user.id
+        try:
+            u = User.objects.get(id=value, is_active=True)
+            # Verify the user has lab role
+            if u.role not in [UserRole.LAB, UserRole.ADMIN]:
+                raise serializers.ValidationError(
+                    f"User {u.email} does not have lab scientist role and cannot receive outsourced orders."
+                )
+            # Independent lab scientist: facility must be null
+            if u.facility_id is not None:
+                raise serializers.ValidationError(
+                    f"Outsourced orders can only be sent to independent lab scientists (not facility staff)."
+                )
+            return value
+        except User.DoesNotExist:
+            raise serializers.ValidationError("Lab scientist user not found.")
 
     @transaction.atomic
-    def create(self, validated):
-        request = self.context["request"]
-        user = request.user
+    def create(self, validated_data):
+        from decimal import Decimal
+        import logging
+        from billing.models import Service, Price, Charge
+        from billing.services.pricing import resolve_price
 
-        items = validated.pop("items", [])
-        outsourced_to_id = validated.pop("outsourced_to", None)
+        logger = logging.getLogger(__name__)
+        
+        items_data = validated_data.pop("items", [])
+        outsourced_to_id = validated_data.pop("outsourced_to", None)
 
-        patient = validated["patient"]
+        u = self.context["request"].user
+        validated_data["ordered_by"] = u
 
-        # Facility linkage:
-        # - Facility staff: facility is the user's facility
-        # - Independent providers: facility remains NULL (avoid leaking orders into an unrelated facility scope)
-        # - System admins (no facility): can bill under patient's facility when applicable
-        facility = user.facility if getattr(user, "facility_id", None) else None
-        role = (getattr(user, "role", "") or "").upper()
-        if not facility and role in {UserRole.ADMIN, UserRole.SUPER_ADMIN} and getattr(patient, "facility_id", None):
-            facility = patient.facility
+        # Determine facility context for scoping
+        if getattr(u, "facility_id", None):
+            validated_data["facility"] = u.facility
+        else:
+            validated_data["facility"] = None
 
-        order = LabOrder.objects.create(
-            patient=patient,
-            facility=facility,
-            ordered_by=user,
-            priority=validated.get("priority"),
-            note=validated.get("note", ""),
-            encounter_id=validated.get("encounter_id"),
-            external_lab_name=validated.get("external_lab_name", ""),
-            outsourced_to_id=outsourced_to_id,
-        )
+        # Handle outsourcing
+        if outsourced_to_id:
+            try:
+                outsourced_provider = User.objects.get(id=outsourced_to_id, is_active=True)
+                validated_data["outsourced_to"] = outsourced_provider
+                # Clear facility if outsourcing to independent provider
+                if not outsourced_provider.facility_id:
+                    validated_data.pop("facility", None)
+            except User.DoesNotExist:
+                logger.warning(f"Outsourced provider {outsourced_to_id} not found during order creation")
 
-        for item in items:
-            LabOrderItem.objects.create(order=order, **item)
+        order = LabOrder.objects.create(**validated_data)
 
-        # Billing: create charges for priced tests.
+        # Create items
+        for it in items_data:
+            LabOrderItem.objects.create(order=order, **it)
+
+        # ========================================================================
+        # AUTOMATIC BILLING (if billing app is available)
+        # ========================================================================
         try:
-            from billing.models import Charge, Service, Price
-            from billing.services.pricing import resolve_price
-            from decimal import Decimal
-            import logging
+            # Determine billing scope
+            billing_facility = None
+            billing_owner = None
+
+            if order.facility_id:
+                billing_facility = order.facility
+            elif order.ordered_by and not order.ordered_by.facility_id:
+                billing_owner = order.ordered_by
+
+            # Get patient's HMO info (UPDATED for new SystemHMO structure)
+            patient_system_hmo = None
+            patient_tier = None
             
-            logger = logging.getLogger(__name__)
+            if order.patient:
+                patient_system_hmo = getattr(order.patient, 'system_hmo', None)
+                patient_tier = getattr(order.patient, 'hmo_tier', None)
+            
+            if billing_facility or billing_owner:
+                # Ensure all lab tests have corresponding services
+                # This uses the code LAB:{test.code} convention.
+                for it in order.items.all():
+                    # Skip manual tests (no test FK)
+                    if not it.test_id:
+                        continue
+                    test = it.test
+                    if not test:
+                        continue
 
-            # Avoid duplicates (idempotent-ish)
-            if not Charge.objects.filter(lab_order_id=order.id).exists():
-                billing_facility = order.facility if order.facility_id and not order.outsourced_to_id else None
-                billing_owner = None
-                if order.outsourced_to_id:
-                    billing_owner = User.objects.filter(id=order.outsourced_to_id).first()
-                elif not order.facility_id:
-                    # Independent LAB creating its own orders bills itself.
-                    actor_role = (getattr(user, "role", "") or "").upper()
-                    if actor_role == UserRole.LAB:
-                        billing_owner = user
+                    code = f"LAB:{test.code}"
+                    service, _ = Service.objects.get_or_create(
+                        code=code,
+                        defaults={
+                            "name": test.name,
+                            "default_price": getattr(test, "price", 0) or 0,
+                            "is_active": True,
+                        },
+                    )
 
-                if billing_facility or billing_owner:
-                    # 🔥 FIX: Get patient's HMO and tier for pricing resolution
-                    patient_system_hmo = getattr(patient, "system_hmo", None)
-                    patient_tier = getattr(patient, "hmo_tier", None)
-                    
-                    for it in order.items.select_related("test").all():
-                        if not getattr(it, "test_id", None):
-                            continue
-                        test = it.test
-                        if not test:
-                            continue
-
-                        code = f"LAB:{test.code}"
-                        service, _ = Service.objects.get_or_create(
-                            code=code,
-                            defaults={
-                                "name": test.name,
-                                "default_price": getattr(test, "price", 0) or 0,
-                                "is_active": True,
-                            },
-                        )
-
-                        # Ensure per-scope price exists so independent labs don't inherit someone else's defaults.
-                        try:
-                            if billing_facility and not billing_owner:
-                                Price.objects.get_or_create(
-                                    facility=billing_facility,
-                                    owner=None,
-                                    service=service,
-                                    defaults={"amount": getattr(test, "price", 0) or 0, "currency": "NGN"},
-                                )
-                            if billing_owner and not billing_facility:
-                                Price.objects.get_or_create(
-                                    facility=None,
-                                    owner=billing_owner,
-                                    service=service,
-                                    defaults={"amount": getattr(test, "price", 0) or 0, "currency": "NGN"},
-                                )
-                        except Exception as e:
-                            logger.warning(f"Failed to create price override for service {code}: {e}")
-
-                        # 🔥 FIX: Pass patient's HMO and tier to resolve_price
-                        unit_price = resolve_price(
-                            service=service, 
-                            facility=billing_facility, 
-                            owner=billing_owner, 
-                            system_hmo=patient_system_hmo,
-                            tier=patient_tier
-                        )
-                        
-                        # 🔥 FIX: Handle None pricing gracefully - use test price as fallback
-                        if unit_price is None:
-                            unit_price = getattr(test, "price", 0) or Decimal("0.00")
-                            logger.warning(
-                                f"No price configured for lab test {test.code} "
-                                f"(facility={billing_facility}, system_hmo={patient_system_hmo}). "
-                                f"Using test default price: {unit_price}"
+                    # Ensure per-scope price exists so independent labs don't inherit someone else's defaults.
+                    try:
+                        if billing_facility and not billing_owner:
+                            Price.objects.get_or_create(
+                                facility=billing_facility,
+                                owner=None,
+                                service=service,
+                                defaults={"amount": getattr(test, "price", 0) or 0, "currency": "NGN"},
                             )
-                        
-                        # Convert to Decimal safely
-                        unit_price = Decimal(str(unit_price)) if unit_price is not None else Decimal("0.00")
-                        qty = 1
-                        amount = (unit_price * Decimal(qty)).quantize(Decimal("0.01"))
-                        
-                        # Create charge
-                        Charge.objects.create(
-                            patient=order.patient,
-                            facility=billing_facility,
-                            owner=billing_owner,
-                            service=service,
-                            description=test.name,
-                            unit_price=unit_price,
-                            qty=qty,
-                            amount=amount,
-                            created_by=user,
-                            encounter_id=order.encounter_id,
-                            lab_order_id=order.id,
+                        if billing_owner and not billing_facility:
+                            Price.objects.get_or_create(
+                                facility=None,
+                                owner=billing_owner,
+                                service=service,
+                                defaults={"amount": getattr(test, "price", 0) or 0, "currency": "NGN"},
+                            )
+                    except Exception as e:
+                        logger.warning(f"Failed to create price override for service {code}: {e}")
+
+                    # 🔥 FIX: Pass patient's HMO and tier to resolve_price
+                    unit_price = resolve_price(
+                        service=service, 
+                        facility=billing_facility, 
+                        owner=billing_owner, 
+                        system_hmo=patient_system_hmo,
+                        tier=patient_tier
+                    )
+                    
+                    # 🔥 FIX: Handle None pricing gracefully - use test price as fallback
+                    if unit_price is None:
+                        unit_price = getattr(test, "price", 0) or Decimal("0.00")
+                        logger.warning(
+                            f"No price configured for lab test {test.code} "
+                            f"(facility={billing_facility}, system_hmo={patient_system_hmo}). "
+                            f"Using test default price: {unit_price}"
                         )
-                        
-                        logger.info(
-                            f"Created billing charge for lab order {order.id}, test {test.code}: "
-                            f"₦{amount} (patient HMO: {patient_system_hmo.name if patient_system_hmo else 'None'})"
-                        )
+                    
+                    # Convert to Decimal safely
+                    unit_price = Decimal(str(unit_price)) if unit_price is not None else Decimal("0.00")
+                    qty = 1
+                    amount = (unit_price * Decimal(qty)).quantize(Decimal("0.01"))
+                    
+                    # Create charge
+                    Charge.objects.create(
+                        patient=order.patient,
+                        facility=billing_facility,
+                        owner=billing_owner,
+                        service=service,
+                        description=test.name,
+                        unit_price=unit_price,
+                        qty=qty,
+                        amount=amount,
+                        created_by=user,
+                        encounter_id=order.encounter_id,
+                        lab_order_id=order.id,
+                    )
+                    
+                    logger.info(
+                        f"Created billing charge for lab order {order.id}, test {test.code}: "
+                        f"₦{amount} (patient HMO: {patient_system_hmo.name if patient_system_hmo else 'None'})"
+                    )
         except Exception as e:
             # Log the error but don't fail the lab order creation
             import logging
@@ -387,13 +393,30 @@ class LabOrderCreateSerializer(serializers.ModelSerializer):
 
 
 class LabOrderReadSerializer(serializers.ModelSerializer):
+    """
+    Lab Order Read Serializer with support for new SystemHMO structure.
+    
+    Includes both legacy HMO fields (for backward compatibility) and new SystemHMO fields.
+    """
     items = LabOrderItemReadSerializer(many=True)
     patient_name = serializers.SerializerMethodField(read_only=True)
     outsourced_to_name = serializers.SerializerMethodField(read_only=True)
+    
+    # ========================================================================
+    # LEGACY HMO FIELDS (Backward Compatibility)
+    # ========================================================================
     patient_insurance_status = serializers.SerializerMethodField(read_only=True)
     patient_hmo_id = serializers.SerializerMethodField(read_only=True)
     patient_hmo_name = serializers.SerializerMethodField(read_only=True)
     patient_hmo_relationship_status = serializers.SerializerMethodField(read_only=True)
+    
+    # ========================================================================
+    # NEW SYSTEM HMO FIELDS (New HMO Structure)
+    # ========================================================================
+    # These mirror the fields added to PatientSerializer
+    patient_system_hmo_name = serializers.SerializerMethodField(read_only=True)
+    patient_hmo_tier_name = serializers.SerializerMethodField(read_only=True)
+    patient_hmo_tier_level = serializers.SerializerMethodField(read_only=True)
 
     class Meta:
         model = LabOrder
@@ -402,9 +425,15 @@ class LabOrderReadSerializer(serializers.ModelSerializer):
             "patient",
             "patient_name",
             "patient_insurance_status",
+            # Legacy HMO fields
             "patient_hmo_id",
             "patient_hmo_name",
             "patient_hmo_relationship_status",
+            # New SystemHMO fields
+            "patient_system_hmo_name",
+            "patient_hmo_tier_name",
+            "patient_hmo_tier_level",
+            # Order details
             "facility",
             "ordered_by",
             "priority",
@@ -430,15 +459,94 @@ class LabOrderReadSerializer(serializers.ModelSerializer):
         p = getattr(obj, "patient", None)
         return getattr(p, "insurance_status", None) if p else None
 
+    # ========================================================================
+    # LEGACY HMO GETTERS (for backward compatibility)
+    # ========================================================================
     def get_patient_hmo_id(self, obj):
+        """Legacy: Get facility-scoped HMO ID"""
         p = getattr(obj, "patient", None)
         h = getattr(p, "hmo", None) if p else None
         return getattr(h, "id", None) if h else None
 
     def get_patient_hmo_name(self, obj):
+        """Legacy: Get facility-scoped HMO name"""
         p = getattr(obj, "patient", None)
         h = getattr(p, "hmo", None) if p else None
         return getattr(h, "name", None) if h else None
+    
+    def get_patient_hmo_relationship_status(self, obj):
+        """
+        Get the HMO relationship status for color coding.
+        
+        This checks:
+        1. FacilityHMO relationship status (new system) - if patient has system_hmo
+        2. Legacy HMO relationship status (old system) - if patient has legacy hmo
+        """
+        p = getattr(obj, "patient", None)
+        if not p:
+            return None
+        
+        # Try new SystemHMO structure first
+        system_hmo = getattr(p, "system_hmo", None)
+        if system_hmo:
+            # Get FacilityHMO relationship status
+            try:
+                from patients.models import FacilityHMO
+                
+                # Determine the scope (facility or independent provider)
+                facility = obj.facility
+                owner = obj.ordered_by if not facility and obj.ordered_by else None
+                
+                # Query FacilityHMO
+                facility_hmo = None
+                if facility:
+                    facility_hmo = FacilityHMO.objects.filter(
+                        facility=facility,
+                        system_hmo=system_hmo,
+                        owner__isnull=True
+                    ).first()
+                elif owner:
+                    facility_hmo = FacilityHMO.objects.filter(
+                        owner=owner,
+                        system_hmo=system_hmo,
+                        facility__isnull=True
+                    ).first()
+                
+                if facility_hmo:
+                    return facility_hmo.relationship_status
+            except Exception:
+                pass
+        
+        # Fallback to legacy HMO relationship status
+        h = getattr(p, "hmo", None) if p else None
+        return getattr(h, "relationship_status", None) if h else None
+
+    # ========================================================================
+    # NEW SYSTEM HMO GETTERS
+    # ========================================================================
+    def get_patient_system_hmo_name(self, obj):
+        """Get SystemHMO name from patient"""
+        p = getattr(obj, "patient", None)
+        if not p:
+            return None
+        system_hmo = getattr(p, "system_hmo", None)
+        return getattr(system_hmo, "name", None) if system_hmo else None
+    
+    def get_patient_hmo_tier_name(self, obj):
+        """Get HMO tier name from patient"""
+        p = getattr(obj, "patient", None)
+        if not p:
+            return None
+        tier = getattr(p, "hmo_tier", None)
+        return getattr(tier, "name", None) if tier else None
+    
+    def get_patient_hmo_tier_level(self, obj):
+        """Get HMO tier level (1=Gold, 2=Silver, 3=Bronze) from patient"""
+        p = getattr(obj, "patient", None)
+        if not p:
+            return None
+        tier = getattr(p, "hmo_tier", None)
+        return getattr(tier, "level", None) if tier else None
 
     def get_outsourced_to_name(self, obj):
         """
@@ -460,13 +568,6 @@ class LabOrderReadSerializer(serializers.ModelSerializer):
         # Fallback to user name if no profile or no business name
         full = (u.get_full_name() or "").strip()
         return full or u.email
-
-    
-    def get_patient_hmo_relationship_status(self, obj):
-        """Get the HMO relationship status for color coding."""
-        p = getattr(obj, "patient", None)
-        h = getattr(p, "hmo", None) if p else None
-        return getattr(h, "relationship_status", None) if h else None
 
 
 class ResultEntrySerializer(serializers.Serializer):

@@ -808,7 +808,11 @@ class LabOrderViewSet(
         if role == UserRole.PATIENT:
             q = q.filter(patient__user_id=u.id)
         elif getattr(u, "facility_id", None):
-            q = q.filter(facility_id=u.facility_id)
+            # FIX: Include both in-house AND outsourced orders for facility staff
+            q = q.filter(
+                Q(facility_id=u.facility_id) | 
+                Q(ordered_by__facility_id=u.facility_id)  # Include outsourced orders created by facility staff
+            )
         else:
             if role in {UserRole.ADMIN, UserRole.SUPER_ADMIN}:
                 pass
