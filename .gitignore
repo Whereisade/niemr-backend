@@ -33,3 +33,6 @@ dist/
 Thumbs.db
 # urls.json
 patient_documents/
+
+.db.sqlite3
+db.sqlite3

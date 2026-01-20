@@ -16,9 +16,12 @@ dj-database-url==3.0.1
 Django==5.2.7
 django-cors-headers==4.9.0
 django-extensions==4.1
+django-filter==25.2
+django-rest-framework-nested==0.0.1
 django-storages==1.14.6
 djangorestframework==3.16.1
 djangorestframework_simplejwt==5.5.1
+drf-nested-routers==0.95.0
 drf-spectacular==0.28.0
 drf-spectacular-sidecar==2025.10.1
 et_xmlfile==2.0.0
