@@ -37,6 +37,7 @@ class AuditLog(models.Model):
         indexes = [
             models.Index(fields=["created_at"]),
             models.Index(fields=["actor"]),
+            models.Index(fields=["actor", "created_at"]),  # ← ADD THIS for facility filtering
             models.Index(fields=["target_ct", "target_id"]),
             models.Index(fields=["verb"]),
         ]
