@@ -87,6 +87,37 @@ class ProviderProfile(models.Model):
                 return user.email
         
         return f"Provider #{self.id}"
+    
+    @classmethod
+    def get_facility_stats(cls, facility):
+        """Get statistics for a facility's providers"""
+        from django.db.models import Count, Q
+        
+        stats = cls.objects.filter(
+            user__facility=facility
+        ).aggregate(
+            total=Count('id'),
+            approved=Count('id', filter=Q(
+                verification_status=VerificationStatus.APPROVED,
+                user__is_active=True,
+                user__is_sacked=False
+            )),
+            pending=Count('id', filter=Q(
+                verification_status=VerificationStatus.PENDING
+            )),
+            rejected=Count('id', filter=Q(
+                verification_status=VerificationStatus.REJECTED
+            ))
+        )
+        
+        return {
+            'facility_id': facility.id,
+            'facility_name': facility.name,
+            'approved_providers': stats['approved'] or 0,
+            'total_providers': stats['total'] or 0,
+            'pending_providers': stats['pending'] or 0,
+            'rejected_providers': stats['rejected'] or 0
+        }
 
     def approve(self, by_user):
         self.verification_status = VerificationStatus.APPROVED

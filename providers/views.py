@@ -206,6 +206,131 @@ class ProviderViewSet(
         s.is_valid(raise_exception=True)
         doc = s.save(profile=prof)
         return Response(ProviderDocumentSerializer(doc).data, status=201)
+    
+    @action(
+    detail=False,
+    methods=['get'],
+    permission_classes=[IsAuthenticated],  # Any authenticated user can access
+    url_path='facility-stats'
+    )
+    def facility_stats(self, request):
+        """
+        Get provider statistics for a facility.
+        Accessible by any authenticated user.
+        
+        Query params:
+        - current: if 'true', use current user's facility (default for non-super admins)
+        - facility_id: specific facility ID (super admin only)
+        
+        Returns: {
+            facility_id, facility_name,
+            active_providers, total_providers,
+            pending_providers, rejected_providers,
+            sacked_providers (admin only),
+            pending_applications (admin only)
+        }
+        """
+        from facilities.models import Facility
+        from django.db.models import Count, Q
+        
+        user = request.user
+        current_param = request.query_params.get('current', 'false').lower()
+        facility_id = request.query_params.get('facility_id')
+        
+        # Determine which facility to use
+        if current_param == 'true':
+            # Force use current user's facility (for frontend dashboard)
+            if not user.facility:
+                return Response(
+                    {'detail': 'User is not attached to a facility.'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+            facility = user.facility
+        elif facility_id and user.role == UserRole.SUPER_ADMIN:
+            # Super admin can specify any facility
+            try:
+                facility = Facility.objects.get(id=facility_id)
+            except Facility.DoesNotExist:
+                return Response(
+                    {'detail': 'Facility not found.'},
+                    status=status.HTTP_404_NOT_FOUND
+                )
+        else:
+            # Default to current user's facility
+            if not user.facility:
+                return Response(
+                    {'detail': 'User is not attached to a facility.'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+            facility = user.facility
+        
+        # Permission check: user can only view facilities they're associated with
+        # unless they're a super admin
+        if user.role != UserRole.SUPER_ADMIN:
+            # For non-super admins, check if they have access to this facility
+            if not (user.facility == facility or 
+                    hasattr(user, 'patient_profile') and getattr(user.patient_profile, 'facility', None) == facility):
+                return Response(
+                    {'detail': 'Not allowed to view this facility.'},
+                    status=status.HTTP_403_FORBIDDEN
+                )
+        
+        # Calculate counts in a single query for efficiency
+        stats = ProviderProfile.objects.filter(
+            user__facility=facility
+        ).aggregate(
+            total=Count('id'),
+            active=Count('id', filter=Q(
+                verification_status=VerificationStatus.APPROVED,
+                user__is_active=True,
+                user__is_sacked=False
+            )),
+            pending=Count('id', filter=Q(
+                verification_status=VerificationStatus.PENDING
+            )),
+            rejected=Count('id', filter=Q(
+                verification_status=VerificationStatus.REJECTED
+            )),
+            sacked=Count('id', filter=Q(
+                user__is_sacked=True
+            ))
+        )
+        
+        # Build response
+        response_data = {
+            'facility_id': facility.id,
+            'facility_name': facility.name,
+            'active_providers': stats['active'] or 0,
+            'total_providers': stats['total'] or 0,
+            'pending_providers': stats['pending'] or 0,
+            'rejected_providers': stats['rejected'] or 0,
+        }
+        
+        # Add admin-only stats if user is admin
+        if user.role in [UserRole.SUPER_ADMIN, UserRole.ADMIN]:
+            response_data['sacked_providers'] = stats['sacked'] or 0
+            
+            # Count pending applications
+            pending_applications = ProviderFacilityApplication.objects.filter(
+                facility=facility,
+                status=ProviderFacilityApplication.Status.PENDING
+            ).count()
+            response_data['pending_applications'] = pending_applications
+            
+            # Add provider type breakdown for admin dashboard
+            provider_types = ProviderProfile.objects.filter(
+                user__facility=facility,
+                verification_status=VerificationStatus.APPROVED,
+                user__is_active=True,
+                user__is_sacked=False
+            ).values('provider_type').annotate(count=Count('id'))
+            
+            response_data['provider_types'] = {
+                item['provider_type']: item['count']
+                for item in provider_types
+            }
+        
+        return Response(response_data, status=status.HTTP_200_OK)
 
 
     @action(

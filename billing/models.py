@@ -136,6 +136,26 @@ class Payment(models.Model):
         help_text="Set for HMO bulk payments"
     )
     
+    # New system-scoped HMO linkage (recommended)
+    # NOTE: These are used by the new FacilityHMO + SystemHMO architecture.
+    # Legacy `hmo` (patients.HMO) is kept for backward compatibility only.
+    system_hmo = models.ForeignKey(
+        "patients.SystemHMO",
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="payments",
+        help_text="System HMO for bulk payments (new system-scoped HMO).",
+    )
+    facility_hmo = models.ForeignKey(
+        "patients.FacilityHMO",
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="payments",
+        help_text="Facility/Provider HMO relationship for bulk payments (recommended).",
+    )
+
     # Scope
     facility = models.ForeignKey(Facility, null=True, blank=True, on_delete=models.CASCADE, related_name="payments")
     owner = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.CASCADE, related_name="payments_owned")
@@ -182,12 +202,17 @@ class Payment(models.Model):
             models.CheckConstraint(
                 name="billing_payment_patient_or_hmo",
                 check=(
-                    Q(patient__isnull=False) | Q(hmo__isnull=False)
+                    Q(patient__isnull=False)
+                    | Q(hmo__isnull=False)
+                    | Q(system_hmo__isnull=False)
+                    | Q(facility_hmo__isnull=False)
                 ),
             ),
         ]
         indexes = [
             models.Index(fields=["hmo", "-received_at"]),
+            models.Index(fields=["system_hmo", "-received_at"]),
+            models.Index(fields=["facility_hmo", "-received_at"]),
             models.Index(fields=["payment_source", "-received_at"]),
         ]
 

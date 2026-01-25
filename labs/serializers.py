@@ -272,7 +272,14 @@ class LabOrderCreateSerializer(serializers.ModelSerializer):
             billing_facility = None
             billing_owner = None
 
-            if order.facility_id:
+            # Billing scope:
+            # - Facility orders -> facility-scoped billing
+            # - Outsourced orders -> independent lab (outsourced_to) owns the billing (NOT the facility)
+            # - Independent self-owned orders -> ordered_by owns the billing
+            if order.outsourced_to_id:
+                billing_owner = order.outsourced_to
+                billing_facility = None
+            elif order.facility_id:
                 billing_facility = order.facility
             elif order.ordered_by and not order.ordered_by.facility_id:
                 billing_owner = order.ordered_by
@@ -358,7 +365,7 @@ class LabOrderCreateSerializer(serializers.ModelSerializer):
                         unit_price=unit_price,
                         qty=qty,
                         amount=amount,
-                        created_by=user,
+                        created_by=u,
                         encounter_id=order.encounter_id,
                         lab_order_id=order.id,
                     )

@@ -158,7 +158,7 @@ class ChargeViewSet(
         if patient_id:
             q = q.filter(patient_id=patient_id)
         if hmo_id:
-            q = q.filter(patient__hmo_id=hmo_id)
+            q = q.filter(Q(patient__system_hmo_id=hmo_id) | Q(patient__hmo_id=hmo_id))
         if status_:
             q = q.filter(status=status_)
         if start:
@@ -473,7 +473,7 @@ class PaymentViewSet(
     mixins.RetrieveModelMixin,
     mixins.ListModelMixin,
 ):
-    queryset = Payment.objects.select_related("patient", "hmo", "facility", "received_by")
+    queryset = Payment.objects.select_related("patient", "hmo", "system_hmo", "facility_hmo", "facility", "received_by")
     authentication_classes = [JWTAuthentication]
     permission_classes = [IsAuthenticated]
 
@@ -508,7 +508,7 @@ class PaymentViewSet(
         if patient_id:
             q = q.filter(patient_id=patient_id)
         if hmo_id:
-            q = q.filter(hmo_id=hmo_id)
+            q = q.filter(Q(facility_hmo_id=hmo_id) | Q(system_hmo_id=hmo_id) | Q(hmo_id=hmo_id))
         if payment_source:
             q = q.filter(payment_source=payment_source)
         if method:

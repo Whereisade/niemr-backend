@@ -260,20 +260,27 @@ class LabTestViewSet(viewsets.GenericViewSet, mixins.ListModelMixin, mixins.Crea
                 buf = io.StringIO(f.read().decode("utf-8"))
                 reader = csv.DictReader(buf)
                 rows = list(reader)
-            elif filename.endswith(('.xlsx', '.xls')):
-                # Excel import
+            elif filename.endswith('.xlsx'):
+                # Excel import (.xlsx)
                 try:
-                    import pandas as pd
+                    import openpyxl
                 except ImportError:
                     return Response(
-                        {"detail": "Excel support not available. Please install pandas and openpyxl."},
+                        {"detail": "openpyxl is required for Excel files. Please install openpyxl or use CSV."},
                         status=400
                     )
-                
-                engine = 'openpyxl' if filename.endswith('.xlsx') else None
-                df = pd.read_excel(f, engine=engine)
-                # Convert DataFrame to list of dicts (similar to csv.DictReader)
-                rows = df.to_dict('records')
+
+                wb = openpyxl.load_workbook(f, data_only=True)
+                ws = wb.active
+                headers = [str(cell.value).strip() if cell.value is not None else "" for cell in ws[1]]
+                rows = []
+                for values in ws.iter_rows(min_row=2, values_only=True):
+                    rows.append({headers[i].lower(): values[i] for i in range(len(headers))})
+            elif filename.endswith('.xls'):
+                return Response(
+                    {"detail": "Legacy .xls is not supported. Please save as .xlsx or CSV."},
+                    status=400
+                )
             else:
                 return Response(
                     {"detail": "Unsupported file format. Please upload CSV or Excel (.xlsx, .xls) file."},
@@ -661,8 +668,12 @@ class LabTestViewSet(viewsets.GenericViewSet, mixins.ListModelMixin, mixins.Crea
         if not hmo_id:
             return Response({"detail": "hmo (or hmo_id) is required"}, status=400)
 
-        from patients.models import HMO
-        hmo = get_object_or_404(HMO, id=hmo_id, facility_id=facility_id, is_active=True)
+        # System-scoped HMO (+ optional tier)
+        system_hmo = get_object_or_404(SystemHMO, id=hmo_id, is_active=True)
+        tier_id = request.query_params.get("tier_id") or request.data.get("tier_id")
+        tier = None
+        if tier_id:
+            tier = get_object_or_404(HMOTier, id=tier_id, system_hmo=system_hmo, is_active=True)
 
         f = request.FILES.get("file")
         if not f:
@@ -679,17 +690,26 @@ class LabTestViewSet(viewsets.GenericViewSet, mixins.ListModelMixin, mixins.Crea
                 buf = io.StringIO(f.read().decode("utf-8"))
                 reader = csv.DictReader(buf)
                 rows = list(reader)
-            elif filename.endswith((".xlsx", ".xls")):
+            elif filename.endswith(".xlsx"):
                 try:
-                    import pandas as pd
+                    import openpyxl
                 except ImportError:
                     return Response(
-                        {"detail": "Excel support not available. Please install pandas and openpyxl."},
+                        {"detail": "openpyxl is required for Excel files. Please install openpyxl or use CSV."},
                         status=400,
                     )
-                engine = "openpyxl" if filename.endswith(".xlsx") else None
-                df = pd.read_excel(f, engine=engine)
-                rows = df.to_dict("records")
+
+                wb = openpyxl.load_workbook(f, data_only=True)
+                ws = wb.active
+                headers = [str(cell.value).strip() if cell.value is not None else "" for cell in ws[1]]
+                rows = []
+                for values in ws.iter_rows(min_row=2, values_only=True):
+                    rows.append({headers[i].lower(): values[i] for i in range(len(headers))})
+            elif filename.endswith(".xls"):
+                return Response(
+                    {"detail": "Legacy .xls is not supported. Please save as .xlsx or CSV."},
+                    status=400,
+                )
             else:
                 return Response(
                     {"detail": "Unsupported file format. Please upload CSV or Excel (.xlsx, .xls) file."},
@@ -718,8 +738,15 @@ class LabTestViewSet(viewsets.GenericViewSet, mixins.ListModelMixin, mixins.Crea
                     code = str(normalized.get("code") or "").strip()
                     if not code:
                         continue
-                    amount = normalized.get("price")
-                    if amount is None or str(amount).strip() == "":
+                    amount_raw = normalized.get("price")
+                    if amount_raw is None or str(amount_raw).strip() == "":
+                        continue
+
+                    from decimal import Decimal, InvalidOperation
+                    try:
+                        amount = Decimal(str(amount_raw).strip())
+                    except (InvalidOperation, ValueError):
+                        errors.append({"row": i, "error": f"Invalid price '{amount_raw}'"})
                         continue
 
                     # Get or create test
@@ -756,11 +783,14 @@ class LabTestViewSet(viewsets.GenericViewSet, mixins.ListModelMixin, mixins.Crea
                         defaults={
                             "name": test.name or svc_code,
                             "default_price": test.price or 0,
+                            "is_active": True,
                         },
                     )
                     HMOPrice.objects.update_or_create(
                         facility_id=facility_id,
-                        hmo=hmo,
+                        owner=None,
+                        system_hmo=system_hmo,
+                        tier=tier,
                         service=service,
                         defaults={"amount": amount, "currency": "NGN", "is_active": True},
                     )
@@ -939,6 +969,108 @@ class LabOrderViewSet(
         item = s.save(item=item, user=request.user)
 
         if order.status == OrderStatus.COMPLETED:
+            # Ensure billing charges exist (idempotent) when an order completes
+            try:
+                import logging
+                from decimal import Decimal
+                from billing.models import Charge, Service, Price
+                from billing.enums import ChargeStatus
+                from billing.services.pricing import resolve_price
+
+                logger = logging.getLogger(__name__)
+
+                # Determine billing scope
+                billing_facility = order.facility if order.facility_id else None
+                billing_owner = None
+
+                if getattr(order, 'outsourced_to_id', None):
+                    billing_owner = order.outsourced_to
+                    billing_facility = None
+                elif not order.facility_id:
+                    if getattr(order, 'ordered_by', None) and not getattr(order.ordered_by, 'facility_id', None):
+                        billing_owner = order.ordered_by
+                    elif not getattr(request.user, 'facility_id', None):
+                        billing_owner = request.user
+
+                patient_system_hmo = getattr(order.patient, 'system_hmo', None) if order.patient else None
+                patient_tier = getattr(order.patient, 'hmo_tier', None) if order.patient else None
+
+                for it2 in order.items.select_related('test').all():
+                    if not it2.test_id or not getattr(it2, 'test', None):
+                        continue
+                    test = it2.test
+                    code = f"LAB:{test.code}"
+                    service, _ = Service.objects.get_or_create(
+                        code=code,
+                        defaults={
+                            'name': test.name,
+                            'default_price': getattr(test, 'price', 0) or 0,
+                            'is_active': True,
+                        },
+                    )
+
+                    # Ensure per-scope price exists
+                    try:
+                        if billing_facility and not billing_owner:
+                            Price.objects.get_or_create(
+                                facility=billing_facility,
+                                owner=None,
+                                service=service,
+                                defaults={'amount': getattr(test, 'price', 0) or 0, 'currency': 'NGN'},
+                            )
+                        elif billing_owner and not billing_facility:
+                            Price.objects.get_or_create(
+                                facility=None,
+                                owner=billing_owner,
+                                service=service,
+                                defaults={'amount': getattr(test, 'price', 0) or 0, 'currency': 'NGN'},
+                            )
+                    except Exception as e:
+                        logger.warning(f"Failed to ensure base price for {code}: {e}")
+
+                    # Skip if charge already exists (avoid duplicates)
+                    if Charge.objects.filter(
+                        patient=order.patient,
+                        lab_order_id=order.id,
+                        service=service,
+                        facility=billing_facility,
+                        owner=billing_owner,
+                    ).exclude(status=ChargeStatus.VOID).exists():
+                        continue
+
+                    unit_price = resolve_price(
+                        service=service,
+                        facility=billing_facility,
+                        owner=billing_owner,
+                        system_hmo=patient_system_hmo,
+                        tier=patient_tier,
+                    )
+                    if unit_price is None:
+                        unit_price = getattr(test, 'price', 0) or Decimal('0.00')
+                    unit_price = Decimal(str(unit_price))
+                    amount = (unit_price * Decimal('1')).quantize(Decimal('0.01'))
+
+                    Charge.objects.create(
+                        patient=order.patient,
+                        facility=billing_facility,
+                        owner=billing_owner,
+                        service=service,
+                        description=test.name,
+                        unit_price=unit_price,
+                        qty=1,
+                        amount=amount,
+                        created_by=request.user,
+                        encounter_id=order.encounter_id,
+                        lab_order_id=order.id,
+                    )
+
+            except Exception as e:
+                try:
+                    import logging
+                    logging.getLogger(__name__).warning(f"Billing ensure step failed for lab order {order.id}: {e}")
+                except Exception:
+                    pass
+
             if order.patient:
                 notify_patient(
                     patient=order.patient,

@@ -998,40 +998,33 @@ class AppointmentViewSet(
         # Get facility if user is facility-scoped
         facility_id = getattr(request.user, "facility_id", None)
 
-        # ✅ FIX #1: Query only the 18 original appointment services (not all APPT:* services)
-        # This prevents showing 25 services when there are extra services in the database
-        APPOINTMENT_SERVICE_CODES = [
-            "APPT:CONSULTATION",
-            "APPT:FOLLOW_UP",
-            "APPT:PROCEDURE",
-            "APPT:DIAGNOSTIC_NON_LAB",
-            "APPT:NURSING_CARE",
-            "APPT:THERAPY_REHAB",
-            "APPT:MENTAL_HEALTH",
-            "APPT:IMMUNIZATION",
-            "APPT:MATERNAL_CHILD_CARE",
-            "APPT:SURGICAL_PRE_POST",
-            "APPT:EMERGENCY_NON_ER",
-            "APPT:TELEMEDICINE",
-            "APPT:HOME_VISIT",
-            "APPT:ADMIN_HMO_REVIEW",
-            "APPT:LAB",
-            "APPT:IMAGING",
-            "APPT:PHARMACY",
-            "APPT:OTHER",
+        # Appointment services can exist in two formats depending on when the facility was set up:
+        # - New system: codes prefixed with "APPT:" (seed_appointment_services)
+        # - Legacy system: consultation/service codes without the prefix (e.g., CONSULT_STD)
+        # We include both so facilities see their full appointment catalog in the HMO pricing tab.
+        LEGACY_APPT_CODES = [
+            "CONSULT_STD",
+            "CONSULT_FOLLOW_UP",
+            "CONSULT_EMERGENCY",
+            "CONSULT_SPECIALIST",
+            "CONSULT_PEDIATRIC",
+            "ANNUAL_CHECKUP",
+            "PHYSICAL_EXAM",
+            "WELLNESS_VISIT",
+            "LAB_COLLECTION",
+            "X_RAY_SCREENING",
+            "DENTAL_CHECKUP",
+            "VISION_SCREENING",
+            "HEARING_TEST",
+            "COUNSELING_SESSION",
+            "NUTRITION_CONSULT",
+            "THERAPY_SESSION",
         ]
-        
-        # OLD CODE (fetched all APPT:* services - could be 25+):
-        # services = Service.objects.filter(
-        #     code__startswith="APPT:",
-        #     is_active=True
-        # ).order_by('code')
-        
-        # NEW CODE (fetches only the 18 original services):
+
         services = Service.objects.filter(
-            code__in=APPOINTMENT_SERVICE_CODES,
-            is_active=True
-        ).order_by('code')
+            Q(code__startswith="APPT:") | Q(code__in=LEGACY_APPT_CODES),
+            is_active=True,
+        ).order_by("code")
 
         # ✅ FIX #2: Updated service name mapping for original service codes
         # The old mapping only had alternative service names (CONSULT_STD, etc.)
@@ -1246,93 +1239,85 @@ class AppointmentViewSet(
         except Exception as e:
             return Response({"detail": str(e)}, status=500)
 
+
     @action(detail=False, methods=["post"], url_path="import-hmo-file", permission_classes=[IsAuthenticated, IsStaff])
     def import_hmo_file(self, request):
         """
         Bulk import HMO prices for appointment services from CSV/Excel.
-        
+
         Query params:
-        - hmo_id (required)
-        
-        File format:
-        - code (required): Appointment service code (e.g., "APPT:CONSULTATION" or just "CONSULTATION")
-        - price (required): HMO price
-        - name (optional): Service name (for reference)
-        
+        - hmo_id (required): SystemHMO ID
+        - tier_id (optional): HMOTier ID (tier-specific pricing)
+
+        File columns (required):
+        - code: Service code (e.g. APPT:CONSULTATION or CONSULT_STD)
+        - price: HMO price
+
+        Optional columns:
+        - name: Service name (ignored if present)
+
         Returns:
-        - created: number of new HMO prices created
-        - updated: number of existing HMO prices updated
-        - errors: list of error messages for failed rows
+        - created, updated, errors
         """
         import csv
         import io
         from decimal import Decimal, InvalidOperation
-        from billing.models import HMOPrice
-        from billing.services.pricing import get_or_create_price_override
-        from patients.models import HMO
 
-        # Admin check
-        if request.user.role not in (UserRole.SUPER_ADMIN, UserRole.ADMIN):
-            return Response(
-                {"detail": "Only admins can import HMO prices"},
-                status=403
-            )
+        from billing.models import HMOPrice, Service
+        from patients.models import SystemHMO, HMOTier
 
-        hmo_id = request.query_params.get("hmo_id")
+        # Facility only
+        facility_id = getattr(request.user, "facility_id", None)
+        if not facility_id:
+            return Response({"detail": "Facility is required for HMO pricing"}, status=400)
+
+        hmo_id = request.query_params.get("hmo_id") or request.query_params.get("hmo")
+        tier_id = request.query_params.get("tier_id")
+
         if not hmo_id:
             return Response({"detail": "hmo_id query parameter is required"}, status=400)
 
-        try:
-            hmo = HMO.objects.get(id=hmo_id)
-        except HMO.DoesNotExist:
+        system_hmo = SystemHMO.objects.filter(id=hmo_id, is_active=True).first()
+        if not system_hmo:
             return Response({"detail": "HMO not found"}, status=404)
+
+        tier = None
+        if tier_id:
+            tier = HMOTier.objects.filter(id=tier_id, system_hmo=system_hmo, is_active=True).first()
+            if not tier:
+                return Response({"detail": "Tier not found or doesn't belong to this HMO"}, status=404)
 
         file_obj = request.FILES.get("file")
         if not file_obj:
             return Response({"detail": "file is required"}, status=400)
 
-        user = request.user
-        facility = getattr(user, "facility", None)
-
-        if not facility:
-            return Response(
-                {"detail": "Facility is required for HMO pricing"},
-                status=400
-            )
-
         # Parse file (CSV or Excel)
         try:
             file_ext = file_obj.name.lower().split(".")[-1]
-            
+
             if file_ext == "csv":
-                content = file_obj.read().decode("utf-8")
+                content = file_obj.read().decode("utf-8", errors="ignore")
                 reader = csv.DictReader(io.StringIO(content))
                 rows = list(reader)
+
             elif file_ext in ("xlsx", "xls"):
-                try:
-                    import openpyxl
-                    wb = openpyxl.load_workbook(file_obj)
-                    ws = wb.active
-                    headers = [cell.value for cell in ws[1]]
-                    rows = []
-                    for row in ws.iter_rows(min_row=2, values_only=True):
-                        rows.append(dict(zip(headers, row)))
-                except ImportError:
-                    return Response(
-                        {"detail": "openpyxl is required for Excel files"},
-                        status=500
-                    )
+                if file_ext == "xls":
+                    return Response({"detail": "Legacy .xls is not supported. Please save as .xlsx or CSV."}, status=400)
+
+                import openpyxl
+                wb = openpyxl.load_workbook(file_obj, data_only=True)
+                ws = wb.active
+
+                headers = [str(c.value).strip() if c.value is not None else "" for c in ws[1]]
+                rows = []
+                for row in ws.iter_rows(min_row=2, values_only=True):
+                    rows.append({headers[i]: row[i] for i in range(len(headers))})
+
             else:
-                return Response(
-                    {"detail": "File must be CSV or Excel (.xlsx, .xls)"},
-                    status=400
-                )
+                return Response({"detail": "File must be CSV or Excel (.xlsx)"}, status=400)
 
         except Exception as e:
-            return Response(
-                {"detail": f"Failed to parse file: {str(e)}"},
-                status=400
-            )
+            return Response({"detail": f"Failed to parse file: {str(e)}"}, status=400)
 
         created_count = 0
         updated_count = 0
@@ -1340,68 +1325,65 @@ class AppointmentViewSet(
 
         for idx, row in enumerate(rows, start=2):
             try:
-                # Get code and normalize it
-                code = str(row.get("code") or "").strip().upper()
-                if not code:
+                # Read fields (accept a few aliases)
+                code_raw = (row.get("code") or row.get("service_code") or row.get("service") or "")
+                code_raw = str(code_raw).strip().upper()
+                if not code_raw:
                     errors.append(f"Row {idx}: Missing code")
                     continue
 
-                # Auto-add APPT: prefix if missing
-                if not code.startswith("APPT:"):
-                    code = f"APPT:{code}"
-
-                # Get price
-                price_str = str(row.get("price") or "").strip()
-                if not price_str:
+                price_raw = (row.get("price") or row.get("amount") or "")
+                price_raw = str(price_raw).strip()
+                if not price_raw:
                     errors.append(f"Row {idx}: Missing price")
                     continue
 
                 try:
-                    price = Decimal(price_str)
-                    if price < 0:
+                    amount = Decimal(price_raw)
+                    if amount < 0:
                         errors.append(f"Row {idx}: Price cannot be negative")
                         continue
                 except (InvalidOperation, ValueError):
-                    errors.append(f"Row {idx}: Invalid price '{price_str}'")
+                    errors.append(f"Row {idx}: Invalid price '{price_raw}'")
                     continue
 
-                # Find service
-                service = Service.objects.filter(code=code).first()
+                # Find service (try exact, then APPT: prefix fallback)
+                service = Service.objects.filter(code=code_raw).first()
+                if not service and not code_raw.startswith("APPT:"):
+                    service = Service.objects.filter(code=f"APPT:{code_raw}").first()
+
+                if not service and code_raw.startswith("APPT:"):
+                    service = Service.objects.filter(code=code_raw.replace("APPT:", "", 1)).first()
+
                 if not service:
-                    errors.append(f"Row {idx}: Service '{code}' not found")
+                    errors.append(f"Row {idx}: Service '{code_raw}' not found")
                     continue
 
-                # Check if HMO price already exists
-                existing = HMOPrice.objects.filter(
+                hp, created = HMOPrice.objects.update_or_create(
+                    facility_id=facility_id,
+                    system_hmo=system_hmo,
+                    tier=tier,  # None means HMO-level default
                     service=service,
-                    hmo=hmo,
-                    facility=facility
-                ).first()
-
-                # Create or update
-                get_or_create_price_override(
-                    service=service,
-                    amount=price,
-                    facility=facility,
-                    hmo=hmo,
-                    currency="NGN"
+                    defaults={"amount": amount, "is_active": True},
                 )
 
-                if existing:
-                    updated_count += 1
-                else:
+                if created:
                     created_count += 1
+                else:
+                    updated_count += 1
 
             except Exception as e:
                 errors.append(f"Row {idx}: {str(e)}")
-                continue
 
-        return Response({
-            "created": created_count,
-            "updated": updated_count,
-            "errors": errors,
-            "message": f"Processed {created_count + updated_count} prices"
-        }, status=200)
+        return Response(
+            {
+                "created": created_count,
+                "updated": updated_count,
+                "errors": errors,
+                "message": f"Processed {created_count + updated_count} prices",
+            },
+            status=200,
+        )
 # ─────────────────────────────────────────────────────────────
 # Utility functions for syncing appointment status from encounters
 # ─────────────────────────────────────────────────────────────

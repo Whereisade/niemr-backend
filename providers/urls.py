@@ -3,6 +3,7 @@ from rest_framework.routers import DefaultRouter
 
 from .views import (
     ProviderViewSet,
+    
     self_register,               # keep your existing self-register FBV
     facility_create_provider,    # NEW: facility admin creates provider directly
     apply_to_facility,
@@ -37,5 +38,9 @@ urlpatterns = [
         name="facility-provider-application-reject",
     ),
 
+    
+         
+
+        
     path("", include(router.urls)),
 ]

@@ -286,15 +286,16 @@ class FacilityHMOManagementViewSet(viewsets.ModelViewSet):
         total_allocated = charge_aggregates['total_allocated'] or Decimal('0.00')
         outstanding = total_charges - total_allocated
         charges_count = charge_aggregates['count'] or 0
-        
-        # Get total payments for this HMO
-        # NOTE: Payment.hmo might reference legacy HMO model
-        # Try filtering by system_hmo first, fall back to checking patient's system_hmo
-        payment_total = Payment.objects.filter(
-            facility_id=facility_pk,
-            patient__system_hmo=hmo_relationship.system_hmo,
-            payment_source='HMO'
-        ).aggregate(total=Sum('amount'))['total'] or Decimal('0.00')
+        # Get total payments (allocated) for this HMO
+        # Payments are tracked via allocations; bulk HMO payments may have no patient set.
+        from billing.models import PaymentAllocation
+
+        payment_total = PaymentAllocation.objects.filter(
+            charge_id__in=charges_qs.values('id'),
+            payment__payment_source='HMO',
+        ).aggregate(
+            total=Coalesce(Sum('amount'), Decimal('0.00'))
+        )['total'] or Decimal('0.00')
         
         # Serialize charges
         # ChargeReadSerializer expects allocated_total to be present (we annotated it)
@@ -320,6 +321,7 @@ class FacilityHMOManagementViewSet(viewsets.ModelViewSet):
                 'charges_total': float(total_charges),
                 'charges_count': charges_count,
                 'payments_total': float(payment_total),
+                'paid_total': float(total_allocated),
                 'outstanding': float(outstanding),
             },
             'charges': charges_data,

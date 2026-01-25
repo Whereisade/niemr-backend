@@ -455,8 +455,12 @@ class DrugViewSet(
         if not hmo_id:
             return Response({"detail": "hmo (or hmo_id) is required"}, status=400)
 
-        from patients.models import HMO
-        hmo = get_object_or_404(HMO, id=hmo_id, facility_id=facility_id, is_active=True)
+        # System-scoped HMO (+ optional tier)
+        system_hmo = get_object_or_404(SystemHMO, id=hmo_id, is_active=True)
+        tier_id = request.query_params.get('tier_id') or request.data.get('tier_id')
+        tier = None
+        if tier_id:
+            tier = get_object_or_404(HMOTier, id=tier_id, system_hmo=system_hmo, is_active=True)
 
         f = request.FILES.get("file")
         if not f:
@@ -473,17 +477,26 @@ class DrugViewSet(
                 buf = io.StringIO(f.read().decode("utf-8"))
                 reader = csv.DictReader(buf)
                 rows = list(reader)
-            elif filename.endswith((".xlsx", ".xls")):
+            elif filename.endswith(".xlsx"):
                 try:
-                    import pandas as pd
+                    import openpyxl
                 except ImportError:
                     return Response(
-                        {"detail": "Excel support not available. Please install pandas and openpyxl."},
+                        {"detail": "openpyxl is required for Excel files. Please install openpyxl or use CSV."},
                         status=400,
                     )
-                engine = "openpyxl" if filename.endswith(".xlsx") else None
-                df = pd.read_excel(f, engine=engine)
-                rows = df.to_dict("records")
+
+                wb = openpyxl.load_workbook(f, data_only=True)
+                ws = wb.active
+                headers = [str(cell.value).strip() if cell.value is not None else "" for cell in ws[1]]
+                rows = []
+                for values in ws.iter_rows(min_row=2, values_only=True):
+                    rows.append({headers[i].lower(): values[i] for i in range(len(headers))})
+            elif filename.endswith(".xls"):
+                return Response(
+                    {"detail": "Legacy .xls is not supported. Please save as .xlsx or CSV."},
+                    status=400,
+                )
             else:
                 return Response(
                     {"detail": "Unsupported file format. Please upload CSV or Excel (.xlsx, .xls) file."},
@@ -512,8 +525,15 @@ class DrugViewSet(
                     code = str(normalized.get("code") or "").strip()
                     if not code:
                         continue
-                    amount = normalized.get("price")
-                    if amount is None or str(amount).strip() == "":
+                    amount_raw = normalized.get("price")
+                    if amount_raw is None or str(amount_raw).strip() == "":
+                        continue
+
+                    from decimal import Decimal, InvalidOperation
+                    try:
+                        amount = Decimal(str(amount_raw).strip())
+                    except (InvalidOperation, ValueError):
+                        errors.append({"row": i, "error": f"Invalid price '{amount_raw}'"})
                         continue
 
                     # Get or create drug
@@ -540,11 +560,14 @@ class DrugViewSet(
                         defaults={
                             "name": drug.name or svc_code,
                             "default_price": drug.unit_price or 0,
+                            "is_active": True,
                         },
                     )
                     HMOPrice.objects.update_or_create(
                         facility_id=facility_id,
-                        hmo=hmo,
+                        owner=None,
+                        system_hmo=system_hmo,
+                        tier=tier,
                         service=service,
                         defaults={"amount": amount, "currency": "NGN", "is_active": True},
                     )
@@ -598,20 +621,27 @@ class DrugViewSet(
                 buf = io.StringIO(f.read().decode("utf-8"))
                 reader = csv.DictReader(buf)
                 rows = list(reader)
-            elif filename.endswith(('.xlsx', '.xls')):
-                # Excel import
+            elif filename.endswith('.xlsx'):
+                # Excel import (.xlsx)
                 try:
-                    import pandas as pd
+                    import openpyxl
                 except ImportError:
                     return Response(
-                        {"detail": "Excel support not available. Please install pandas and openpyxl."},
-                        status=400
+                        {"detail": "openpyxl is required for Excel files. Please install openpyxl or use CSV."},
+                        status=400,
                     )
-                
-                engine = 'openpyxl' if filename.endswith('.xlsx') else None
-                df = pd.read_excel(f, engine=engine)
-                # Convert DataFrame to list of dicts (similar to csv.DictReader)
-                rows = df.to_dict('records')
+
+                wb = openpyxl.load_workbook(f, data_only=True)
+                ws = wb.active
+                headers = [str(cell.value).strip() if cell.value is not None else "" for cell in ws[1]]
+                rows = []
+                for values in ws.iter_rows(min_row=2, values_only=True):
+                    rows.append({headers[i].lower(): values[i] for i in range(len(headers))})
+            elif filename.endswith('.xls'):
+                return Response(
+                    {"detail": "Legacy .xls is not supported. Please save as .xlsx or CSV."},
+                    status=400,
+                )
             else:
                 return Response(
                     {"detail": "Unsupported file format. Please upload CSV or Excel (.xlsx, .xls) file."},
@@ -677,14 +707,15 @@ class DrugViewSet(
                         qty_per_unit = 1
                     
                     # Handle unit_price
-                    unit_price = row.get("unit_price")
+                    unit_price_raw = row.get("unit_price")
+                    from decimal import Decimal, InvalidOperation
                     try:
-                        if unit_price is None or unit_price == '' or (isinstance(unit_price, float) and math.isnan(unit_price)):
-                            unit_price = 0
+                        if unit_price_raw is None or unit_price_raw == '' or (isinstance(unit_price_raw, float) and math.isnan(unit_price_raw)):
+                            unit_price = Decimal('0')
                         else:
-                            unit_price = float(unit_price)
-                    except (ValueError, TypeError):
-                        unit_price = 0
+                            unit_price = Decimal(str(unit_price_raw).strip())
+                    except (InvalidOperation, ValueError, TypeError):
+                        unit_price = Decimal('0')
                     
                     defaults = {
                         "name": name,
@@ -865,187 +896,6 @@ class StockViewSet(viewsets.GenericViewSet, mixins.ListModelMixin):
 # --- Prescriptions ---
 
 
-@action(detail=False, methods=["get"], permission_classes=[IsAuthenticated, IsPharmacyStaff], url_path="hmo-catalog")
-def hmo_catalog(self, request):
-    """Return the facility pharmacy catalog with HMO-specific override prices."""
-    u = request.user
-    facility_id = getattr(u, "facility_id", None)
-    if not facility_id:
-        return Response({"detail": "HMO catalogs are only available for facility accounts."}, status=400)
-
-    hmo_id = request.query_params.get("hmo") or request.query_params.get("hmo_id")
-    if not hmo_id:
-        return Response({"detail": "hmo (or hmo_id) query param is required"}, status=400)
-
-    hmo = get_object_or_404(HMO, id=hmo_id, facility_id=facility_id, is_active=True)
-
-    qs = self.get_queryset().filter(facility_id=facility_id).order_by("name", "code")
-    data = DrugSerializer(qs, many=True).data
-
-    from billing.models import HMOPrice
-
-    svc_codes = [f"DRUG:{d['code']}" for d in data if d.get("code")]
-    price_map = {}
-    if svc_codes:
-        hmo_prices = (
-            HMOPrice.objects.filter(
-                facility_id=facility_id,
-                hmo=hmo,
-                service__code__in=svc_codes,
-                is_active=True,
-            )
-            .select_related("service")
-        )
-        price_map = {hp.service.code: str(hp.amount) for hp in hmo_prices}
-
-    for row in data:
-        code = row.get("code")
-        svc_code = f"DRUG:{code}" if code else None
-        row["hmo_id"] = hmo.id
-        row["hmo_name"] = hmo.name
-        row["hmo_price"] = price_map.get(svc_code)
-    return Response(data)
-
-@action(detail=False, methods=["post"], permission_classes=[IsAuthenticated, IsPharmacyStaff], url_path="set-hmo-price")
-def set_hmo_price(self, request):
-    """Set/override a single drug price for an HMO."""
-    u = request.user
-    facility_id = getattr(u, "facility_id", None)
-    if not facility_id:
-        return Response({"detail": "HMO pricing is only available for facility accounts."}, status=400)
-
-    hmo_id = request.data.get("hmo_id") or request.data.get("hmo")
-    code = request.data.get("code")
-    amount = request.data.get("amount") or request.data.get("price")
-
-    if not (hmo_id and code and amount is not None):
-        return Response({"detail": "hmo_id, code, and amount are required"}, status=400)
-
-    hmo = get_object_or_404(HMO, id=hmo_id, facility_id=facility_id, is_active=True)
-    drug = get_object_or_404(Drug, facility_id=facility_id, code=str(code).strip())
-
-    from billing.models import Service, HMOPrice
-
-    svc_code = f"DRUG:{drug.code}"
-    service, _ = Service.objects.get_or_create(
-        code=svc_code,
-        defaults={
-            "name": drug.name or svc_code,
-            "default_price": drug.price or 0,
-        },
-    )
-    hp, _ = HMOPrice.objects.update_or_create(
-        facility_id=facility_id,
-        hmo=hmo,
-        service=service,
-        defaults={"amount": amount, "currency": "NGN", "is_active": True},
-    )
-    return Response({"ok": True, "service": service.code, "hmo_price": str(hp.amount)})
-
-@action(detail=False, methods=["post"], permission_classes=[IsAuthenticated, IsPharmacyStaff], url_path="import-hmo-file")
-def import_hmo_file(self, request):
-    """Upload an HMO-specific price list for drugs (CSV/Excel)."""
-    u = request.user
-    facility_id = getattr(u, "facility_id", None)
-    if not facility_id:
-        return Response({"detail": "HMO catalogs are only available for facility accounts."}, status=400)
-
-    hmo_id = request.query_params.get("hmo") or request.query_params.get("hmo_id") or request.data.get("hmo_id")
-    if not hmo_id:
-        return Response({"detail": "hmo (or hmo_id) is required"}, status=400)
-
-    hmo = get_object_or_404(HMO, id=hmo_id, facility_id=facility_id, is_active=True)
-
-    f = request.FILES.get("file")
-    if not f:
-        return Response({"detail": "file is required"}, status=400)
-
-    filename = f.name.lower()
-    updated = 0
-    errors = []
-
-    try:
-        if filename.endswith(".csv"):
-            buf = io.StringIO(f.read().decode("utf-8"))
-            reader = csv.DictReader(buf)
-            rows = list(reader)
-        elif filename.endswith((".xlsx", ".xls")):
-            try:
-                import pandas as pd
-            except ImportError:
-                return Response(
-                    {"detail": "Excel support not available. Please install pandas and openpyxl."},
-                    status=400,
-                )
-            engine = "openpyxl" if filename.endswith(".xlsx") else None
-            df = pd.read_excel(f, engine=engine)
-            rows = df.to_dict("records")
-        else:
-            return Response(
-                {"detail": "Unsupported file format. Please upload CSV or Excel (.xlsx, .xls) file."},
-                status=400,
-            )
-
-        if not rows:
-            return Response({"detail": "File is empty or has no data rows."}, status=400)
-
-        required_columns = ["code", "price"]
-        first_row_keys = [str(k).lower() for k in rows[0].keys()]
-        missing_columns = [col for col in required_columns if col not in first_row_keys]
-        if missing_columns:
-            return Response(
-                {"detail": f"Missing required columns: {', '.join(missing_columns)}"},
-                status=400,
-            )
-
-        from billing.models import Service, HMOPrice
-
-        for i, row in enumerate(rows, start=2):
-            try:
-                normalized = {str(k).lower(): v for k, v in row.items()}
-                code = str(normalized.get("code") or "").strip()
-                if not code:
-                    continue
-                amount = normalized.get("price")
-                if amount is None or str(amount).strip() == "":
-                    continue
-
-                drug = Drug.objects.filter(facility_id=facility_id, code=code).first()
-                if not drug:
-                    name = str(normalized.get("name") or code).strip()
-                    drug = Drug.objects.create(
-                        facility_id=facility_id,
-                        created_by=u,
-                        code=code,
-                        name=name,
-                        form=str(normalized.get("form") or "").strip(),
-                        strength=str(normalized.get("strength") or "").strip(),
-                        unit=str(normalized.get("unit") or "").strip(),
-                        price=amount,
-                        is_active=True,
-                    )
-
-                svc_code = f"DRUG:{drug.code}"
-                service, _ = Service.objects.get_or_create(
-                    code=svc_code,
-                    defaults={
-                        "name": drug.name or svc_code,
-                        "default_price": drug.price or 0,
-                    },
-                )
-                HMOPrice.objects.update_or_create(
-                    facility_id=facility_id,
-                    hmo=hmo,
-                    service=service,
-                    defaults={"amount": amount, "currency": "NGN", "is_active": True},
-                )
-                updated += 1
-            except Exception as e:
-                errors.append({"row": i, "error": str(e)})
-
-        return Response({"updated": updated, "errors": errors}, status=200)
-    except Exception as e:
-        return Response({"detail": f"Import failed: {str(e)}"}, status=400)
 
 class PrescriptionViewSet(
     viewsets.GenericViewSet,
@@ -1181,6 +1031,94 @@ class PrescriptionViewSet(
         s = DispenseSerializer(data=request.data)
         s.is_valid(raise_exception=True)
         s.save(rx=rx, user=request.user)
+        rx.refresh_from_db()
+        return Response(PrescriptionReadSerializer(rx).data)
+    
+    @action(detail=True, methods=["patch"], url_path="update-item", permission_classes=[IsAuthenticated, IsPharmacyStaff])
+    def update_item(self, request, pk=None):
+        """
+        Update a prescription item's prescribed quantity.
+        
+        Body:
+        {
+            "item_id": 123,
+            "qty_prescribed": 30
+        }
+        """
+        if not has_facility_permission(request.user, 'can_dispense_prescriptions'):
+            return Response(
+                {"detail": "You do not have permission to update prescription items."},
+                status=status.HTTP_403_FORBIDDEN
+            )
+        
+        rx = self.get_object()
+        u = request.user
+        role = (getattr(u, "role", "") or "").upper()
+        
+        # Authorization checks (same logic as dispense)
+        if rx.outsourced_to_id:
+            if role not in {UserRole.ADMIN, UserRole.SUPER_ADMIN} and u.id != rx.outsourced_to_id:
+                return Response({"detail": "This prescription is outsourced to another pharmacy."}, status=403)
+        
+        if not rx.outsourced_to_id and role not in {UserRole.ADMIN, UserRole.SUPER_ADMIN}:
+            if u.facility_id and rx.facility_id != u.facility_id:
+                return Response({"detail": "Prescription is not in your facility."}, status=403)
+            if not u.facility_id:
+                if role != UserRole.PHARMACY or rx.prescribed_by_id != u.id:
+                    return Response({"detail": "Independent pharmacies can only update outsourced prescriptions or their own prescriptions."}, status=403)
+        
+        # Get and validate request data
+        item_id = request.data.get("item_id")
+        qty_prescribed = request.data.get("qty_prescribed")
+        
+        if not item_id:
+            return Response({"detail": "item_id is required"}, status=400)
+        
+        if qty_prescribed is None:
+            return Response({"detail": "qty_prescribed is required"}, status=400)
+        
+        try:
+            qty_prescribed = int(qty_prescribed)
+            if qty_prescribed <= 0:
+                return Response({"detail": "qty_prescribed must be greater than 0"}, status=400)
+        except (ValueError, TypeError):
+            return Response({"detail": "qty_prescribed must be a valid number"}, status=400)
+        
+        # Get the prescription item
+        try:
+            item = rx.items.get(id=item_id)
+        except PrescriptionItem.DoesNotExist:
+            return Response({"detail": "Item not found in this prescription"}, status=404)
+        
+        # Check if we can update (item not fully dispensed)
+        if item.qty_dispensed > qty_prescribed:
+            return Response(
+                {"detail": f"Cannot set prescribed quantity to {qty_prescribed} - already dispensed {item.qty_dispensed} units"},
+                status=400
+            )
+        
+        # Update the prescribed quantity
+        item.qty_prescribed = qty_prescribed
+        item.save(update_fields=["qty_prescribed"])
+        
+        # Recalculate prescription status
+        from django.db import models
+        totals = rx.items.aggregate(
+            total=models.Sum("qty_prescribed"),
+            out=models.Sum("qty_dispensed"),
+        )
+        total = totals["total"] or 0
+        out = totals["out"] or 0
+        
+        if out == 0:
+            rx.status = RxStatus.PRESCRIBED
+        elif out < total:
+            rx.status = RxStatus.PARTIALLY_DISPENSED
+        else:
+            rx.status = RxStatus.DISPENSED
+        rx.save(update_fields=["status"])
+        
+        # Return updated prescription
         rx.refresh_from_db()
         return Response(PrescriptionReadSerializer(rx).data)
 
