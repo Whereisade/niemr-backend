@@ -1128,6 +1128,7 @@ class FacilityHMOViewSet(
     viewsets.GenericViewSet,
     mixins.ListModelMixin,
     mixins.RetrieveModelMixin,
+    mixins.UpdateModelMixin,
     mixins.DestroyModelMixin,
 ):
     """
@@ -1167,23 +1168,69 @@ class FacilityHMOViewSet(
             qs = qs.filter(facility=facility)
         else:
             # Independent provider
+
             qs = qs.filter(owner=user)
-        
-        # Filter by active status
+
+        # Filter by active status (optional)
         is_active = self.request.query_params.get('is_active')
         if is_active is not None:
-            qs = qs.filter(is_active=is_active.lower() == 'true')
-        else:
-            # Default to showing only active
-            qs = qs.filter(is_active=True)
-        
+            v = str(is_active).strip().lower()
+            if v in ('true', '1', 'yes'):
+                qs = qs.filter(is_active=True)
+            elif v in ('false', '0', 'no'):
+                qs = qs.filter(is_active=False)
+            # else: ignore unknown values (return all)
+
         return qs.order_by('system_hmo__name')
+
+
+    def partial_update(self, request, *args, **kwargs):
+        """
+        PATCH /api/patients/hmo/facility/{id}/
+
+        Supports updating only is_active:
+        { "is_active": true|false }
+        """
+        facility_hmo = self.get_object()
+
+        if 'is_active' not in request.data:
+            return Response(
+                {"is_active": "This field is required."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        raw = request.data.get('is_active')
+        if isinstance(raw, bool):
+            is_active = raw
+        else:
+            v = str(raw).strip().lower()
+            if v in ('true', '1', 'yes'):
+                is_active = True
+            elif v in ('false', '0', 'no'):
+                is_active = False
+            else:
+                return Response(
+                    {"is_active": "Invalid value. Use true/false."},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
+        facility_hmo.is_active = is_active
+        facility_hmo.save(update_fields=['is_active', 'updated_at'])
+        return Response(FacilityHMOSerializer(facility_hmo).data)
     
     def get_permissions(self):
-        if self.action in ('enable', 'destroy', 'update_relationship'):
+        # Mutating actions require elevated permission
+        if self.action in (
+            'enable',
+            'destroy',
+            'update',
+            'partial_update',
+            'toggle_active',
+            'update_relationship',
+        ):
             return [IsAuthenticated(), CanManageHMO()]
         return [IsAuthenticated(), IsFacilityStaff()]
-    
+
     @action(detail=False, methods=['post'], url_path='enable')
     def enable(self, request):
         """

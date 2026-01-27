@@ -21,7 +21,7 @@ from rest_framework import serializers
 
 
 class GenerateReportSerializer(serializers.Serializer):
-    REPORT_TYPES = ("ENCOUNTER", "LAB", "IMAGING", "BILLING")
+    REPORT_TYPES = ("ENCOUNTER", "LAB", "IMAGING", "BILLING", "HMO_STATEMENT")
 
     report_type = serializers.ChoiceField(choices=REPORT_TYPES)
     # Accept strings like "EN-000123" and normalize to integer PK.

@@ -4,39 +4,36 @@
   <div class="section keep">
     <div class="section-header-row">
       <div class="left">
-        <h2>
-          {% if is_receipt %}
-            Billing Receipt
-          {% else %}
-            Billing Statement
-          {% endif %}
-        </h2>
+        <h2>HMO Statement</h2>
         <div class="section-subtitle">
           Period: {{ period.start|default:"(start)" }} – {{ period.end|default:"(end)" }}
         </div>
       </div>
       <div class="right">
-        <span class="meta-badge">Patient #{{ patient.id }}</span>
+        <span class="meta-badge">FacilityHMO #{{ facility_hmo.id }}</span>
       </div>
     </div>
 
     <div class="card">
       <div class="card-grid">
         <div>
-          <div class="label">Patient</div>
-          <div class="value">{{ patient.first_name }} {{ patient.last_name }}</div>
-          <div class="muted">{{ patient.phone|default:"" }}</div>
+          <div class="label">HMO</div>
+          <div class="value">{{ facility_hmo.system_hmo.name }}</div>
+          <div class="muted">
+            {% if facility_hmo.system_hmo.nhis_number %}
+              NHIS: {{ facility_hmo.system_hmo.nhis_number }}
+            {% endif %}
+          </div>
         </div>
         <div>
-          <div class="label">HMO</div>
+          <div class="label">Facility / Provider</div>
           <div class="value">
-            {% if patient.system_hmo %}
-              {{ patient.system_hmo.name }}
-              {% if patient.hmo_tier %}
-                <span class="muted">(Tier: {{ patient.hmo_tier.name }})</span>
-              {% endif %}
+            {% if facility %}
+              {{ facility.name }}
+            {% elif provider_profile %}
+              {{ provider_profile.get_display_name }}
             {% else %}
-              <span class="muted">None</span>
+              <span class="muted">—</span>
             {% endif %}
           </div>
         </div>
@@ -47,6 +44,7 @@
         <div>
           <div class="label">Collected (Allocated)</div>
           <div class="value right">{{ allocated_total }}</div>
+          <div class="muted right">HMO: {{ hmo_allocated_total }} • Other: {{ other_allocated_total }}</div>
         </div>
         <div>
           <div class="label">Outstanding</div>
@@ -57,80 +55,84 @@
   </div>
 
   <div class="section">
+    <h3>Patient Summary</h3>
+    <table>
+      <thead>
+        <tr>
+          <th>Patient</th>
+          <th class="right"># Charges</th>
+          <th class="right">Billed</th>
+          <th class="right">Collected</th>
+          <th class="right">HMO Collected</th>
+          <th class="right">Outstanding</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for r in patient_summary %}
+          <tr>
+            <td>{{ r.patient_name }} <span class="muted">(#{{ r.patient_id }})</span></td>
+            <td class="right">{{ r.charge_count }}</td>
+            <td class="right">{{ r.charges_total }}</td>
+            <td class="right">{{ r.collected_total }}</td>
+            <td class="right">{{ r.hmo_collected_total }}</td>
+            <td class="right">{{ r.outstanding_total }}</td>
+          </tr>
+        {% empty %}
+          <tr><td colspan="6" class="muted">No patients found for the selected period.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+
+  <div class="section">
     <h3>Charges</h3>
     <table>
       <thead>
         <tr>
           <th>Date</th>
+          <th>Patient</th>
           <th>Service</th>
-          <th class="right">Qty</th>
-          <th class="right">Unit Price</th>
           <th class="right">Amount</th>
-          <th class="right">Paid</th>
+          <th class="right">Paid (HMO)</th>
+          <th class="right">Paid (Other)</th>
           <th class="right">Outstanding</th>
-          <th>Status</th>
         </tr>
       </thead>
       <tbody>
         {% for c in charges %}
           <tr>
             <td>{{ c.created_at|date:"Y-m-d" }}</td>
+            <td>{{ c.patient.first_name }} {{ c.patient.last_name }} <span class="muted">(#{{ c.patient_id }})</span></td>
             <td>{{ c.service.name }}</td>
-            <td class="right">{{ c.qty }}</td>
-            <td class="right">{{ c.unit_price }}</td>
             <td class="right">{{ c.amount }}</td>
-            <td class="right">{{ c.paid_amount }}</td>
+            <td class="right">{{ c.paid_hmo }}</td>
+            <td class="right">{{ c.paid_other }}</td>
             <td class="right">{{ c.outstanding }}</td>
-            <td>{{ c.status }}</td>
           </tr>
         {% empty %}
-          <tr><td colspan="8" class="muted">No charges found for the selected period.</td></tr>
+          <tr><td colspan="7" class="muted">No charges found for the selected period.</td></tr>
         {% endfor %}
-
-        <tr>
-          <td colspan="4" class="right"><strong>Total</strong></td>
-          <td class="right"><strong>{{ charges_total }}</strong></td>
-          <td class="right"><strong>{{ allocated_total }}</strong></td>
-          <td class="right"><strong>{{ outstanding_total }}</strong></td>
-          <td></td>
-        </tr>
       </tbody>
     </table>
-    <div class="section-subtitle">
-      “Paid” is derived from payment allocations (including HMO/insurance allocations).
-    </div>
   </div>
 
   <div class="section">
-    <h3>Payments & Allocations</h3>
+    <h3>HMO Payments</h3>
     <table>
       <thead>
         <tr>
           <th>Date</th>
-          <th>Source</th>
           <th>Method</th>
           <th>Reference</th>
           <th class="right">Amount</th>
           <th class="right">Applied to Statement</th>
-          <th class="right">Unallocated (Overall)</th>
+          <th class="right">Unallocated</th>
         </tr>
       </thead>
       <tbody>
         {% for p in payments %}
           <tr>
             <td>{{ p.received_at|date:"Y-m-d" }}</td>
-            <td>
-              {% if p.get_payment_source_display %}
-                {{ p.get_payment_source_display }}
-              {% else %}
-                {{ p.payment_source|default:"" }}
-              {% endif %}
-              {% if p.facility_hmo %}
-                <span class="muted">— {{ p.facility_hmo.system_hmo.name }}</span>
-              {% elif p.system_hmo %}
-                <span class="muted">— {{ p.system_hmo.name }}</span>
-              {% endif %}
-            </td>
             <td>{{ p.get_method_display|default:p.method }}</td>
             <td>{{ p.reference|default:"" }}</td>
             <td class="right">{{ p.amount }}</td>
@@ -138,7 +140,7 @@
             <td class="right">{{ p.unallocated }}</td>
           </tr>
         {% empty %}
-          <tr><td colspan="7" class="muted">No payments linked to this statement.</td></tr>
+          <tr><td colspan="6" class="muted">No HMO payments found for the selected period.</td></tr>
         {% endfor %}
       </tbody>
     </table>

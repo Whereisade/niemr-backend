@@ -48,6 +48,12 @@ REPORT_CONFIG = {
         "template": "reports/billing.html",
         "tag": "REPORT_BILLING",
     },
+    "HMO_STATEMENT": {
+        # Facility/provider scoped HMO relationship statement.
+        "model": ("patients", "FacilityHMO"),
+        "template": "reports/hmo_statement.html",
+        "tag": "REPORT_HMO_STATEMENT",
+    },
 }
 
 
@@ -97,6 +103,7 @@ def render_report_html(report_type: str, obj, cfg: dict, *, start=None, end=None
     from reports.services.context import (
         billing_context,
         encounter_context,
+        hmo_statement_context,
         imaging_context,
         lab_context,
     )
@@ -110,6 +117,8 @@ def render_report_html(report_type: str, obj, cfg: dict, *, start=None, end=None
     elif report_type == "BILLING":
         charge_id = cfg.get("_charge_id")
         context = billing_context(obj.id, start=start, end=end, charge_id=charge_id)
+    elif report_type == "HMO_STATEMENT":
+        context = hmo_statement_context(obj.id, start=start, end=end)
     else:
         raise ValidationError({"report_type": "Unsupported report type"})
 

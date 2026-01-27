@@ -9,6 +9,8 @@ from decimal import Decimal
 
 from django.apps import apps
 from django.conf import settings
+from django.db.models import Count, DecimalField, ExpressionWrapper, F, Q, Sum, Value
+from django.db.models.functions import Coalesce
 from django.utils import timezone
 
 
@@ -456,33 +458,91 @@ def billing_context(
     end=None,
     charge_id: int | None = None,
 ) -> dict:
+    """Patient billing statement.
+
+    Upgraded to use PaymentAllocation (collected vs billed) like the billing module.
+    Also includes allocations from bulk/HMO payments that are applied to this patient's charges.
+    """
+
     Charge = _model("billing", "Charge")
     Payment = _model("billing", "Payment")
+    PaymentAllocation = _model("billing", "PaymentAllocation")
     Patient = _model("patients", "Patient")
 
-    charges = Charge.objects.select_related("service", "facility", "patient").filter(
-        patient_id=patient_id
-    )
-    payments = Payment.objects.select_related("facility", "patient").filter(
-        patient_id=patient_id
+    z = Value(Decimal("0.00"), output_field=DecimalField(max_digits=12, decimal_places=2))
+
+    charge_scope = (
+        Charge.objects.select_related("service", "facility", "patient")
+        .filter(patient_id=patient_id)
+        .exclude(status="VOID")
     )
 
     if charge_id:
-        charges = charges.filter(id=charge_id)
+        charge_scope = charge_scope.filter(id=charge_id)
 
     if start:
-        charges = charges.filter(created_at__gte=start)
-        payments = payments.filter(received_at__gte=start)
+        charge_scope = charge_scope.filter(created_at__gte=start)
     if end:
-        charges = charges.filter(created_at__lte=end)
-        payments = payments.filter(received_at__lte=end)
+        charge_scope = charge_scope.filter(created_at__lte=end)
 
-    total_charges = sum((c.amount for c in charges), Decimal("0"))
-    total_payments = sum((p.amount for p in payments), Decimal("0"))
-    balance = total_charges - total_payments
+    # Charges with allocation totals
+    charges = (
+        charge_scope.annotate(
+            paid_amount=Coalesce(Sum("allocations__amount"), z),
+        )
+        .annotate(
+            outstanding=ExpressionWrapper(
+                F("amount") - F("paid_amount"),
+                output_field=DecimalField(max_digits=12, decimal_places=2),
+            )
+        )
+        .order_by("created_at", "id")
+    )
 
-    patient = Patient.objects.select_related("facility").get(id=patient_id)
-    
+    charges_total = charge_scope.aggregate(s=Coalesce(Sum("amount"), Decimal("0.00")))["s"]
+    allocated_total = (
+        PaymentAllocation.objects.filter(charge__in=charge_scope)
+        .aggregate(s=Coalesce(Sum("amount"), Decimal("0.00")))["s"]
+    )
+    outstanding_total = Decimal(charges_total) - Decimal(allocated_total)
+
+    # Payments relevant to this statement
+    payments = (
+        Payment.objects.select_related(
+            "facility",
+            "patient",
+            "hmo",
+            "system_hmo",
+            "facility_hmo",
+        )
+        .filter(Q(patient_id=patient_id) | Q(allocations__charge__in=charge_scope))
+        .distinct()
+    )
+
+    # For the payment table:
+    # - allocated_to_statement: how much of this payment is applied to charges in this statement
+    # - allocated_total: total allocated overall (used to compute payment unallocated)
+    payments = (
+        payments.annotate(
+            allocated_to_statement=Coalesce(
+                Sum("allocations__amount", filter=Q(allocations__charge__in=charge_scope)),
+                z,
+            ),
+            allocated_total=Coalesce(Sum("allocations__amount"), z),
+        )
+        .annotate(
+            unallocated=ExpressionWrapper(
+                F("amount") - F("allocated_total"),
+                output_field=DecimalField(max_digits=12, decimal_places=2),
+            )
+        )
+        .order_by("received_at", "id")
+    )
+
+    patient = Patient.objects.select_related("facility", "system_hmo", "hmo_tier").get(
+        id=patient_id
+    )
+
     header_info = _get_header_info(facility=getattr(patient, "facility", None))
 
     return {
@@ -492,11 +552,220 @@ def billing_context(
         "title": f"Billing Statement — Patient #{patient.id}",
         "patient": patient,
         "facility": getattr(patient, "facility", None),
-        "charges": charges.order_by("created_at"),
-        "payments": payments.order_by("received_at"),
-        "total_charges": total_charges,
-        "total_payments": total_payments,
-        "balance": balance,
+        "charges": charges,
+        "payments": payments,
+        "charges_total": charges_total,
+        "allocated_total": allocated_total,
+        "outstanding_total": outstanding_total,
         "period": {"start": start, "end": end},
         "is_receipt": bool(charge_id),
+    }
+
+
+def hmo_statement_context(
+    facility_hmo_id: int,
+    *,
+    start=None,
+    end=None,
+) -> dict:
+    """Facility/provider HMO statement (FacilityHMO anchored).
+
+    Uses FacilityHMO.id (junction table) to build a statement that:
+    - lists charges for patients under the HMO
+    - lists HMO payments and how they were allocated
+    - shows outstanding amounts
+    """
+
+    FacilityHMO = _model("patients", "FacilityHMO")
+    Charge = _model("billing", "Charge")
+    Payment = _model("billing", "Payment")
+    PaymentAllocation = _model("billing", "PaymentAllocation")
+    ProviderProfile = _model("providers", "ProviderProfile")
+
+    z = Value(Decimal("0.00"), output_field=DecimalField(max_digits=12, decimal_places=2))
+
+    fhmo = FacilityHMO.objects.select_related("facility", "owner", "system_hmo").get(
+        id=facility_hmo_id
+    )
+
+    provider_profile = None
+    if fhmo.owner_id:
+        provider_profile = ProviderProfile.objects.filter(user_id=fhmo.owner_id).first()
+
+    header_info = _get_header_info(
+        facility=getattr(fhmo, "facility", None),
+        provider=provider_profile,
+    )
+
+    # Charges in scope
+    charge_scope = (
+        Charge.objects.select_related("patient", "service")
+        .filter(patient__system_hmo_id=fhmo.system_hmo_id)
+        .exclude(status="VOID")
+    )
+
+    if fhmo.facility_id:
+        charge_scope = charge_scope.filter(facility_id=fhmo.facility_id)
+    elif fhmo.owner_id:
+        charge_scope = charge_scope.filter(owner_id=fhmo.owner_id)
+
+    if start:
+        charge_scope = charge_scope.filter(created_at__gte=start)
+    if end:
+        charge_scope = charge_scope.filter(created_at__lte=end)
+
+    hmo_alloc_filter = Q(allocations__payment__payment_source="HMO") & (
+        Q(allocations__payment__facility_hmo_id=fhmo.id)
+        | Q(allocations__payment__system_hmo_id=fhmo.system_hmo_id)
+    )
+
+    charges = (
+        charge_scope.annotate(
+            paid_total=Coalesce(Sum("allocations__amount"), z),
+            paid_hmo=Coalesce(Sum("allocations__amount", filter=hmo_alloc_filter), z),
+        )
+        .annotate(
+            paid_other=ExpressionWrapper(
+                F("paid_total") - F("paid_hmo"),
+                output_field=DecimalField(max_digits=12, decimal_places=2),
+            ),
+            outstanding=ExpressionWrapper(
+                F("amount") - F("paid_total"),
+                output_field=DecimalField(max_digits=12, decimal_places=2),
+            ),
+        )
+        .order_by("created_at", "id")
+    )
+
+    charges_total = charge_scope.aggregate(s=Coalesce(Sum("amount"), Decimal("0.00")))["s"]
+    allocated_total = (
+        PaymentAllocation.objects.filter(charge__in=charge_scope)
+        .aggregate(s=Coalesce(Sum("amount"), Decimal("0.00")))["s"]
+    )
+    outstanding_total = Decimal(charges_total) - Decimal(allocated_total)
+
+    hmo_allocated_total = (
+        PaymentAllocation.objects.filter(charge__in=charge_scope)
+        .filter(payment__payment_source="HMO")
+        .filter(
+            Q(payment__facility_hmo_id=fhmo.id)
+            | Q(payment__system_hmo_id=fhmo.system_hmo_id)
+        )
+        .aggregate(s=Coalesce(Sum("amount"), Decimal("0.00")))["s"]
+    )
+    other_allocated_total = Decimal(allocated_total) - Decimal(hmo_allocated_total)
+
+    # HMO payments for this FacilityHMO
+    payments = Payment.objects.select_related(
+        "facility",
+        "facility_hmo",
+        "system_hmo",
+        "hmo",
+        "received_by",
+    ).filter(
+        Q(facility_hmo_id=fhmo.id)
+        | (
+            Q(system_hmo_id=fhmo.system_hmo_id)
+            & Q(facility_hmo__isnull=True)
+        )
+    )
+
+    if fhmo.facility_id:
+        payments = payments.filter(facility_id=fhmo.facility_id)
+    elif fhmo.owner_id:
+        payments = payments.filter(owner_id=fhmo.owner_id)
+
+    if start:
+        payments = payments.filter(received_at__gte=start)
+    if end:
+        payments = payments.filter(received_at__lte=end)
+
+    payments = (
+        payments.annotate(
+            allocated_to_statement=Coalesce(
+                Sum("allocations__amount", filter=Q(allocations__charge__in=charge_scope)),
+                z,
+            ),
+            allocated_total=Coalesce(Sum("allocations__amount"), z),
+        )
+        .annotate(
+            unallocated=ExpressionWrapper(
+                F("amount") - F("allocated_total"),
+                output_field=DecimalField(max_digits=12, decimal_places=2),
+            )
+        )
+        .order_by("received_at", "id")
+    )
+
+    # Patient summary for this statement
+    patient_rows = list(
+        charge_scope.values(
+            "patient_id",
+            "patient__first_name",
+            "patient__last_name",
+        )
+        .annotate(
+            charges_total=Coalesce(Sum("amount"), Decimal("0.00")),
+            charge_count=Count("id"),
+        )
+        .order_by("patient__last_name", "patient__first_name")
+    )
+
+    collected_by_patient = (
+        PaymentAllocation.objects.filter(charge__in=charge_scope)
+        .values("charge__patient_id")
+        .annotate(collected_total=Coalesce(Sum("amount"), Decimal("0.00")))
+    )
+    collected_map = {
+        row["charge__patient_id"]: row["collected_total"] for row in collected_by_patient
+    }
+
+    hmo_collected_by_patient = (
+        PaymentAllocation.objects.filter(charge__in=charge_scope)
+        .filter(
+            payment__payment_source="HMO",
+        )
+        .filter(Q(payment__facility_hmo_id=fhmo.id) | Q(payment__system_hmo_id=fhmo.system_hmo_id))
+        .values("charge__patient_id")
+        .annotate(hmo_collected_total=Coalesce(Sum("amount"), Decimal("0.00")))
+    )
+    hmo_collected_map = {
+        row["charge__patient_id"]: row["hmo_collected_total"] for row in hmo_collected_by_patient
+    }
+
+    patient_summary = []
+    for row in patient_rows:
+        pid = row["patient_id"]
+        billed = Decimal(row.get("charges_total") or 0)
+        collected = Decimal(collected_map.get(pid) or 0)
+        hmo_collected = Decimal(hmo_collected_map.get(pid) or 0)
+        patient_summary.append(
+            {
+                "patient_id": pid,
+                "patient_name": f"{row.get('patient__first_name','')} {row.get('patient__last_name','')}".strip(),
+                "charge_count": row.get("charge_count") or 0,
+                "charges_total": billed,
+                "collected_total": collected,
+                "hmo_collected_total": hmo_collected,
+                "outstanding_total": billed - collected,
+            }
+        )
+
+    return {
+        "brand": brand(),
+        "header": header_info,
+        "generated_at": timezone.now(),
+        "title": f"HMO Statement — {fhmo.system_hmo.name}",
+        "facility_hmo": fhmo,
+        "facility": getattr(fhmo, "facility", None),
+        "provider_profile": provider_profile,
+        "charges": charges,
+        "payments": payments,
+        "patient_summary": patient_summary,
+        "charges_total": charges_total,
+        "allocated_total": allocated_total,
+        "hmo_allocated_total": hmo_allocated_total,
+        "other_allocated_total": other_allocated_total,
+        "outstanding_total": outstanding_total,
+        "period": {"start": start, "end": end},
     }
