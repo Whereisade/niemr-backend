@@ -17,6 +17,7 @@ from .serializers import (
     UserProfileUpdateSerializer,
     PasswordResetRequestSerializer,
     PasswordResetConfirmSerializer,
+    PasswordChangeSerializer,
 )
 from .models import User
 from .services.email import send_email
@@ -184,6 +185,43 @@ def password_reset_confirm(request):
         pass
 
     return Response({"detail": "Password has been reset."}, status=status.HTTP_200_OK)
+
+
+@api_view(["POST"])
+@authentication_classes([JWTAuthentication])
+@permission_classes([IsAuthenticated])
+def password_change(request):
+    """Change password for the currently authenticated user.
+
+    Intended for Settings > Profile.
+    Body:
+      {"current_password": "...", "new_password": "...", "confirm_password": "..."}
+    """
+
+    s = PasswordChangeSerializer(data=request.data, context={"request": request})
+    s.is_valid(raise_exception=True)
+
+    user = request.user
+    new_password = s.validated_data["new_password"]
+
+    user.set_password(new_password)
+    user.save(update_fields=["password"])
+
+    # Best-effort notification email.
+    try:
+        send_email(
+            subject="Your NIEMR password was changed",
+            to=user.email,
+            html=(
+                "<p>Your password was changed successfully.</p>"
+                "<p>If you did not do this, contact support immediately.</p>"
+            ),
+            tags=["auth.password_changed"],
+        )
+    except Exception:
+        pass
+
+    return Response({"detail": "Password updated successfully."}, status=status.HTTP_200_OK)
 
 @api_view(["GET", "PATCH"])
 @authentication_classes([JWTAuthentication])

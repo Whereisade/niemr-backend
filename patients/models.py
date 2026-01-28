@@ -915,6 +915,16 @@ class Patient(models.Model):
         super().save(*args, **kwargs)
 
     @property
+    def full_name(self) -> str:
+        """Human-friendly patient name.
+
+        Used across notifications, dashboards, and documents.
+        Returns 'First Middle Last' (skips empty parts).
+        """
+        parts = [getattr(self, 'first_name', ''), getattr(self, 'middle_name', ''), getattr(self, 'last_name', '')]
+        return ' '.join([p for p in parts if p]).strip()
+
+    @property
     def is_dependent(self) -> bool:
         """True if this patient is a dependent of another patient."""
         return bool(self.parent_patient_id)

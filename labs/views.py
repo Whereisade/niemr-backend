@@ -1070,31 +1070,80 @@ class LabOrderViewSet(
                     logging.getLogger(__name__).warning(f"Billing ensure step failed for lab order {order.id}: {e}")
                 except Exception:
                     pass
+            # Build human-friendly summary for notifications (patient + staff).
+            try:
+                patient_name = None
+                if order.patient:
+                    try:
+                        patient_name = getattr(order.patient, 'full_name', None)
+                    except Exception:
+                        patient_name = None
+                    if not patient_name:
+                        parts = [getattr(order.patient, 'first_name', ''), getattr(order.patient, 'middle_name', ''), getattr(order.patient, 'last_name', '')]
+                        patient_name = ' '.join([p for p in parts if p]).strip() or f"Patient #{order.patient_id}"
 
-            if order.patient:
-                notify_patient(
-                    patient=order.patient,
-                    topic=Topic.LAB_RESULT_READY,
-                    priority=Priority.NORMAL,
-                    title="Your lab result is ready",
-                    body=f"Lab order #{order.id} now has results.",
-                    data={"order_id": order.id},
-                    facility_id=order.facility_id,
-                )
+                # Pull up to a few test names for a compact summary.
+                names = []
+                try:
+                    for it in order.items.select_related('test').all():
+                        nm = None
+                        if getattr(it, 'test_id', None) and getattr(it, 'test', None):
+                            nm = getattr(it.test, 'name', None) or getattr(it.test, 'code', None)
+                        nm = nm or getattr(it, 'requested_name', None)
+                        if nm:
+                            names.append(str(nm))
+                except Exception:
+                    names = []
 
-            # Ordering clinician
-            if getattr(order, "ordered_by_id", None):
-                notify_user(
-                    user=order.ordered_by,
-                    topic=Topic.LAB_RESULT_READY,
-                    priority=Priority.HIGH,
-                    title="Lab results ready",
-                    body=f"Lab order #{order.id} results are ready for review.",
-                    data={"order_id": order.id, "patient_id": order.patient_id},
-                    facility_id=order.facility_id,
-                    action_url="/facility/labs",
-                    group_key=f"LAB:{order.id}:READY",
-                )
+                def summarize(items, limit=3):
+                    items = [x for x in (items or []) if x]
+                    if not items:
+                        return ''
+                    head = items[:limit]
+                    tail = len(items) - len(head)
+                    s = ', '.join(head)
+                    if tail > 0:
+                        s += f" (+{tail} more)"
+                    return s
+
+                tests_summary = summarize(names)
+
+                if order.patient:
+                    patient_body = (
+                        f"Your lab results are ready: {tests_summary}." if tests_summary else f"Your lab results are ready (Order #{order.id})."
+                    )
+                    notify_patient(
+                        patient=order.patient,
+                        topic=Topic.LAB_RESULT_READY,
+                        priority=Priority.NORMAL,
+                        title="Your lab result is ready",
+                        body=patient_body,
+                        data={"order_id": order.id, "patient_id": order.patient_id, "tests_summary": tests_summary},
+                        facility_id=order.facility_id,
+                    )
+
+                # Ordering clinician
+                if getattr(order, "ordered_by_id", None):
+                    staff_body = (
+                        f"{patient_name} • {tests_summary}\nOrder #{order.id} results are ready for review."
+                        if patient_name and tests_summary
+                        else f"Lab order #{order.id} results are ready for review."
+                    )
+                    notify_user(
+                        user=order.ordered_by,
+                        topic=Topic.LAB_RESULT_READY,
+                        priority=Priority.HIGH,
+                        title="Lab results ready",
+                        body=staff_body,
+                        data={"order_id": order.id, "patient_id": order.patient_id, "tests_summary": tests_summary},
+                        facility_id=order.facility_id,
+                        action_url="/facility/labs",
+                        group_key=f"LAB:{order.id}:READY",
+                    )
+
+            except Exception:
+                # Never block completion flow because notifications failed
+                pass
 
         return Response(LabOrderItemReadSerializer(item).data)
 

@@ -342,6 +342,42 @@ class PrescriptionCreateSerializer(serializers.ModelSerializer):
         for it in items:
             PrescriptionItem.objects.create(prescription=rx, **it)
 
+        # Build compact summary strings for notifications
+        patient_name = None
+        try:
+            patient_name = getattr(patient, 'full_name', None)
+        except Exception:
+            patient_name = None
+        if not patient_name:
+            parts = [getattr(patient, 'first_name', ''), getattr(patient, 'middle_name', ''), getattr(patient, 'last_name', '')]
+            patient_name = ' '.join([p for p in parts if p]).strip() or f"Patient #{getattr(patient, 'id', '')}"
+
+        def summarize_meds(raw_items, limit=3):
+            names = []
+            for it in (raw_items or []):
+                try:
+                    drug_obj = it.get('drug')
+                    nm = (getattr(drug_obj, 'name', None) if drug_obj else None) or it.get('drug_name')
+                    nm = (str(nm).strip() if nm else '')
+                    dose = str(it.get('dose') or '').strip()
+                    if nm and dose:
+                        names.append(f"{nm} {dose}".strip())
+                    elif nm:
+                        names.append(nm)
+                except Exception:
+                    continue
+            names = [x for x in names if x]
+            if not names:
+                return ''
+            head = names[:limit]
+            tail = len(names) - len(head)
+            s = ', '.join(head)
+            if tail > 0:
+                s += f" (+{tail} more)"
+            return s
+
+        meds_summary = summarize_meds(items)
+
         # Notify patient (and guardian/dependents fanout via notify_patient)
         try:
             notify_patient(
@@ -349,10 +385,17 @@ class PrescriptionCreateSerializer(serializers.ModelSerializer):
                 topic=Topic.PRESCRIPTION_READY,
                 priority=Priority.NORMAL,
                 title="New prescription",
-                body=f"A new prescription (#{rx.id}) has been created for you.",
+                body=(
+                    f"New prescription: {meds_summary} (Rx #{rx.id})." if meds_summary else f"A new prescription (Rx #{rx.id}) has been created for you."
+                ),
                 facility_id=getattr(facility, "id", None),
-                data={"prescription_id": rx.id},
-                action_url="/patient",
+                data={
+                    "prescription_id": rx.id,
+                    "patient_id": getattr(patient, "id", None),
+                    "patient_name": patient_name,
+                    "meds_summary": meds_summary,
+                },
+                action_url="/patient/pharmacy",
                 group_key=f"RX:{rx.id}:NEW",
             )
         except Exception:
@@ -370,8 +413,19 @@ class PrescriptionCreateSerializer(serializers.ModelSerializer):
                     topic=Topic.PRESCRIPTION_READY,
                     priority=Priority.NORMAL,
                     title="New outsourced prescription",
-                    body=f"Prescription #{rx.id} assigned to you.",
-                    data={"prescription_id": rx.id},
+                    body=(
+                        f"New outsourced prescription for {patient_name}: {meds_summary} (Rx #{rx.id})."
+                        if patient_name and meds_summary
+                        else (
+                            f"New outsourced prescription for {patient_name} (Rx #{rx.id})." if patient_name else f"New outsourced prescription (Rx #{rx.id})."
+                        )
+                    ),
+                    data={
+                        "prescription_id": rx.id,
+                        "patient_id": getattr(patient, "id", None),
+                        "patient_name": patient_name,
+                        "meds_summary": meds_summary,
+                    },
                     facility_id=getattr(facility, "id", None),
                     action_url="/provider/pharmacy",
                     group_key=f"RX:{rx.id}:ASSIGNED",

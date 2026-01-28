@@ -131,25 +131,25 @@ class NotificationViewSet(
     def read(self, request, pk=None):
         obj = self.get_object()
         obj.mark_read()
-        return Response(NotificationSerializer(obj).data)
+        return Response(self.get_serializer(obj).data)
 
     @action(detail=True, methods=["post"])
     def unread(self, request, pk=None):
         obj = self.get_object()
         obj.mark_unread()
-        return Response(NotificationSerializer(obj).data)
+        return Response(self.get_serializer(obj).data)
 
     @action(detail=True, methods=["post"])
     def archive(self, request, pk=None):
         obj = self.get_object()
         obj.archive()
-        return Response(NotificationSerializer(obj).data)
+        return Response(self.get_serializer(obj).data)
 
     @action(detail=True, methods=["post"])
     def unarchive(self, request, pk=None):
         obj = self.get_object()
         obj.unarchive()
-        return Response(NotificationSerializer(obj).data)
+        return Response(self.get_serializer(obj).data)
 
     @action(detail=False, methods=["post"])
     def read_all(self, request):
@@ -220,7 +220,7 @@ class NotificationViewSet(
         items = list(qs[:limit])
         unread = qs.filter(is_read=False).count()
         return Response({
-            "items": NotificationSerializer(items, many=True).data,
+            "items": self.get_serializer(items, many=True).data,
             "total_unread": unread,
         })
 

@@ -21,6 +21,7 @@ urlpatterns = [
     # Password reset
     path("password/reset/", views.password_reset_request),
     path("password/reset/confirm/", views.password_reset_confirm),
+    path("password/change/", views.password_change),
     path("visibility/", views.visibility_settings, name="visibility-settings"),
 
     # Facility staff management (SUPER_ADMIN only)

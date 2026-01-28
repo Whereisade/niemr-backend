@@ -1,4 +1,5 @@
 from django.db import transaction
+from django.db.models import Q
 from rest_framework import serializers
 from accounts.models import User
 from django.utils import timezone
@@ -204,21 +205,108 @@ class SelfRegisterSerializer(serializers.Serializer):
 
     @transaction.atomic
     def create(self, validated):
-        email = validated["email"].strip().lower()
+        email = (validated.get("email") or "").strip().lower()
         password = validated["password"]
+        phone = (validated.get("phone") or "").strip()
+
         if User.objects.filter(email__iexact=email).exists():
             raise serializers.ValidationError({"email": "Email is already registered."})
+
+        # If a facility already created a patient record (walk-in / registration desk),
+        # the patient may self-register later. In that case, link the new user account
+        # to the existing Patient record instead of creating a duplicate.
+        existing = None
+        try:
+            q = Q(user__isnull=True) & (
+                Q(email__iexact=email)
+                | (Q(phone__iexact=phone) if phone else Q(pk__in=[]))
+            )
+            existing = Patient.objects.filter(q).order_by("-created_at", "-id").first()
+        except Exception:
+            existing = None
 
         user = User.objects.create_user(
             email,
             password=password,
-            first_name=validated["first_name"],
-            last_name=validated["last_name"],
+            first_name=validated.get("first_name") or "",
+            last_name=validated.get("last_name") or "",
             role=UserRole.PATIENT,
         )
 
         p_fields = {k: v for k, v in validated.items() if k not in ("email", "password")}
+
+        if existing is not None:
+            patient = existing
+            # Always link the account.
+            patient.user = user
+
+            # Ensure patient record has email/phone stored for future matching/audit.
+            if getattr(patient, "email", "") in (None, ""):
+                patient.email = email
+            if phone and getattr(patient, "phone", "") in (None, ""):
+                patient.phone = phone
+
+            # Best-effort fill in missing demographic fields.
+            for field, val in p_fields.items():
+                if val in (None, ""):
+                    continue
+                try:
+                    cur = getattr(patient, field)
+                except Exception:
+                    continue
+                if cur in (None, ""):
+                    try:
+                        setattr(patient, field, val)
+                    except Exception:
+                        pass
+
+            patient.save()
+
+            # Optional: notify the user that their account was linked to an existing record.
+            try:
+                from notifications.services.notify import notify_user
+                from notifications.enums import Topic, Priority
+
+                facility_name = getattr(getattr(patient, "facility", None), "name", "")
+                body = "Your patient account has been created."
+                if facility_name:
+                    body = f"Your account has been linked to your medical record at {facility_name}."
+                notify_user(
+                    user=user,
+                    topic=Topic.ACCOUNT,
+                    title="Welcome to NIEMR",
+                    body=body,
+                    priority=Priority.NORMAL,
+                    data={"kind": "PATIENT_SELF_REGISTER", "linked_existing": True},
+                    group_key=f"WELCOME:{user.id}",
+                )
+            except Exception:
+                pass
+
+            return patient
+
+        # No existing record found → create a fresh patient profile.
+        # Store the email on the Patient record too.
+        p_fields["email"] = email
         patient = Patient.objects.create(user=user, **p_fields)
+
+        # Optional welcome notification.
+        try:
+            from notifications.services.notify import notify_user
+            from notifications.enums import Topic, Priority
+
+            notify_user(
+                user=user,
+                topic=Topic.ACCOUNT,
+                title="Welcome to NIEMR",
+                body="Your patient account has been created. You can now view appointments, results, and prescriptions.",
+                priority=Priority.NORMAL,
+                data={"kind": "PATIENT_SELF_REGISTER", "linked_existing": False},
+                group_key=f"WELCOME:{user.id}",
+            )
+        except Exception:
+            pass
+
         return patient
 
 
