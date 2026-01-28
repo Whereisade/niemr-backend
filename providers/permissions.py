@@ -10,4 +10,13 @@ class IsSelfProvider(BasePermission):
 class IsAdmin(BasePermission):
     def has_permission(self, request, view):
         u = request.user
-        return bool(u and u.is_authenticated and u.role in ADMIN_ROLES)
+        # Treat Django staff/superuser as admin too (needed for Super Admin console)
+        return bool(
+            u
+            and u.is_authenticated
+            and (
+                getattr(u, "is_superuser", False)
+                or getattr(u, "is_staff", False)
+                or getattr(u, "role", None) in ADMIN_ROLES
+            )
+        )

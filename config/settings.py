@@ -146,6 +146,7 @@ INSTALLED_APPS = [
     "drf_spectacular_sidecar",
     "storages",
     "rest_framework_nested",
+    "system_admin",
     # "corsheaders",
 ]
 
