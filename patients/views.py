@@ -1,6 +1,8 @@
-from django.db.models import Q, Prefetch, Count
+from django.db.models import Q, Prefetch, Count, Sum, F
+from django.db.models.functions import Coalesce
 from django.utils import timezone
 from django.shortcuts import get_object_or_404
+from decimal import Decimal
 from rest_framework import viewsets, mixins, status, permissions
 from rest_framework.decorators import action, api_view, permission_classes
 from rest_framework.permissions import IsAuthenticated, AllowAny
@@ -124,6 +126,134 @@ class PatientViewSet(viewsets.GenericViewSet,
             }:
                 PatientProviderLink.objects.get_or_create(patient=patient, provider=u)
         return patient
+
+
+
+    # =========================================================================
+    # PATIENT DASHBOARD SUMMARY
+    # =========================================================================
+
+    @action(detail=False, methods=["get"], url_path="dashboard-summary", permission_classes=[IsAuthenticated])
+    def dashboard_summary(self, request):
+        """Return patient dashboard summary metrics (patient + dependents).
+
+        Includes:
+          - total_visits (encounters count)
+          - billing outstanding balance + unpaid charges count
+          - quick health metrics (pending labs, active prescriptions, pending imaging)
+          - latest vitals snapshot
+        """
+        u = request.user
+        role = (getattr(u, "role", "") or "").upper()
+        if role != UserRole.PATIENT:
+            return Response({"detail": "Only patients can access this endpoint."}, status=403)
+
+        base_patient = getattr(u, "patient_profile", None)
+        if not base_patient:
+            return Response({"detail": "Patient profile not found."}, status=404)
+
+        # Patient scope: self + dependents
+        patient_ids = list(
+            Patient.objects.filter(Q(id=base_patient.id) | Q(parent_patient=base_patient))
+            .values_list("id", flat=True)
+        )
+
+        # Local imports to avoid circular dependencies
+        from encounters.models import Encounter
+        from appointments.models import Appointment
+        from billing.models import Charge
+        from billing.enums import ChargeStatus
+        from labs.models import LabOrder
+        from labs.enums import OrderStatus
+        from pharmacy.models import Prescription
+        from pharmacy.enums import RxStatus
+        from imaging.models import ImagingRequest
+        from imaging.enums import RequestStatus
+        from vitals.models import VitalSign
+
+        total_visits = Encounter.objects.filter(patient_id__in=patient_ids).count()
+        total_appointments = Appointment.objects.filter(patient_id__in=patient_ids).count()
+
+        # Billing outstanding = sum(charge.amount - allocated_total)
+        charges_qs = (
+            Charge.objects.filter(patient_id__in=patient_ids)
+            .exclude(status=ChargeStatus.VOID)
+            .annotate(allocated_total=Coalesce(Sum("allocations__amount"), Decimal("0.00")))
+            .annotate(outstanding=F("amount") - F("allocated_total"))
+        )
+
+        billing_agg = charges_qs.aggregate(
+            outstanding_balance=Coalesce(Sum("outstanding"), Decimal("0.00")),
+            unpaid_charges_count=Count(
+                "id",
+                filter=Q(status__in=[ChargeStatus.UNPAID, ChargeStatus.PARTIALLY_PAID]),
+            ),
+        )
+
+        outstanding_balance = billing_agg.get("outstanding_balance") or Decimal("0.00")
+        # Guard against negative values due to over-allocation
+        if outstanding_balance < 0:
+            outstanding_balance = Decimal("0.00")
+
+        unpaid_charges_count = int(billing_agg.get("unpaid_charges_count") or 0)
+
+        pending_labs = LabOrder.objects.filter(
+            patient_id__in=patient_ids,
+            status__in=[OrderStatus.PENDING, OrderStatus.IN_PROGRESS],
+        ).count()
+
+        active_prescriptions = Prescription.objects.filter(
+            patient_id__in=patient_ids,
+            status__in=[RxStatus.PRESCRIBED, RxStatus.PARTIALLY_DISPENSED],
+        ).count()
+
+        pending_imaging = ImagingRequest.objects.filter(
+            patient_id__in=patient_ids,
+            status__in=[RequestStatus.REQUESTED, RequestStatus.SCHEDULED],
+        ).count()
+
+        latest = (
+            VitalSign.objects.filter(patient_id__in=patient_ids)
+            .order_by("-measured_at", "-id")
+            .first()
+        )
+
+        latest_vitals = None
+        if latest:
+            latest_vitals = {
+                "id": latest.id,
+                "patient_id": latest.patient_id,
+                "measured_at": latest.measured_at,
+                "systolic": latest.systolic,
+                "diastolic": latest.diastolic,
+                "heart_rate": latest.heart_rate,
+                "temp_c": str(latest.temp_c) if latest.temp_c is not None else None,
+                "resp_rate": latest.resp_rate,
+                "spo2": latest.spo2,
+                "weight_kg": str(latest.weight_kg) if latest.weight_kg is not None else None,
+                "height_cm": str(latest.height_cm) if latest.height_cm is not None else None,
+                "bmi": str(latest.bmi) if latest.bmi is not None else None,
+                "overall": latest.overall,
+            }
+
+        return Response(
+            {
+                "patient_id": base_patient.id,
+                "scoped_patient_ids": patient_ids,
+                "total_visits": total_visits,
+                "total_appointments": total_appointments,
+                "billing": {
+                    "outstanding_balance": outstanding_balance,
+                    "unpaid_charges_count": unpaid_charges_count,
+                },
+                "metrics": {
+                    "pending_labs": pending_labs,
+                    "active_prescriptions": active_prescriptions,
+                    "pending_imaging": pending_imaging,
+                },
+                "latest_vitals": latest_vitals,
+            }
+        )
 
     # =========================================================================
     # DOCUMENT ACTIONS

@@ -59,53 +59,71 @@ class DrugViewSet(
         """
         u = self.request.user
         role = (getattr(u, "role", "") or "").upper()
-        
-        base_qs = Drug.objects.filter(is_active=True).order_by("name")
-        
-        # ✅ NEW: Support ?created_by=<user_id> query parameter
-        # This allows facility doctors to query independent pharmacy catalogs for outsourcing
+
+        # Base: active drugs
+        qs = Drug.objects.filter(is_active=True)
+
+        # ✅ Support ?created_by=<user_id> for outsourcing (facility doctors querying an independent pharmacy catalog)
         created_by_param = self.request.query_params.get("created_by")
         if created_by_param:
             try:
                 creator_id = int(created_by_param)
                 from django.contrib.auth import get_user_model
+
                 User = get_user_model()
-                
-                # Verify the creator is an independent PHARMACY user
+
+                # Only allow querying an *independent* pharmacy user
                 creator = User.objects.filter(
                     id=creator_id,
                     role=UserRole.PHARMACY,
-                    facility__isnull=True
+                    facility__isnull=True,
                 ).first()
-                
+
                 if creator:
-                    # Return drugs created by this independent pharmacy
-                    return base_qs.filter(created_by_id=creator_id, facility__isnull=True)
+                    qs = qs.filter(created_by_id=creator_id, facility__isnull=True)
                 else:
-                    # Invalid creator_id or not an independent pharmacy - return empty
-                    return base_qs.none()
+                    qs = qs.none()
             except (ValueError, TypeError):
-                # Invalid created_by parameter - ignore and continue with normal scoping
-                pass
-        
-        # Facility staff: see their facility's drugs
-        if getattr(u, "facility_id", None):
-            return base_qs.filter(facility_id=u.facility_id)
-        
-        # Independent pharmacy (no facility): see their own drugs
-        if role == UserRole.PHARMACY:
-            return base_qs.filter(created_by_id=u.id)
-        
-        # Admins/Super Admins without facility: can see all for admin purposes
-        if role in {UserRole.ADMIN, UserRole.SUPER_ADMIN}:
-            return base_qs
-        
-        # Patients: can see all active drugs for appointment booking
-        if role == UserRole.PATIENT:
-            return base_qs
-        
-        # Other independent providers: see drugs they created (if any)
-        return base_qs.filter(created_by_id=u.id)
+                # Bad param → treat as invalid and return empty (prevents leaking other scopes)
+                qs = qs.none()
+        else:
+            # Facility staff: see their facility's drugs
+            if getattr(u, "facility_id", None):
+                qs = qs.filter(facility_id=u.facility_id)
+
+            # Independent pharmacy (no facility): see their own drugs
+            elif role == UserRole.PHARMACY:
+                qs = qs.filter(created_by_id=u.id)
+
+            # Admins/Super Admins without facility: can see all for admin purposes
+            elif role in {UserRole.ADMIN, UserRole.SUPER_ADMIN}:
+                qs = qs
+
+            # Patients: can see all active drugs for appointment booking
+            elif role == UserRole.PATIENT:
+                qs = qs
+
+            # Other independent providers: see drugs they created (if any)
+            else:
+                qs = qs.filter(created_by_id=u.id)
+
+        # ✅ Search support: ?s= or ?q= (matches name/code/strength/form/route)
+        search = (
+            self.request.query_params.get("s")
+            or self.request.query_params.get("q")
+            or self.request.query_params.get("search")
+        )
+        if search and str(search).strip():
+            s = str(search).strip()
+            qs = qs.filter(
+                Q(name__icontains=s)
+                | Q(code__icontains=s)
+                | Q(strength__icontains=s)
+                | Q(form__icontains=s)
+                | Q(route__icontains=s)
+            )
+
+        return qs.order_by("name")
 
     def get_serializer_context(self):
         ctx = super().get_serializer_context()

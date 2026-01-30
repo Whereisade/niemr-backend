@@ -51,10 +51,11 @@ class LabTestViewSet(viewsets.GenericViewSet, mixins.ListModelMixin, mixins.Crea
         """
         u = self.request.user
         role = (getattr(u, "role", "") or "").upper()
-        
-        base_qs = LabTest.objects.filter(is_active=True).select_related('facility', 'created_by').order_by("name")
-        
-        # 🔥 NEW: Check for ?created_by query parameter (for outsourced catalog viewing)
+
+        base_qs = LabTest.objects.filter(is_active=True).select_related("facility", "created_by").order_by("name")
+        qs = base_qs
+
+        # 🔥 Supports ?created_by=<user_id> to view a specific independent lab's catalog
         created_by_param = self.request.query_params.get("created_by")
         if created_by_param:
             try:
@@ -62,42 +63,40 @@ class LabTestViewSet(viewsets.GenericViewSet, mixins.ListModelMixin, mixins.Crea
                 # Verify the creator is an independent lab (no facility)
                 from django.contrib.auth import get_user_model
                 User = get_user_model()
-                creator = User.objects.filter(
-                    id=creator_id,
-                    role=UserRole.LAB,
-                    facility__isnull=True
-                ).first()
-                
+                creator = User.objects.filter(id=creator_id, role=UserRole.LAB, facility__isnull=True).first()
+
                 if creator:
-                    # Return tests created by this independent lab
-                    return base_qs.filter(created_by_id=creator_id, facility__isnull=True)
+                    qs = base_qs.filter(created_by_id=creator_id, facility__isnull=True)
                 else:
-                    # Invalid creator - return empty queryset
-                    return base_qs.none()
+                    qs = base_qs.none()
             except (ValueError, TypeError):
                 # Invalid ID format - fall through to normal scoping
-                pass
-        
+                created_by_param = None
+
         # Standard scoping (when not viewing outsourced catalog)
-        
-        # Facility staff: see their facility's tests
-        if getattr(u, "facility_id", None):
-            return base_qs.filter(facility_id=u.facility_id)
-        
-        # Independent lab (no facility): see their own tests
-        if role == UserRole.LAB:
-            return base_qs.filter(created_by_id=u.id, facility__isnull=True)
-        
-        # Admins/Super Admins without facility: can see all for admin purposes
-        if role in {UserRole.ADMIN, UserRole.SUPER_ADMIN}:
-            return base_qs
-        
-        # Patients: can see all active tests for appointment booking
-        if role == UserRole.PATIENT:
-            return base_qs
-        
-        # Other independent providers: see tests they created (if any)
-        return base_qs.filter(created_by_id=u.id)
+        if not created_by_param:
+            if getattr(u, "facility_id", None):
+                # Facility staff: see their facility's tests
+                qs = base_qs.filter(facility_id=u.facility_id)
+            elif role == UserRole.LAB:
+                # Independent lab (no facility): see their own tests
+                qs = base_qs.filter(created_by_id=u.id, facility__isnull=True)
+            elif role in {UserRole.ADMIN, UserRole.SUPER_ADMIN}:
+                # Admins/Super Admins without facility: can see all for admin purposes
+                qs = base_qs
+            elif role == UserRole.PATIENT:
+                # Patients: can see all active tests for appointment booking
+                qs = base_qs
+            else:
+                # Other independent providers: see tests they created (if any)
+                qs = base_qs.filter(created_by_id=u.id)
+
+        # ✅ Catalog search: supports ?s=<text> (and ?q=<text> fallback)
+        s = (self.request.query_params.get("s") or self.request.query_params.get("q") or "").strip()
+        if s:
+            qs = qs.filter(Q(name__icontains=s) | Q(code__icontains=s) | Q(unit__icontains=s))
+
+        return qs
 
     def get_serializer_context(self):
         ctx = super().get_serializer_context()
@@ -1070,80 +1069,31 @@ class LabOrderViewSet(
                     logging.getLogger(__name__).warning(f"Billing ensure step failed for lab order {order.id}: {e}")
                 except Exception:
                     pass
-            # Build human-friendly summary for notifications (patient + staff).
-            try:
-                patient_name = None
-                if order.patient:
-                    try:
-                        patient_name = getattr(order.patient, 'full_name', None)
-                    except Exception:
-                        patient_name = None
-                    if not patient_name:
-                        parts = [getattr(order.patient, 'first_name', ''), getattr(order.patient, 'middle_name', ''), getattr(order.patient, 'last_name', '')]
-                        patient_name = ' '.join([p for p in parts if p]).strip() or f"Patient #{order.patient_id}"
 
-                # Pull up to a few test names for a compact summary.
-                names = []
-                try:
-                    for it in order.items.select_related('test').all():
-                        nm = None
-                        if getattr(it, 'test_id', None) and getattr(it, 'test', None):
-                            nm = getattr(it.test, 'name', None) or getattr(it.test, 'code', None)
-                        nm = nm or getattr(it, 'requested_name', None)
-                        if nm:
-                            names.append(str(nm))
-                except Exception:
-                    names = []
+            if order.patient:
+                notify_patient(
+                    patient=order.patient,
+                    topic=Topic.LAB_RESULT_READY,
+                    priority=Priority.NORMAL,
+                    title="Your lab result is ready",
+                    body=f"Lab order #{order.id} now has results.",
+                    data={"order_id": order.id},
+                    facility_id=order.facility_id,
+                )
 
-                def summarize(items, limit=3):
-                    items = [x for x in (items or []) if x]
-                    if not items:
-                        return ''
-                    head = items[:limit]
-                    tail = len(items) - len(head)
-                    s = ', '.join(head)
-                    if tail > 0:
-                        s += f" (+{tail} more)"
-                    return s
-
-                tests_summary = summarize(names)
-
-                if order.patient:
-                    patient_body = (
-                        f"Your lab results are ready: {tests_summary}." if tests_summary else f"Your lab results are ready (Order #{order.id})."
-                    )
-                    notify_patient(
-                        patient=order.patient,
-                        topic=Topic.LAB_RESULT_READY,
-                        priority=Priority.NORMAL,
-                        title="Your lab result is ready",
-                        body=patient_body,
-                        data={"order_id": order.id, "patient_id": order.patient_id, "tests_summary": tests_summary},
-                        facility_id=order.facility_id,
-                    )
-
-                # Ordering clinician
-                if getattr(order, "ordered_by_id", None):
-                    staff_body = (
-                        f"{patient_name} • {tests_summary}\nOrder #{order.id} results are ready for review."
-                        if patient_name and tests_summary
-                        else f"Lab order #{order.id} results are ready for review."
-                    )
-                    notify_user(
-                        user=order.ordered_by,
-                        topic=Topic.LAB_RESULT_READY,
-                        priority=Priority.HIGH,
-                        title="Lab results ready",
-                        body=staff_body,
-                        data={"order_id": order.id, "patient_id": order.patient_id, "tests_summary": tests_summary},
-                        facility_id=order.facility_id,
-                        action_url="/facility/labs",
-                        group_key=f"LAB:{order.id}:READY",
-                    )
-
-            except Exception:
-                # Never block completion flow because notifications failed
-                pass
+            # Ordering clinician
+            if getattr(order, "ordered_by_id", None):
+                notify_user(
+                    user=order.ordered_by,
+                    topic=Topic.LAB_RESULT_READY,
+                    priority=Priority.HIGH,
+                    title="Lab results ready",
+                    body=f"Lab order #{order.id} results are ready for review.",
+                    data={"order_id": order.id, "patient_id": order.patient_id},
+                    facility_id=order.facility_id,
+                    action_url="/facility/labs",
+                    group_key=f"LAB:{order.id}:READY",
+                )
 
         return Response(LabOrderItemReadSerializer(item).data)
 
