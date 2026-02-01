@@ -147,6 +147,7 @@ INSTALLED_APPS = [
     "storages",
     "rest_framework_nested",
     "system_admin",
+    "outreach",
     # "corsheaders",
 ]
 
