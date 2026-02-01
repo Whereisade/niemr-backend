@@ -215,6 +215,7 @@ class OutreachLabResult(models.Model):
     unit = models.CharField(max_length=60, blank=True, default="")
     notes = models.TextField(blank=True, default="")
     result_attachment = models.FileField(upload_to="outreach/labs/results/", null=True, blank=True)
+    result_data = models.JSONField(null=True, blank=True)
 
     recorded_by = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL, related_name="outreach_lab_results_recorded")
     recorded_at = models.DateTimeField(default=timezone.now)

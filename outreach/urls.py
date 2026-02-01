@@ -3,6 +3,7 @@ from rest_framework.routers import DefaultRouter
 
 from .views import (
     my_event,
+    colleagues,
     OutreachEventViewSet,
     OutreachPatientViewSet,
     OutreachVitalsViewSet,
@@ -50,6 +51,7 @@ router.register(r"exports", OutreachExportViewSet, basename="outreach-exports")
 urlpatterns = [
     path("", include(router.urls)),
     path("my-event/", my_event, name="outreach-my-event"),
+    path("colleagues/", colleagues, name="outreach-colleagues"),
     path("labs/", include(labs_router.urls)),
     path("pharmacy/", include(pharm_router.urls)),
 ]

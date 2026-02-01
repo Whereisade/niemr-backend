@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 from django.contrib.auth import get_user_model
 from rest_framework import serializers
 
@@ -63,13 +65,20 @@ class OutreachEventDetailSerializer(OutreachEventSerializer):
         fields = OutreachEventSerializer.Meta.fields + ["sites", "stats"]
 
     def get_stats(self, obj: OutreachEvent):
+        # Lightweight counts for dashboard + quick context
         return {
+            "sites": obj.sites.count(),
             "patients": obj.patients.count(),
             "staff": obj.staff_profiles.count(),
             "vitals": obj.vitals.count(),
             "encounters": obj.encounters.count(),
             "lab_orders": obj.lab_orders.count(),
+            "lab_results": obj.lab_results.count(),
             "dispenses": obj.dispenses.count(),
+            "immunizations": obj.immunizations.count(),
+            "blood_donations": obj.blood_donations.count(),
+            "counseling_sessions": obj.counseling_sessions.count(),
+            "maternal_records": obj.maternal_records.count(),
         }
 
 class OutreachStaffUserSerializer(serializers.ModelSerializer):
@@ -84,6 +93,18 @@ class OutreachStaffProfileSerializer(serializers.ModelSerializer):
     class Meta:
         model = OutreachStaffProfile
         fields = ["id", "user", "role_template", "permissions", "all_sites", "sites", "is_active", "disabled_at", "created_at"]
+
+class OutreachColleagueSerializer(serializers.ModelSerializer):
+    """Staff-safe colleague serializer (no permissions list)."""
+
+    user = OutreachStaffUserSerializer(read_only=True)
+    sites = OutreachSiteSerializer(many=True, read_only=True)
+
+    class Meta:
+        model = OutreachStaffProfile
+        fields = ["id", "user", "role_template", "all_sites", "sites", "is_active", "disabled_at", "created_at"]
+
+
 
 class OutreachStaffCreateSerializer(serializers.Serializer):
     email = serializers.CharField()
@@ -227,19 +248,69 @@ class OutreachLabOrderCreateSerializer(serializers.Serializer):
     notes = serializers.CharField(required=False, allow_blank=True, default="")
 
 class OutreachLabResultSerializer(serializers.ModelSerializer):
-    
+    # Supports structured multi-figure results (list of rows) in addition to simple result_value.
+    result_data = serializers.JSONField(required=False, allow_null=True)
+
     def validate(self, attrs):
-        # Allow either typed result_value OR a file attachment
-        result_value = attrs.get("result_value")
+        # Multipart form-data sends JSON fields as strings; parse if needed.
+        rd = attrs.get("result_data", None)
+        if isinstance(rd, str):
+            if rd.strip() == "":
+                attrs["result_data"] = None
+            else:
+                try:
+                    attrs["result_data"] = json.loads(rd)
+                except Exception:
+                    raise serializers.ValidationError({"result_data": "Invalid JSON."})
+
+        result_value = (attrs.get("result_value") or "").strip()
         attachment = attrs.get("result_attachment")
-        if (result_value is None or str(result_value).strip() == "") and not attachment:
-            raise serializers.ValidationError({"result_value": "Provide a result value or upload an attachment."})
+        result_data = attrs.get("result_data")
+
+        # Normalize list rows: keep only meaningful dicts
+        if isinstance(result_data, list):
+            cleaned = []
+            for row in result_data:
+                if not isinstance(row, dict):
+                    continue
+                # accept either 'ref_range' or 'reference_range'
+                rr = row.get("ref_range", row.get("reference_range", ""))
+                if rr is not None and "ref_range" not in row:
+                    row["ref_range"] = rr
+                if any(str(row.get(k, "")).strip() for k in ("name", "value", "unit", "ref_range")):
+                    cleaned.append({
+                        "name": str(row.get("name", "")).strip(),
+                        "value": str(row.get("value", "")).strip(),
+                        "unit": str(row.get("unit", "")).strip(),
+                        "ref_range": str(row.get("ref_range", "")).strip(),
+                    })
+            attrs["result_data"] = cleaned
+            result_data = cleaned
+
+        has_structured = bool(result_data)
+        if not result_value and not attachment and not has_structured:
+            raise serializers.ValidationError({"result_value": "Provide result value, result rows, or upload an attachment."})
+
         return attrs
 
     class Meta:
         model = OutreachLabResult
-        fields = ["id","outreach_event","lab_order","item","test_name","result_value","unit","notes","recorded_by","recorded_at","updated_at","result_attachment"]
-        read_only_fields = ["id","recorded_by","recorded_at","updated_at","outreach_event"]
+        fields = [
+            "id",
+            "outreach_event",
+            "lab_order",
+            "item",
+            "test_name",
+            "result_value",
+            "unit",
+            "notes",
+            "result_attachment",
+            "result_data",
+            "recorded_by",
+            "recorded_at",
+            "updated_at",
+        ]
+        read_only_fields = ["id", "recorded_by", "recorded_at", "updated_at", "outreach_event"]
 
 class OutreachDrugSerializer(serializers.ModelSerializer):
     class Meta:

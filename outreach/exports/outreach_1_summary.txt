@@ -1,0 +1,3 @@
+Outreach Ofa Community Outreach - summary
+
+{'event': {'id': 1, 'title': 'Ofa Community Outreach', 'status': 'ACTIVE', 'starts_at': datetime.datetime(2026, 1, 30, 3, 54, tzinfo=datetime.timezone.utc), 'ends_at': datetime.datetime(2026, 2, 5, 13, 40, tzinfo=datetime.timezone.utc), 'closed_at': None}, 'counts': {'sites': 1, 'staff': 5, 'patients': 2, 'vitals': 2, 'encounters': 1, 'lab_orders': 3, 'lab_results': 4, 'dispenses': 1, 'immunizations': 1, 'blood_donations': 1, 'counseling_sessions': 1, 'maternal_records': 1}, 'demographics': {'sex': [{'sex': 'MALE', 'count': 2}]}}

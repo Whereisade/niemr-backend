@@ -4,14 +4,15 @@ from django.utils.timezone import now
 from django.http import JsonResponse, HttpResponseBadRequest
 from django.views.decorators.csrf import csrf_exempt
 from rest_framework import viewsets, mixins
-from rest_framework.permissions import IsAuthenticated
+from rest_framework.permissions import IsAuthenticated, AllowAny
 from rest_framework_simplejwt.authentication import JWTAuthentication
 from rest_framework.decorators import action
 from rest_framework.response import Response
+from rest_framework.views import APIView
 
 from .models import Outbox, Template, EmailStatus
-from .serializers import OutboxSerializer, TemplateSerializer
-from emails.services.router import _attempt_send
+from .serializers import OutboxSerializer, TemplateSerializer, EnquirySerializer
+from emails.services.router import _attempt_send, send_email
 
 
 class OutboxViewSet(viewsets.GenericViewSet, mixins.ListModelMixin, mixins.RetrieveModelMixin):
@@ -99,3 +100,57 @@ def resend_webhook(request):
         ob.save(update_fields=["status", "last_error"])
 
     return JsonResponse({"ok": True})
+
+
+class EnquiryCreateView(APIView):
+    """Public website enquiry.
+
+    Accepts a small payload and sends it to the NIEMR team mailbox.
+    This endpoint is intentionally public (no auth) and uses a
+    honeypot field to reduce trivial bot spam.
+    """
+
+    permission_classes = [AllowAny]
+    authentication_classes = []
+
+    def post(self, request):
+        ser = EnquirySerializer(data=request.data)
+        ser.is_valid(raise_exception=True)
+        data = ser.validated_data
+
+        name = data.get("name", "").strip()
+        email = data.get("email", "").strip()
+        phone = (data.get("phone") or "").strip()
+        subject = (data.get("subject") or "").strip() or "Website enquiry"
+        message = (data.get("message") or "").strip()
+
+        subject_line = f"NIEMR Enquiry: {subject}"
+
+        # Keep the email human-friendly and easy to scan
+        html = f"""
+        <div style=\"font-family:ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial;line-height:1.5\">
+          <h2 style=\"margin:0 0 12px\">New website enquiry</h2>
+          <table style=\"border-collapse:collapse\">
+            <tr><td style=\"padding:4px 10px 4px 0;font-weight:600\">Name</td><td style=\"padding:4px 0\">{name}</td></tr>
+            <tr><td style=\"padding:4px 10px 4px 0;font-weight:600\">Email</td><td style=\"padding:4px 0\">{email}</td></tr>
+            <tr><td style=\"padding:4px 10px 4px 0;font-weight:600\">Phone</td><td style=\"padding:4px 0\">{phone or '—'}</td></tr>
+            <tr><td style=\"padding:4px 10px 4px 0;font-weight:600\">Subject</td><td style=\"padding:4px 0\">{subject}</td></tr>
+          </table>
+          <hr style=\"border:none;border-top:1px solid #e5e7eb;margin:16px 0\" />
+          <div style=\"white-space:pre-wrap\">{message}</div>
+        </div>
+        """.strip()
+
+        text = f"""New website enquiry\n\nName: {name}\nEmail: {email}\nPhone: {phone or '-'}\nSubject: {subject}\n\nMessage:\n{message}\n"""
+
+        # Use our email service router (SMTP/Resend) to queue + send.
+        send_email(
+            to="niemr.ai@outlook.com",
+            subject=subject_line,
+            html=html,
+            text=text,
+            reply_to=[email] if email else [],
+            tags=["website", "enquiry"],
+        )
+
+        return Response({"ok": True})

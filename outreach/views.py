@@ -54,7 +54,7 @@ from .permissions import (
 from .serializers import (
     OutreachEventSerializer, OutreachEventDetailSerializer,
     OutreachSiteSerializer,
-    OutreachStaffProfileSerializer, OutreachStaffCreateSerializer, OutreachStaffUpdateSerializer,
+    OutreachStaffProfileSerializer, OutreachColleagueSerializer, OutreachStaffCreateSerializer, OutreachStaffUpdateSerializer,
     OutreachPatientSerializer,
     OutreachVitalsSerializer,
     OutreachEncounterSerializer,
@@ -87,6 +87,18 @@ def _pick_event_for_request(request, *, allow_closed: bool = True) -> OutreachEv
             raise Http404("Outreach event not found.")
         if not allow_closed and event.status == OutreachStatus.CLOSED:
             raise Http404("Outreach event is closed.")
+
+        u = request.user
+        # Prevent cross-tenant access when event_id is supplied explicitly.
+        if is_outreach_super_admin(u):
+            # Platform admins can see all events; normal outreach super admins can only see their own.
+            if (not _is_platform_admin(u)) and event.created_by_id != getattr(u, 'id', None):
+                raise Http404("Outreach event not found.")
+        else:
+            # Staff must be actively assigned to this outreach.
+            if not get_profile_for_event(u, event):
+                raise Http404("Outreach event not found.")
+
         return event
 
     u = request.user
@@ -133,6 +145,21 @@ def _csv_bytes(headers, rows):
     return buf.getvalue().encode("utf-8")
 
 
+def _is_platform_admin(user) -> bool:
+    """Platform/system admin (Django staff/superuser) can see all outreach events."""
+    return bool(getattr(user, 'is_superuser', False) or getattr(user, 'is_staff', False))
+
+
+def _scope_super_admin_qs(qs, user):
+    """For Outreach Super Admin accounts (non-platform admins), scope queries to events they created.
+
+    This prevents one outreach super admin from seeing another super admin's outreach data.
+    """
+    if _is_platform_admin(user):
+        return qs
+    return qs.filter(outreach_event__created_by=user)
+
+
 # ------------------------
 # Staff Portal
 # ------------------------
@@ -146,19 +173,71 @@ def my_event(request):
     if is_outreach_super_admin(u):
         return Response({"detail": "Super admin does not have a single assigned outreach. Use /events/."}, status=200)
 
-    profiles = get_active_profiles(u).select_related("outreach_event")
+    profiles = (
+        get_active_profiles(u)
+        .select_related("outreach_event")
+        .prefetch_related("sites")
+    )
+
     data = []
     for p in profiles:
         evt = p.outreach_event
+
+        # Only expose sites the staff can actually use.
+        if p.all_sites:
+            accessible_sites = OutreachSite.objects.filter(outreach_event=evt).order_by("name")
+        else:
+            accessible_sites = p.sites.all().order_by("name")
+
+        evt_data = OutreachEventDetailSerializer(evt, context={"request": request}).data
+        evt_data["sites"] = OutreachSiteSerializer(accessible_sites, many=True).data
+
+        # Align sites count with what the staff can see/use.
+        stats = evt_data.get("stats") or {}
+        try:
+            stats = dict(stats)
+        except Exception:
+            stats = {}
+        stats["sites"] = accessible_sites.count()
+        evt_data["stats"] = stats
+
         data.append({
             "profile_id": p.id,
-            "event": OutreachEventSerializer(evt).data,
+            "event": evt_data,
             "permissions": p.permissions,
             "all_sites": p.all_sites,
-            "sites": OutreachSiteSerializer(p.sites.all(), many=True).data,
+            "sites": evt_data["sites"],
         })
+
     return Response({"assignments": data})
 
+
+
+@api_view(["GET"])
+@authentication_classes([JWTAuthentication])
+@permission_classes([IsAuthenticated, IsOutreachStaff])
+def colleagues(request):
+    """List colleagues (staff profiles) within the selected outreach event for staff users.
+
+    Super Admin should use the /events/{id}/staff endpoint instead.
+    """
+    u = request.user
+    if is_outreach_super_admin(u):
+        return Response({"detail": "Super admin should use /events/{id}/staff/."}, status=400)
+
+    try:
+        evt = _pick_event_for_request(request, allow_closed=True)
+    except Exception as e:
+        return Response({"detail": str(e)}, status=400)
+
+    qs = (
+        OutreachStaffProfile.objects
+        .filter(outreach_event=evt, is_active=True)
+        .select_related("user")
+        .prefetch_related("sites")
+        .order_by("user__first_name", "user__last_name", "user__email")
+    )
+    return Response(OutreachColleagueSerializer(qs, many=True, context={"request": request}).data)
 
 # ------------------------
 # Outreach Super Admin - Events
@@ -169,6 +248,16 @@ class OutreachEventViewSet(viewsets.ModelViewSet):
     serializer_class = OutreachEventSerializer
     authentication_classes = [JWTAuthentication]
     permission_classes = [IsAuthenticated, IsOutreachSuperAdmin]
+
+    def get_queryset(self):
+        qs = super().get_queryset()
+        u = getattr(self.request, 'user', None)
+        if not u:
+            return qs.none()
+        if _is_platform_admin(u):
+            return qs
+        return qs.filter(created_by=u)
+
 
     def get_serializer_class(self):
         if self.action in ("retrieve",):
@@ -588,6 +677,8 @@ class OutreachPatientViewSet(viewsets.ModelViewSet):
         u = self.request.user
         if is_outreach_super_admin(u):
             event_id = self.request.query_params.get("event_id")
+            if not _is_platform_admin(u):
+                qs = qs.filter(outreach_event__created_by=u)
             if event_id:
                 qs = qs.filter(outreach_event_id=event_id)
             return qs
@@ -692,6 +783,8 @@ class OutreachVitalsViewSet(viewsets.ModelViewSet):
         if patient_id:
             qs = qs.filter(patient_id=patient_id)
         if is_outreach_super_admin(u):
+            if not _is_platform_admin(u):
+                qs = qs.filter(outreach_event__created_by=u)
             if event_id:
                 qs = qs.filter(outreach_event_id=event_id)
             return qs
@@ -754,6 +847,8 @@ class OutreachEncounterViewSet(viewsets.ModelViewSet):
         if patient_id:
             qs = qs.filter(patient_id=patient_id)
         if is_outreach_super_admin(u):
+            if not _is_platform_admin(u):
+                qs = qs.filter(outreach_event__created_by=u)
             if event_id:
                 qs = qs.filter(outreach_event_id=event_id)
             return qs
@@ -813,9 +908,11 @@ class OutreachLabTestViewSet(viewsets.ModelViewSet):
         u = self.request.user
         event_id = self.request.query_params.get("event_id")
         if is_outreach_super_admin(u):
-            if event_id:
-                return qs.filter(outreach_event_id=event_id)
-            return qs.none()
+            if not event_id:
+                return qs.none()
+            if not _is_platform_admin(u):
+                qs = qs.filter(outreach_event__created_by=u)
+            return qs.filter(outreach_event_id=event_id)
         profiles = get_active_profiles(u)
         qs = qs.filter(outreach_event_id__in=list(profiles.values_list("outreach_event_id", flat=True)))
         if event_id:
@@ -949,9 +1046,11 @@ class OutreachLabOrderViewSet(viewsets.ModelViewSet):
         if patient_id:
             qs = qs.filter(patient_id=patient_id)
         if is_outreach_super_admin(u):
-            if event_id:
-                return qs.filter(outreach_event_id=event_id)
-            return qs.none()
+            if not event_id:
+                return qs.none()
+            if not _is_platform_admin(u):
+                qs = qs.filter(outreach_event__created_by=u)
+            return qs.filter(outreach_event_id=event_id)
         profiles = get_active_profiles(u)
         qs = qs.filter(outreach_event_id__in=list(profiles.values_list("outreach_event_id", flat=True)))
         if event_id:
@@ -1060,14 +1159,47 @@ class OutreachLabResultViewSet(viewsets.ModelViewSet):
         if patient_id:
             qs = qs.filter(lab_order__patient_id=patient_id)
         if is_outreach_super_admin(u):
-            if event_id:
-                return qs.filter(outreach_event_id=event_id)
-            return qs.none()
+            if not event_id:
+                return qs.none()
+            if not _is_platform_admin(u):
+                qs = qs.filter(outreach_event__created_by=u)
+            return qs.filter(outreach_event_id=event_id)
         profiles = get_active_profiles(u)
         qs = qs.filter(outreach_event_id__in=list(profiles.values_list("outreach_event_id", flat=True)))
         if event_id:
             qs = qs.filter(outreach_event_id=event_id)
         return qs
+
+    @action(detail=True, methods=["get"], url_path="attachment")
+    def attachment(self, request, pk=None):
+        """Download/view the uploaded attachment for a lab result (if any).
+
+        This route exists so the Next.js proxy (/api/proxy) can forward the file under /api.
+        """
+        obj = self.get_object()
+        evt = obj.outreach_event
+        ensure_module_enabled(evt, MODULE_LAB)
+
+        # basic permission gate: any lab-related capability should be enough to view the attachment
+        if not (
+            is_outreach_super_admin(request.user)
+            or has_outreach_permission(request.user, evt, PERM_LAB_ORDER_CREATE)
+            or has_outreach_permission(request.user, evt, PERM_LAB_ORDER_EDIT)
+            or has_outreach_permission(request.user, evt, PERM_LAB_RESULT_CREATE)
+            or has_outreach_permission(request.user, evt, PERM_LAB_RESULT_EDIT)
+            or has_outreach_permission(request.user, evt, PERM_LAB_CATALOG_VIEW)
+            or has_outreach_permission(request.user, evt, PERM_LAB_CATALOG_MANAGE)
+        ):
+            return Response({"detail": "Permission denied."}, status=403)
+
+        if not obj.result_attachment:
+            return Response({"detail": "No attachment for this result."}, status=404)
+
+        f = obj.result_attachment
+        filename = (getattr(f, 'name', '') or '').split('/')[-1] or f"result_{obj.id}"
+        resp = FileResponse(f.open('rb'), as_attachment=True, filename=filename)
+        return resp
+
 
     def create(self, request, *args, **kwargs):
         try:
@@ -1121,9 +1253,11 @@ class OutreachDrugViewSet(viewsets.ModelViewSet):
         u = self.request.user
         event_id = self.request.query_params.get("event_id")
         if is_outreach_super_admin(u):
-            if event_id:
-                return qs.filter(outreach_event_id=event_id)
-            return qs.none()
+            if not event_id:
+                return qs.none()
+            if not _is_platform_admin(u):
+                qs = qs.filter(outreach_event__created_by=u)
+            return qs.filter(outreach_event_id=event_id)
         profiles = get_active_profiles(u)
         qs = qs.filter(outreach_event_id__in=list(profiles.values_list("outreach_event_id", flat=True)))
         if event_id:
@@ -1259,9 +1393,11 @@ class OutreachDispenseViewSet(viewsets.ModelViewSet):
         if patient_id:
             qs = qs.filter(patient_id=patient_id)
         if is_outreach_super_admin(u):
-            if event_id:
-                return qs.filter(outreach_event_id=event_id)
-            return qs.none()
+            if not event_id:
+                return qs.none()
+            if not _is_platform_admin(u):
+                qs = qs.filter(outreach_event__created_by=u)
+            return qs.filter(outreach_event_id=event_id)
         profiles = get_active_profiles(u)
         qs = qs.filter(outreach_event_id__in=list(profiles.values_list("outreach_event_id", flat=True)))
         if event_id:
@@ -1340,9 +1476,11 @@ class OutreachVaccineCatalogViewSet(viewsets.ModelViewSet):
         u = self.request.user
         event_id = self.request.query_params.get("event_id")
         if is_outreach_super_admin(u):
-            if event_id:
-                return qs.filter(outreach_event_id=event_id)
-            return qs.none()
+            if not event_id:
+                return qs.none()
+            if not _is_platform_admin(u):
+                qs = qs.filter(outreach_event__created_by=u)
+            return qs.filter(outreach_event_id=event_id)
         profiles = get_active_profiles(u)
         qs = qs.filter(outreach_event_id__in=list(profiles.values_list("outreach_event_id", flat=True)))
         if event_id:
@@ -1470,9 +1608,11 @@ class OutreachImmunizationViewSet(viewsets.ModelViewSet):
         if patient_id:
             qs = qs.filter(patient_id=patient_id)
         if is_outreach_super_admin(u):
-            if event_id:
-                return qs.filter(outreach_event_id=event_id)
-            return qs.none()
+            if not event_id:
+                return qs.none()
+            if not _is_platform_admin(u):
+                qs = qs.filter(outreach_event__created_by=u)
+            return qs.filter(outreach_event_id=event_id)
         profiles = get_active_profiles(u)
         qs = qs.filter(outreach_event_id__in=list(profiles.values_list("outreach_event_id", flat=True)))
         if event_id:
@@ -1524,9 +1664,11 @@ class OutreachBloodDonationViewSet(viewsets.ModelViewSet):
         if patient_id:
             qs = qs.filter(patient_id=patient_id)
         if is_outreach_super_admin(u):
-            if event_id:
-                return qs.filter(outreach_event_id=event_id)
-            return qs.none()
+            if not event_id:
+                return qs.none()
+            if not _is_platform_admin(u):
+                qs = qs.filter(outreach_event__created_by=u)
+            return qs.filter(outreach_event_id=event_id)
         profiles = get_active_profiles(u)
         qs = qs.filter(outreach_event_id__in=list(profiles.values_list("outreach_event_id", flat=True)))
         if event_id:
@@ -1579,11 +1721,12 @@ class OutreachCounselingViewSet(viewsets.ModelViewSet):
         patient_id = self.request.query_params.get("patient_id")
         if patient_id:
             qs = qs.filter(patient_id=patient_id)
-
         if is_outreach_super_admin(u):
-            if event_id:
-                return qs.filter(outreach_event_id=event_id)
-            return qs.none()
+            if not event_id:
+                return qs.none()
+            if not _is_platform_admin(u):
+                qs = qs.filter(outreach_event__created_by=u)
+            return qs.filter(outreach_event_id=event_id)
 
         profiles = get_active_profiles(u)
         event_ids = list(profiles.values_list("outreach_event_id", flat=True))
@@ -1660,9 +1803,11 @@ class OutreachMaternalViewSet(viewsets.ModelViewSet):
         if patient_id:
             qs = qs.filter(patient_id=patient_id)
         if is_outreach_super_admin(u):
-            if event_id:
-                return qs.filter(outreach_event_id=event_id)
-            return qs.none()
+            if not event_id:
+                return qs.none()
+            if not _is_platform_admin(u):
+                qs = qs.filter(outreach_event__created_by=u)
+            return qs.filter(outreach_event_id=event_id)
         profiles = get_active_profiles(u)
         qs = qs.filter(outreach_event_id__in=list(profiles.values_list("outreach_event_id", flat=True)))
         if event_id:
@@ -1708,6 +1853,16 @@ class OutreachExportViewSet(viewsets.ReadOnlyModelViewSet):
     serializer_class = OutreachExportSerializer
     authentication_classes = [JWTAuthentication]
     permission_classes = [IsAuthenticated, IsOutreachSuperAdmin]
+
+    def get_queryset(self):
+        qs = super().get_queryset()
+        u = getattr(self.request, 'user', None)
+        if not u:
+            return qs.none()
+        if _is_platform_admin(u):
+            return qs
+        return qs.filter(outreach_event__created_by=u)
+
     queryset = OutreachExport.objects.all().select_related("outreach_event").order_by("-created_at")
 
 
