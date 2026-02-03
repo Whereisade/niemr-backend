@@ -376,7 +376,7 @@ class OutreachReferralSerializer(serializers.ModelSerializer):
     class Meta:
         model = OutreachReferral
         fields = [
-            "id","outreach_event","patient","notes","recorded_by","recorded_at","updated_at"
+            "id","outreach_event","patient","referred_to","referral_type","reason_for_referral","recorded_by","recorded_at","updated_at"
         ]
         read_only_fields = ["id","outreach_event","recorded_by","recorded_at","updated_at"]
 
@@ -385,7 +385,7 @@ class OutreachSurgicalSerializer(serializers.ModelSerializer):
     class Meta:
         model = OutreachSurgical
         fields = [
-            "id","outreach_event","patient","notes","recorded_by","recorded_at","updated_at"
+            "id","outreach_event","patient","procedure_category","procedure_name","indication","consent_obtained","status","recorded_by","recorded_at","updated_at"
         ]
         read_only_fields = ["id","outreach_event","recorded_by","recorded_at","updated_at"]
 
@@ -394,7 +394,7 @@ class OutreachEyeCheckSerializer(serializers.ModelSerializer):
     class Meta:
         model = OutreachEyeCheck
         fields = [
-            "id","outreach_event","patient","notes","recorded_by","recorded_at","updated_at"
+            "id","outreach_event","patient","visit_type","chief_complaint","visual_acuity_right","visual_acuity_left","eye_exam_findings","assessment_diagnosis","plan","status","recorded_by","recorded_at","updated_at"
         ]
         read_only_fields = ["id","outreach_event","recorded_by","recorded_at","updated_at"]
 
@@ -403,7 +403,7 @@ class OutreachDentalCheckSerializer(serializers.ModelSerializer):
     class Meta:
         model = OutreachDentalCheck
         fields = [
-            "id","outreach_event","patient","notes","recorded_by","recorded_at","updated_at"
+            "id","outreach_event","patient","visit_type","chief_complaint","oral_examination_findings","diagnosis_assessment","procedure_done","tooth_area_involved","plan","status","recorded_by","recorded_at","updated_at"
         ]
         read_only_fields = ["id","outreach_event","recorded_by","recorded_at","updated_at"]
 

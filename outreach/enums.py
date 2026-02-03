@@ -53,3 +53,25 @@ class Genotype(models.TextChoices):
     SC = 'SC', 'SC'
     CC = 'CC', 'CC'
 
+class ConsentObtained(models.TextChoices):
+    YES = 'YES', 'Yes'
+    NO = 'NO', 'No'
+    NA = 'NA', 'Not applicable'
+
+class SurgicalStatus(models.TextChoices):
+    PLANNED = 'PLANNED', 'Planned'
+    IN_PROGRESS = 'IN_PROGRESS', 'In progress'
+    DONE = 'DONE', 'Done'
+    ABORTED = 'ABORTED', 'Aborted'
+    REFERRED = 'REFERRED', 'Referred'
+
+class VisitType(models.TextChoices):
+    SCREENING = 'SCREENING', 'Screening'
+    COMPLAINT_BASED = 'COMPLAINT_BASED', 'Complaint-based'
+    FOLLOW_UP = 'FOLLOW_UP', 'Follow-up'
+
+class VisitStatus(models.TextChoices):
+    COMPLETED = 'COMPLETED', 'Completed'
+    NEEDS_FOLLOW_UP = 'NEEDS_FOLLOW_UP', 'Needs follow-up'
+    REFERRED = 'REFERRED', 'Referred'
+

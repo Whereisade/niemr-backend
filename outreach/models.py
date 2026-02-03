@@ -16,6 +16,10 @@ from .enums import (
     PregnancyStatus,
     BloodGroup,
     Genotype,
+    ConsentObtained,
+    SurgicalStatus,
+    VisitType,
+    VisitStatus,
 )
 
 def _bmi(weight_kg: Decimal | None, height_cm: Decimal | None):
@@ -320,6 +324,12 @@ class OutreachBloodDonation(models.Model):
 class OutreachReferral(models.Model):
     outreach_event = models.ForeignKey(OutreachEvent, on_delete=models.CASCADE, related_name="referrals")
     patient = models.ForeignKey(OutreachPatient, on_delete=models.CASCADE, related_name="referrals")
+
+    referred_to = models.CharField(max_length=255, blank=True, default="")
+    referral_type = models.CharField(max_length=80, blank=True, default="")
+    reason_for_referral = models.TextField(blank=True, default="")
+
+    # Legacy field (kept for backward compatibility; UI will not use)
     notes = models.TextField(blank=True, default="")
 
     recorded_by = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL, related_name="outreach_referrals_recorded")
@@ -330,6 +340,15 @@ class OutreachReferral(models.Model):
 class OutreachSurgical(models.Model):
     outreach_event = models.ForeignKey(OutreachEvent, on_delete=models.CASCADE, related_name="surgicals")
     patient = models.ForeignKey(OutreachPatient, on_delete=models.CASCADE, related_name="surgicals")
+
+    procedure_category = models.CharField(max_length=80, blank=True, default="")
+    procedure_name = models.CharField(max_length=255, blank=True, default="")
+    indication = models.TextField(blank=True, default="")
+
+    consent_obtained = models.CharField(max_length=10, choices=ConsentObtained.choices, default=ConsentObtained.NA)
+    status = models.CharField(max_length=20, choices=SurgicalStatus.choices, default=SurgicalStatus.PLANNED)
+
+    # Legacy field (kept for backward compatibility; UI will not use)
     notes = models.TextField(blank=True, default="")
 
     recorded_by = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL, related_name="outreach_surgicals_recorded")
@@ -340,6 +359,20 @@ class OutreachSurgical(models.Model):
 class OutreachEyeCheck(models.Model):
     outreach_event = models.ForeignKey(OutreachEvent, on_delete=models.CASCADE, related_name="eye_checks")
     patient = models.ForeignKey(OutreachPatient, on_delete=models.CASCADE, related_name="eye_checks")
+
+    visit_type = models.CharField(max_length=30, choices=VisitType.choices, default=VisitType.SCREENING)
+    chief_complaint = models.TextField(blank=True, default="")
+
+    visual_acuity_right = models.CharField(max_length=40, blank=True, default="")
+    visual_acuity_left = models.CharField(max_length=40, blank=True, default="")
+
+    eye_exam_findings = models.TextField(blank=True, default="")
+    assessment_diagnosis = models.CharField(max_length=255, blank=True, default="")
+    plan = models.TextField(blank=True, default="")
+
+    status = models.CharField(max_length=30, choices=VisitStatus.choices, default=VisitStatus.COMPLETED)
+
+    # Legacy field (kept for backward compatibility; UI will not use)
     notes = models.TextField(blank=True, default="")
 
     recorded_by = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL, related_name="outreach_eye_checks_recorded")
@@ -350,6 +383,20 @@ class OutreachEyeCheck(models.Model):
 class OutreachDentalCheck(models.Model):
     outreach_event = models.ForeignKey(OutreachEvent, on_delete=models.CASCADE, related_name="dental_checks")
     patient = models.ForeignKey(OutreachPatient, on_delete=models.CASCADE, related_name="dental_checks")
+
+    visit_type = models.CharField(max_length=30, choices=VisitType.choices, default=VisitType.SCREENING)
+    chief_complaint = models.TextField(blank=True, default="")
+
+    oral_examination_findings = models.TextField(blank=True, default="")
+    diagnosis_assessment = models.CharField(max_length=255, blank=True, default="")
+
+    procedure_done = models.CharField(max_length=80, blank=True, default="")
+    tooth_area_involved = models.CharField(max_length=120, blank=True, default="")
+
+    plan = models.TextField(blank=True, default="")
+    status = models.CharField(max_length=30, choices=VisitStatus.choices, default=VisitStatus.COMPLETED)
+
+    # Legacy field (kept for backward compatibility; UI will not use)
     notes = models.TextField(blank=True, default="")
 
     recorded_by = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL, related_name="outreach_dental_checks_recorded")
