@@ -1,0 +1,147 @@
+{% extends "outreach_reports/base.html" %}
+{% block content %}
+  <div class="row">
+    <div class="card kpi">
+      <div class="label">Patients registered</div>
+      <div class="value">{{ kpis.patients_registered }}</div>
+      <div class="muted small">Created in scope{% if filters.from or filters.to %} ({{ filters.from|default:"…" }} → {{ filters.to|default:"…" }}){% endif %}</div>
+    </div>
+    <div class="card kpi">
+      <div class="label">Patients seen</div>
+      <div class="value">{{ kpis.patients_seen }}</div>
+      <div class="muted small">Distinct patients with any activity</div>
+    </div>
+    <div class="card kpi">
+      <div class="label">Staff</div>
+      <div class="value">{{ kpis.staff }}</div>
+      <div class="muted small">Assigned to this outreach</div>
+    </div>
+    <div class="card kpi">
+      <div class="label">Sites</div>
+      <div class="value">{{ kpis.sites }}</div>
+      <div class="muted small">Coverage locations</div>
+    </div>
+  </div>
+
+  <div class="section grid2">
+    <div class="card">
+      <div class="h2">Demographics</div>
+      <div class="muted small">Age known for {{ demographics.age.known }}/{{ demographics.age.total }} patient(s). Youngest: {{ demographics.age.youngest|default:"—" }}, Oldest: {{ demographics.age.oldest|default:"—" }}</div>
+
+      <table>
+        <thead><tr><th>Sex</th><th style="width:80px;">Count</th></tr></thead>
+        <tbody>
+          {% for x in demographics.sex %}
+            <tr><td>{{ x.sex|default:"UNKNOWN" }}</td><td>{{ x.count }}</td></tr>
+          {% empty %}
+            <tr><td colspan="2" class="muted">No data</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+
+      <table>
+        <thead><tr><th>Age band</th><th style="width:80px;">Count</th></tr></thead>
+        <tbody>
+          {% for b in demographics.age.bands %}
+            <tr><td>{{ b.band }}</td><td>{{ b.count }}</td></tr>
+          {% empty %}
+            <tr><td colspan="2" class="muted">No age data</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+
+    <div class="card">
+      <div class="h2">Module usage</div>
+      <div class="muted small">Ranked by record count</div>
+      <table>
+        <thead>
+          <tr><th>Module</th><th style="width:70px;">Records</th><th style="width:70px;">Patients</th></tr>
+        </thead>
+        <tbody>
+          {% for m in modules %}
+            <tr>
+              <td>{{ m.label }}</td>
+              <td>{{ m.records }}</td>
+              <td>{{ m.patients }}</td>
+            </tr>
+          {% empty %}
+            <tr><td colspan="3" class="muted">No module activity</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="section grid2">
+    <div class="card">
+      <div class="h2">Top items</div>
+
+      <div class="muted small">Most used lab tests</div>
+      <table>
+        <thead><tr><th>Test</th><th style="width:80px;">Count</th></tr></thead>
+        <tbody>
+          {% for x in top_items.lab_tests %}
+            <tr><td>{{ x.test_name }}</td><td>{{ x.count }}</td></tr>
+          {% empty %}<tr><td colspan="2" class="muted">No lab data</td></tr>{% endfor %}
+        </tbody>
+      </table>
+
+      <div class="muted small" style="margin-top:10px;">Most used vaccines</div>
+      <table>
+        <thead><tr><th>Vaccine</th><th style="width:80px;">Count</th></tr></thead>
+        <tbody>
+          {% for x in top_items.vaccines %}
+            <tr><td>{{ x.vaccine_name }}</td><td>{{ x.count }}</td></tr>
+          {% empty %}<tr><td colspan="2" class="muted">No immunization data</td></tr>{% endfor %}
+        </tbody>
+      </table>
+
+      <div class="muted small" style="margin-top:10px;">Commonest drugs prescribed</div>
+      <table>
+        <thead><tr><th>Drug</th><th style="width:80px;">Count</th></tr></thead>
+        <tbody>
+          {% for x in top_items.drugs %}
+            <tr><td>{{ x.drug_name }}</td><td>{{ x.count }}</td></tr>
+          {% empty %}<tr><td colspan="2" class="muted">No pharmacy data</td></tr>{% endfor %}
+        </tbody>
+      </table>
+    </div>
+
+    <div class="card">
+      <div class="h2">Blood & maternal</div>
+
+      <div class="muted small">Blood group distribution</div>
+      <table>
+        <thead><tr><th>Blood group</th><th style="width:80px;">Count</th></tr></thead>
+        <tbody>
+          {% for x in blood.blood_group %}
+            <tr><td>{{ x.blood_group }}</td><td>{{ x.count }}</td></tr>
+          {% empty %}<tr><td colspan="2" class="muted">No blood donation data</td></tr>{% endfor %}
+        </tbody>
+      </table>
+
+      <div class="muted small" style="margin-top:10px;">Genotype distribution</div>
+      <table>
+        <thead><tr><th>Genotype</th><th style="width:80px;">Count</th></tr></thead>
+        <tbody>
+          {% for x in blood.genotype %}
+            <tr><td>{{ x.genotype }}</td><td>{{ x.count }}</td></tr>
+          {% empty %}<tr><td colspan="2" class="muted">No genotype data</td></tr>{% endfor %}
+        </tbody>
+      </table>
+
+      {% if maternal.pregnancy_status %}
+      <div class="muted small" style="margin-top:10px;">Pregnancy status (latest per patient)</div>
+      <table>
+        <thead><tr><th>Status</th><th style="width:80px;">Count</th></tr></thead>
+        <tbody>
+          {% for x in maternal.pregnancy_status %}
+            <tr><td>{{ x.pregnancy_status }}</td><td>{{ x.count }}</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+      {% endif %}
+    </div>
+  </div>
+{% endblock %}

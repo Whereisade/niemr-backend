@@ -2,13 +2,17 @@ from __future__ import annotations
 
 import csv
 import io
+import json
 import math
+from collections import Counter, defaultdict
 from datetime import datetime
 
+from django.conf import settings
 from django.core.files.base import ContentFile
 from django.db import transaction
 from django.db.models import Q, Count
 from django.http import FileResponse, Http404
+from django.template.loader import render_to_string
 from django.utils import timezone
 
 from rest_framework import viewsets, status
@@ -656,7 +660,7 @@ class OutreachEventViewSet(viewsets.ModelViewSet):
 
         if export_format == "json":
             # store as json file
-            content = ContentFile((str(payload)).encode("utf-8"), name=f"outreach_{evt.id}_{export_type}.json")
+            content = ContentFile(json.dumps(payload, default=str, indent=2).encode("utf-8"), name=f"outreach_{evt.id}_{export_type}.json")
             export.file.save(content.name, content, save=True)
         elif export_format == "csv":
             csv_bytes, filename = build_report_csv(evt, export_type, payload)
@@ -669,6 +673,31 @@ class OutreachEventViewSet(viewsets.ModelViewSet):
         log_action(evt, request.user, "outreach.export.created", {"export_id": export.id, "type": export_type, "format": export_format})
         return Response(OutreachExportSerializer(export).data, status=201)
 
+    
+    @action(detail=True, methods=["get"], url_path="insights")
+    def insights(self, request, pk=None):
+        """Analytics payload for the Insights tab (JSON).
+
+        Optional query params:
+        - site_id: filter by patient.site
+        - from: YYYY-MM-DD (inclusive)
+        - to: YYYY-MM-DD (inclusive)
+        """
+        evt = self.get_object()
+        filters = {}
+        site_id = request.query_params.get("site_id")
+        if site_id not in (None, "", "null", "None"):
+            filters["site_id"] = site_id
+        f = request.query_params.get("from") or request.query_params.get("start") or request.query_params.get("start_date")
+        t = request.query_params.get("to") or request.query_params.get("end") or request.query_params.get("end_date")
+        if f:
+            filters["from"] = f
+        if t:
+            filters["to"] = t
+
+        payload = build_insights_payload(evt, filters)
+        return Response(payload)
+
     @action(detail=True, methods=["get"], url_path=r"exports/(?P<export_id>[^/.]+)/download")
     def export_download(self, request, pk=None, export_id=None):
         evt = self.get_object()
@@ -676,7 +705,9 @@ class OutreachEventViewSet(viewsets.ModelViewSet):
         if not export or not export.file:
             return Response({"detail": "Export not found."}, status=404)
         try:
-            return FileResponse(export.file.open("rb"), as_attachment=True, filename=export.file.name.split("/")[-1])
+            inline = request.query_params.get("inline") in ("1","true","yes")
+            as_attach = not (inline and export.export_format == "pdf")
+            return FileResponse(export.file.open("rb"), as_attachment=as_attach, filename=export.file.name.split("/")[-1])
         except Exception:
             raise Http404("Export file missing")
 
@@ -700,6 +731,18 @@ class OutreachPatientViewSet(viewsets.ModelViewSet):
                 qs = qs.filter(outreach_event__created_by=u)
             if event_id:
                 qs = qs.filter(outreach_event_id=event_id)
+
+            q = (self.request.query_params.get("q") or "").strip()
+            if q:
+                qs = qs.filter(
+                    Q(full_name__icontains=q)
+                    | Q(patient_code__icontains=q)
+                    | Q(phone__icontains=q)
+                    | Q(email__icontains=q)
+                )
+            limit = self.request.query_params.get("limit")
+            if limit and str(limit).isdigit():
+                qs = qs[: int(limit)]
             return qs
 
         # staff must be scoped to event(s) and sites
@@ -717,6 +760,18 @@ class OutreachPatientViewSet(viewsets.ModelViewSet):
                 ctx = _staff_sites_context(u, evt)
                 if not ctx["all_sites"]:
                     qs = qs.filter(Q(site_id__in=ctx["site_ids"]) | Q(site__isnull=True))
+
+        q = (self.request.query_params.get("q") or "").strip()
+        if q:
+            qs = qs.filter(
+                Q(full_name__icontains=q)
+                | Q(patient_code__icontains=q)
+                | Q(phone__icontains=q)
+                | Q(email__icontains=q)
+            )
+        limit = self.request.query_params.get("limit")
+        if limit and str(limit).isdigit():
+            qs = qs[: int(limit)]
         return qs
 
     def create(self, request, *args, **kwargs):
@@ -806,6 +861,18 @@ class OutreachVitalsViewSet(viewsets.ModelViewSet):
                 qs = qs.filter(outreach_event__created_by=u)
             if event_id:
                 qs = qs.filter(outreach_event_id=event_id)
+
+            q = (self.request.query_params.get("q") or "").strip()
+            if q:
+                qs = qs.filter(
+                    Q(full_name__icontains=q)
+                    | Q(patient_code__icontains=q)
+                    | Q(phone__icontains=q)
+                    | Q(email__icontains=q)
+                )
+            limit = self.request.query_params.get("limit")
+            if limit and str(limit).isdigit():
+                qs = qs[: int(limit)]
             return qs
         profiles = get_active_profiles(u)
         qs = qs.filter(outreach_event_id__in=list(profiles.values_list("outreach_event_id", flat=True)))
@@ -870,6 +937,18 @@ class OutreachEncounterViewSet(viewsets.ModelViewSet):
                 qs = qs.filter(outreach_event__created_by=u)
             if event_id:
                 qs = qs.filter(outreach_event_id=event_id)
+
+            q = (self.request.query_params.get("q") or "").strip()
+            if q:
+                qs = qs.filter(
+                    Q(full_name__icontains=q)
+                    | Q(patient_code__icontains=q)
+                    | Q(phone__icontains=q)
+                    | Q(email__icontains=q)
+                )
+            limit = self.request.query_params.get("limit")
+            if limit and str(limit).isdigit():
+                qs = qs[: int(limit)]
             return qs
         profiles = get_active_profiles(u)
         qs = qs.filter(outreach_event_id__in=list(profiles.values_list("outreach_event_id", flat=True)))
@@ -2125,8 +2204,458 @@ class OutreachExportViewSet(viewsets.ReadOnlyModelViewSet):
 # Reporting helpers
 # ------------------------
 
+
+def _parse_date_like(value: str):
+    if not value:
+        return None
+    s = str(value).strip()
+    if not s or s.lower() in ("null","none"):
+        return None
+    # Accept YYYY-MM-DD or full ISO datetime
+    try:
+        if len(s) == 10 and s[4] == "-" and s[7] == "-":
+            return datetime.strptime(s, "%Y-%m-%d").date()
+        # fallback: try ISO
+        return datetime.fromisoformat(s.replace("Z","+00:00")).date()
+    except Exception:
+        return None
+
+
+def _apply_patient_site_filter(qs, filters: dict):
+    site_id = filters.get("site_id")
+    if site_id in (None, "", "null", "None"):
+        return qs
+    try:
+        return qs.filter(patient__site_id=site_id)
+    except Exception:
+        # for patient qs itself
+        return qs.filter(site_id=site_id)
+
+
+def _date_range(filters: dict):
+    start = _parse_date_like(filters.get("from") or filters.get("start") or filters.get("start_date"))
+    end = _parse_date_like(filters.get("to") or filters.get("end") or filters.get("end_date"))
+    return start, end
+
+
+def _apply_date_filter(qs, field: str, filters: dict):
+    start, end = _date_range(filters)
+    if start:
+        qs = qs.filter(**{f"{field}__date__gte": start})
+    if end:
+        qs = qs.filter(**{f"{field}__date__lte": end})
+    return qs
+
+
+def _age_band(age: int):
+    try:
+        a = int(age)
+    except Exception:
+        return None
+    if a < 0:
+        return None
+    if a <= 4:
+        return "0-4"
+    if a <= 9:
+        return "5-9"
+    if a <= 14:
+        return "10-14"
+    if a <= 19:
+        return "15-19"
+    if a <= 24:
+        return "20-24"
+    if a <= 34:
+        return "25-34"
+    if a <= 44:
+        return "35-44"
+    if a <= 54:
+        return "45-54"
+    if a <= 64:
+        return "55-64"
+    return "65+"
+
+
+def build_insights_payload(evt: OutreachEvent, filters: dict):
+    """Compute analytics for Insights and Executive Summary PDFs."""
+    filters = filters if isinstance(filters, dict) else {}
+
+    # Patients (registered)
+    p_qs = evt.patients.all().select_related("site")
+    start, end = _date_range(filters)
+    if start:
+        p_qs = p_qs.filter(created_at__date__gte=start)
+    if end:
+        p_qs = p_qs.filter(created_at__date__lte=end)
+    if filters.get("site_id") not in (None,"","null","None"):
+        p_qs = p_qs.filter(site_id=filters.get("site_id"))
+
+    patients_registered = p_qs.count()
+
+    # Build activity patient ids across modules
+    def ids_from(qs, field="patient_id"):
+        return set(qs.values_list(field, flat=True).distinct())
+
+    seen_ids = set()
+
+    vitals_qs = _apply_date_filter(evt.vitals.all(), "recorded_at", filters)
+    if filters.get("site_id"): vitals_qs = _apply_patient_site_filter(vitals_qs, filters)
+    seen_ids |= ids_from(vitals_qs)
+
+    enc_qs = _apply_date_filter(evt.encounters.all(), "recorded_at", filters)
+    if filters.get("site_id"): enc_qs = _apply_patient_site_filter(enc_qs, filters)
+    seen_ids |= ids_from(enc_qs)
+
+    lab_orders_qs = _apply_date_filter(evt.lab_orders.all(), "ordered_at", filters)
+    if filters.get("site_id"): lab_orders_qs = _apply_patient_site_filter(lab_orders_qs, filters)
+    seen_ids |= ids_from(lab_orders_qs)
+
+    lab_results_qs = _apply_date_filter(evt.lab_results.all(), "recorded_at", filters)
+    if filters.get("site_id"):
+        lab_results_qs = lab_results_qs.filter(lab_order__patient__site_id=filters.get("site_id"))
+    seen_ids |= set(lab_results_qs.values_list("lab_order__patient_id", flat=True).distinct())
+
+    disp_qs = _apply_date_filter(evt.dispenses.all(), "dispensed_at", filters)
+    if filters.get("site_id"): disp_qs = _apply_patient_site_filter(disp_qs, filters)
+    seen_ids |= ids_from(disp_qs)
+
+    imm_qs = _apply_date_filter(evt.immunizations.all(), "administered_at", filters)
+    if filters.get("site_id"): imm_qs = _apply_patient_site_filter(imm_qs, filters)
+    seen_ids |= ids_from(imm_qs)
+
+    blood_qs = _apply_date_filter(evt.blood_donations.all(), "recorded_at", filters)
+    if filters.get("site_id"):
+        blood_qs = blood_qs.filter(patient__site_id=filters.get("site_id"))
+    seen_ids |= ids_from(blood_qs)
+
+    coun_qs = _apply_date_filter(evt.counseling_sessions.all(), "recorded_at", filters)
+    if filters.get("site_id"): coun_qs = _apply_patient_site_filter(coun_qs, filters)
+    seen_ids |= ids_from(coun_qs)
+
+    mat_qs = _apply_date_filter(evt.maternal_records.all(), "recorded_at", filters)
+    if filters.get("site_id"): mat_qs = _apply_patient_site_filter(mat_qs, filters)
+    seen_ids |= ids_from(mat_qs)
+
+    ref_qs = _apply_date_filter(evt.referrals.all(), "recorded_at", filters)
+    if filters.get("site_id"): ref_qs = _apply_patient_site_filter(ref_qs, filters)
+    seen_ids |= ids_from(ref_qs)
+
+    surg_qs = _apply_date_filter(evt.surgicals.all(), "recorded_at", filters)
+    if filters.get("site_id"): surg_qs = _apply_patient_site_filter(surg_qs, filters)
+    seen_ids |= ids_from(surg_qs)
+
+    eye_qs = _apply_date_filter(evt.eye_checks.all(), "recorded_at", filters)
+    if filters.get("site_id"): eye_qs = _apply_patient_site_filter(eye_qs, filters)
+    seen_ids |= ids_from(eye_qs)
+
+    dental_qs = _apply_date_filter(evt.dental_checks.all(), "recorded_at", filters)
+    if filters.get("site_id"): dental_qs = _apply_patient_site_filter(dental_qs, filters)
+    seen_ids |= ids_from(dental_qs)
+
+    patients_seen = len(seen_ids)
+
+    # Demographics (on registered patients in filtered scope)
+    sex_counts = list(p_qs.values("sex").annotate(count=Count("id")).order_by("-count"))
+
+    age_known = p_qs.exclude(age_years__isnull=True).count()
+    age_total = patients_registered
+    ages = list(p_qs.exclude(age_years__isnull=True).values_list("age_years", flat=True))
+    youngest = min(ages) if ages else None
+    oldest = max(ages) if ages else None
+
+    bands = Counter()
+    for a in ages:
+        b = _age_band(a)
+        if b:
+            bands[b] += 1
+    # stable order
+    band_order = ["0-4","5-9","10-14","15-19","20-24","25-34","35-44","45-54","55-64","65+"]
+    age_bands = [{"band": b, "count": int(bands.get(b, 0))} for b in band_order if bands.get(b, 0)]
+
+    # Module usage
+    module_rows = []
+    def add_module(key, label, qs, patient_field="patient_id"):
+        module_rows.append({
+            "key": key,
+            "label": label,
+            "records": int(qs.count()),
+            "patients": int(qs.values_list(patient_field, flat=True).distinct().count()) if patient_field else None,
+        })
+
+    add_module("vitals", "Vitals", vitals_qs)
+    add_module("encounters", "Encounters", enc_qs)
+    add_module("lab_orders", "Lab Orders", lab_orders_qs)
+    # lab results anchored on order patient
+    module_rows.append({
+        "key": "lab_results",
+        "label": "Lab Results",
+        "records": int(lab_results_qs.count()),
+        "patients": int(lab_results_qs.values_list("lab_order__patient_id", flat=True).distinct().count()),
+    })
+    add_module("dispenses", "Pharmacy Dispenses", disp_qs)
+    add_module("immunizations", "Immunizations", imm_qs)
+    add_module("blood_donations", "Blood Donations", blood_qs, patient_field="patient_id")
+    add_module("counseling", "Counseling", coun_qs)
+    add_module("maternal", "Maternal", mat_qs)
+    add_module("referrals", "Referrals", ref_qs)
+    add_module("surgicals", "Surgicals", surg_qs)
+    add_module("eye_checks", "Eye Checks", eye_qs)
+    add_module("dental_checks", "Dental Checks", dental_qs)
+
+    module_rows.sort(key=lambda x: (x.get("records", 0) or 0), reverse=True)
+
+    # Top items
+    top_lab = []
+    try:
+        items_qs = OutreachLabOrderItem.objects.filter(lab_order__outreach_event=evt)
+        if start:
+            items_qs = items_qs.filter(created_at__date__gte=start)
+        if end:
+            items_qs = items_qs.filter(created_at__date__lte=end)
+        if filters.get("site_id"):
+            items_qs = items_qs.filter(lab_order__patient__site_id=filters.get("site_id"))
+        top_lab = list(
+            items_qs.values("test_name").exclude(test_name="").annotate(count=Count("id")).order_by("-count")[:10]
+        )
+    except Exception:
+        top_lab = []
+
+    top_vaccines = list(
+        imm_qs.values("vaccine_name").exclude(vaccine_name="").annotate(count=Count("id")).order_by("-count")[:10]
+    )
+
+    top_drugs = list(
+        disp_qs.values("drug_name").exclude(drug_name="").annotate(count=Count("id")).order_by("-count")[:10]
+    )
+
+    # Blood group/genotype distributions
+    blood_group = list(blood_qs.values("blood_group").annotate(count=Count("id")).order_by("-count"))
+    genotype = list(blood_qs.values("genotype").annotate(count=Count("id")).order_by("-count"))
+    blood_combo = list(blood_qs.values("blood_group","genotype").annotate(count=Count("id")).order_by("-count"))
+
+    # Maternal pregnancy breakdown: latest per patient within scope
+    preg_counts = []
+    if mat_qs.exists():
+        # latest maternal per patient (by recorded_at)
+        latest = {}
+        for r in mat_qs.order_by("patient_id", "-recorded_at").values("patient_id","pregnancy_status","recorded_at"):
+            pid = r["patient_id"]
+            if pid not in latest:
+                latest[pid] = r["pregnancy_status"]
+        c = Counter(latest.values())
+        preg_counts = [{"pregnancy_status": k, "count": int(v)} for k, v in c.most_common()]
+
+    return {
+        "event": {"id": evt.id, "title": evt.title, "status": evt.status, "starts_at": evt.starts_at, "ends_at": evt.ends_at, "closed_at": evt.closed_at},
+        "filters": {
+            "site_id": filters.get("site_id"),
+            "from": filters.get("from"),
+            "to": filters.get("to"),
+        },
+        "kpis": {
+            "sites": evt.sites.count(),
+            "staff": evt.staff_profiles.count(),
+            "patients_registered": patients_registered,
+            "patients_seen": patients_seen,
+            "vitals": int(vitals_qs.count()),
+            "encounters": int(enc_qs.count()),
+            "lab_orders": int(lab_orders_qs.count()),
+            "lab_results": int(lab_results_qs.count()),
+            "dispenses": int(disp_qs.count()),
+            "immunizations": int(imm_qs.count()),
+            "blood_donations": int(blood_qs.count()),
+            "counseling_sessions": int(coun_qs.count()),
+            "maternal_records": int(mat_qs.count()),
+            "referrals": int(ref_qs.count()),
+            "surgicals": int(surg_qs.count()),
+            "eye_checks": int(eye_qs.count()),
+            "dental_checks": int(dental_qs.count()),
+        },
+        "demographics": {
+            "sex": sex_counts,
+            "age": {
+                "known": age_known,
+                "total": age_total,
+                "youngest": youngest,
+                "oldest": oldest,
+                "bands": age_bands,
+            },
+        },
+        "modules": module_rows,
+        "top_items": {
+            "lab_tests": top_lab,
+            "vaccines": top_vaccines,
+            "drugs": top_drugs,
+        },
+        "blood": {
+            "blood_group": blood_group,
+            "genotype": genotype,
+            "combo": blood_combo[:20],
+        },
+        "maternal": {
+            "pregnancy_status": preg_counts,
+        },
+    }
+
+
+def build_patient_journey_payload(evt: OutreachEvent, patient_id: int, filters: dict):
+    filters = filters if isinstance(filters, dict) else {}
+    p = evt.patients.filter(id=patient_id).select_related("site").first()
+    if not p:
+        return {"detail": "Patient not found for this outreach event."}
+
+    # For journey we use the same date/site filters, but patient_id already scoped.
+    vitals = _apply_date_filter(evt.vitals.filter(patient_id=patient_id), "recorded_at", filters).order_by("-recorded_at")
+    encounters = _apply_date_filter(evt.encounters.filter(patient_id=patient_id), "recorded_at", filters).order_by("-recorded_at")
+    lab_orders = _apply_date_filter(evt.lab_orders.filter(patient_id=patient_id), "ordered_at", filters).order_by("-ordered_at")
+    lab_results = _apply_date_filter(evt.lab_results.filter(lab_order__patient_id=patient_id), "recorded_at", filters).order_by("-recorded_at")
+    dispenses = _apply_date_filter(evt.dispenses.filter(patient_id=patient_id), "dispensed_at", filters).order_by("-dispensed_at")
+    immunizations = _apply_date_filter(evt.immunizations.filter(patient_id=patient_id), "administered_at", filters).order_by("-administered_at")
+    blood_donations = _apply_date_filter(evt.blood_donations.filter(patient_id=patient_id), "recorded_at", filters).order_by("-recorded_at")
+    counseling = _apply_date_filter(evt.counseling_sessions.filter(patient_id=patient_id), "recorded_at", filters).order_by("-recorded_at")
+    maternal = _apply_date_filter(evt.maternal_records.filter(patient_id=patient_id), "recorded_at", filters).order_by("-recorded_at")
+    referrals = _apply_date_filter(evt.referrals.filter(patient_id=patient_id), "recorded_at", filters).order_by("-recorded_at")
+    surgicals = _apply_date_filter(evt.surgicals.filter(patient_id=patient_id), "recorded_at", filters).order_by("-recorded_at")
+    eye_checks = _apply_date_filter(evt.eye_checks.filter(patient_id=patient_id), "recorded_at", filters).order_by("-recorded_at")
+    dental_checks = _apply_date_filter(evt.dental_checks.filter(patient_id=patient_id), "recorded_at", filters).order_by("-recorded_at")
+
+    def as_rows(qs, when_field, title, detail_fields):
+        rows = []
+        for obj in qs[:250]:
+            when = getattr(obj, when_field, None)
+            meta = {}
+            for f in detail_fields:
+                meta[f] = getattr(obj, f, None)
+            rows.append({"when": when, "title": title, "meta": meta})
+        return rows
+
+    timeline = []
+    timeline += as_rows(vitals, "recorded_at", "Vitals", ["weight_kg","height_cm","bmi","bp_sys","bp_dia","temp_c","pulse","notes"])
+    timeline += as_rows(encounters, "recorded_at", "Encounter", ["complaint","diagnosis_tags","plan","notes","referral_note"])
+    for lo in lab_orders[:250]:
+        timeline.append({"when": lo.ordered_at, "title": "Lab Order", "meta": {"tests": [i.test_name for i in lo.items.all()]}})
+    timeline += as_rows(lab_results, "recorded_at", "Lab Result", ["test_name","result_value","unit","notes"])
+    timeline += as_rows(dispenses, "dispensed_at", "Pharmacy Dispense", ["drug_name","strength","quantity","instruction"])
+    timeline += as_rows(immunizations, "administered_at", "Immunization", ["vaccine_name","dose_number","route","notes"])
+    timeline += as_rows(blood_donations, "recorded_at", "Blood Donation", ["blood_group","genotype","eligibility_status","outcome","notes"])
+    timeline += as_rows(counseling, "recorded_at", "Counseling", ["topics","session_notes","visibility","duration_minutes"])
+    timeline += as_rows(maternal, "recorded_at", "Maternal", ["pregnancy_status","gestational_age_weeks","risk_flags","notes"])
+    # Referral etc fields may vary; safer to stringify
+    for r in referrals[:250]:
+        timeline.append({"when": r.recorded_at, "title": "Referral", "meta": {"summary": str(r)}})
+    for s in surgicals[:250]:
+        timeline.append({"when": s.recorded_at, "title": "Surgical", "meta": {"summary": str(s)}})
+    for e in eye_checks[:250]:
+        timeline.append({"when": e.recorded_at, "title": "Eye Check", "meta": {"summary": str(e)}})
+    for d in dental_checks[:250]:
+        timeline.append({"when": d.recorded_at, "title": "Dental Check", "meta": {"summary": str(d)}})
+
+    timeline.sort(key=lambda x: x.get("when") or timezone.now(), reverse=True)
+
+    return {
+        "event": {"id": evt.id, "title": evt.title},
+        "patient": {
+            "id": p.id,
+            "patient_code": p.patient_code,
+            "full_name": p.full_name,
+            "sex": p.sex,
+            "age_years": p.age_years,
+            "phone": p.phone,
+            "email": p.email,
+            "site": p.site.name if p.site else "",
+        },
+        "timeline": timeline,
+        "filters": {"from": filters.get("from"), "to": filters.get("to"), "site_id": filters.get("site_id")},
+    }
+
+
+def build_staff_activity_payload(evt: OutreachEvent, staff_user_id: int, filters: dict):
+    filters = filters if isinstance(filters, dict) else {}
+
+    staff = OutreachStaffProfile.objects.filter(outreach_event=evt, user_id=staff_user_id).select_related("user").first()
+    if not staff:
+        return {"detail": "Staff profile not found for this outreach event."}
+
+    # scope by sites on staff profile if any, unless super admin passed explicit site filter
+    site_id = filters.get("site_id")
+    site_scope_ids = list(staff.sites.values_list("id", flat=True))
+    if site_id:
+        site_scope_ids = [int(site_id)] if str(site_id).isdigit() else site_scope_ids
+
+    def patient_ids(qs):
+        if site_scope_ids:
+            qs = qs.filter(patient__site_id__in=site_scope_ids)
+        return set(qs.values_list("patient_id", flat=True).distinct())
+
+    vitals = _apply_date_filter(evt.vitals.filter(recorded_by_id=staff_user_id), "recorded_at", filters)
+    encounters = _apply_date_filter(evt.encounters.filter(recorded_by_id=staff_user_id), "recorded_at", filters)
+    lab_orders = _apply_date_filter(evt.lab_orders.filter(ordered_by_id=staff_user_id), "ordered_at", filters)
+    lab_results = _apply_date_filter(evt.lab_results.filter(recorded_by_id=staff_user_id), "recorded_at", filters)
+    dispenses = _apply_date_filter(evt.dispenses.filter(dispensed_by_id=staff_user_id), "dispensed_at", filters)
+    immunizations = _apply_date_filter(evt.immunizations.filter(administered_by_id=staff_user_id), "administered_at", filters)
+    blood = _apply_date_filter(evt.blood_donations.filter(recorded_by_id=staff_user_id), "recorded_at", filters)
+    counseling = _apply_date_filter(evt.counseling_sessions.filter(counselor_id=staff_user_id), "recorded_at", filters)
+    maternal = _apply_date_filter(evt.maternal_records.filter(recorded_by_id=staff_user_id), "recorded_at", filters)
+    referrals = _apply_date_filter(evt.referrals.filter(recorded_by_id=staff_user_id), "recorded_at", filters)
+    surgicals = _apply_date_filter(evt.surgicals.filter(recorded_by_id=staff_user_id), "recorded_at", filters)
+    eye = _apply_date_filter(evt.eye_checks.filter(recorded_by_id=staff_user_id), "recorded_at", filters)
+    dental = _apply_date_filter(evt.dental_checks.filter(recorded_by_id=staff_user_id), "recorded_at", filters)
+
+    ids = set()
+    for qs in [vitals, encounters, lab_orders, dispenses, immunizations, blood, counseling, maternal, referrals, surgicals, eye, dental]:
+        ids |= patient_ids(qs)
+
+    patients = list(
+        evt.patients.filter(id__in=ids).select_related("site").order_by("patient_code").values("id","patient_code","full_name","sex","age_years")
+    )
+
+    by_module = [
+        {"key":"vitals","label":"Vitals","records": int(vitals.count())},
+        {"key":"encounters","label":"Encounters","records": int(encounters.count())},
+        {"key":"lab_orders","label":"Lab Orders","records": int(lab_orders.count())},
+        {"key":"lab_results","label":"Lab Results","records": int(lab_results.count())},
+        {"key":"dispenses","label":"Pharmacy Dispenses","records": int(dispenses.count())},
+        {"key":"immunizations","label":"Immunizations","records": int(immunizations.count())},
+        {"key":"blood_donations","label":"Blood Donations","records": int(blood.count())},
+        {"key":"counseling","label":"Counseling","records": int(counseling.count())},
+        {"key":"maternal","label":"Maternal","records": int(maternal.count())},
+        {"key":"referrals","label":"Referrals","records": int(referrals.count())},
+        {"key":"surgicals","label":"Surgicals","records": int(surgicals.count())},
+        {"key":"eye_checks","label":"Eye Checks","records": int(eye.count())},
+        {"key":"dental_checks","label":"Dental Checks","records": int(dental.count())},
+    ]
+    by_module.sort(key=lambda x: x["records"], reverse=True)
+
+    u = staff.user
+    staff_name = f"{getattr(u,'first_name','')} {getattr(u,'last_name','')}".strip() or getattr(u,'email', 'Staff')
+
+    return {
+        "event": {"id": evt.id, "title": evt.title},
+        "staff": {"user_id": staff_user_id, "name": staff_name, "email": getattr(u,'email', None)},
+        "filters": {"from": filters.get("from"), "to": filters.get("to"), "site_id": filters.get("site_id")},
+        "counts": {"patients_served": len(ids)},
+        "by_module": by_module,
+        "patients": patients[:500],
+    }
+
 def build_report_payload(evt: OutreachEvent, export_type: str, filters: dict):
     export_type = (export_type or "summary").strip().lower()
+    filters = filters if isinstance(filters, dict) else {}
+
+    # Analytics-style reports
+    if export_type in ("executive_summary", "insights"):
+        return build_insights_payload(evt, filters)
+
+    if export_type == "patient_journey":
+        pid = filters.get("patient_id") or filters.get("patient") or filters.get("id")
+        if not pid:
+            return {"detail": "patient_id is required for patient_journey."}
+        return build_patient_journey_payload(evt, int(pid), filters)
+
+    if export_type in ("staff_patients", "staff_activity"):
+        sid = filters.get("staff_user_id") or filters.get("staff_id") or filters.get("user_id")
+        if not sid:
+            return {"detail": "staff_user_id is required for staff_patients."}
+        return build_staff_activity_payload(evt, int(sid), filters)
 
     if export_type == "summary":
         return {
@@ -2342,48 +2871,90 @@ def build_report_csv(evt: OutreachEvent, export_type: str, payload):
 
 
 def build_report_pdf(evt: OutreachEvent, export_type: str, payload):
-    """Generate a minimal PDF using reportlab if available.
+    """Generate a PDF using HTML+CSS templates (WeasyPrint).
 
-    We keep it simple to avoid extra template complexity.
+    Falls back to the existing text-based renderer only if WeasyPrint is unavailable.
     """
-    try:
-        from reportlab.lib.pagesizes import A4
-        from reportlab.pdfgen import canvas
-    except Exception:
-        # fallback as text bytes
-        text = f"Outreach {evt.title} - {export_type}\n\n{payload}"
-        return text.encode("utf-8"), f"outreach_{evt.id}_{export_type}.txt"
+    export_type = (export_type or "summary").strip().lower()
 
     filename = f"outreach_{evt.id}_{export_type}.pdf"
-    buf = io.BytesIO()
-    c = canvas.Canvas(buf, pagesize=A4)
-    width, height = A4
-    y = height - 40
-    c.setFont("Helvetica-Bold", 14)
-    c.drawString(40, y, f"Outreach Report: {evt.title}")
-    y -= 20
-    c.setFont("Helvetica", 10)
-    c.drawString(40, y, f"Type: {export_type} | Status: {evt.status} | Generated: {timezone.now().isoformat(timespec='seconds')}")
-    y -= 25
 
-    def write_line(line):
-        nonlocal y
-        if y < 60:
-            c.showPage()
-            y = height - 40
-            c.setFont("Helvetica", 10)
-        c.drawString(40, y, line[:110])
-        y -= 14
+    template = None
+    ctx = {
+        "generated_at": timezone.now(),
+        "event": {"id": evt.id, "title": evt.title, "status": evt.status, "starts_at": evt.starts_at, "ends_at": evt.ends_at},
+        "payload": payload,
+    }
 
-    if isinstance(payload, dict):
-        for k, v in payload.items():
-            write_line(f"{k}: {v}")
-    elif isinstance(payload, list):
-        for item in payload[:200]:
-            write_line(str(item))
+    if export_type in ("executive_summary", "insights"):
+        template = "outreach_reports/executive_summary.html"
+        ctx = {**ctx, **(payload or {})}
+        filename = f"outreach_{evt.id}_executive_summary.pdf"
+    elif export_type == "patient_journey":
+        template = "outreach_reports/patient_journey.html"
+        ctx = {**ctx, **(payload or {})}
+        filename = f"outreach_{evt.id}_patient_journey.pdf"
+    elif export_type in ("staff_patients", "staff_activity"):
+        template = "outreach_reports/staff_patients.html"
+        ctx = {**ctx, **(payload or {})}
+        filename = f"outreach_{evt.id}_staff_patients.pdf"
     else:
-        write_line(str(payload))
+        # For list-like exports (encounters, results, etc.) use a clean table template.
+        if isinstance(payload, list):
+            headers = list(payload[0].keys()) if payload else []
+            template = "outreach_reports/table_export.html"
+            ctx = {**ctx, "headers": headers, "rows": payload, "export_type": export_type}
+        else:
+            template = "outreach_reports/executive_summary.html"
+            # try to show something reasonable
+            if isinstance(payload, dict):
+                ctx = {**ctx, "kpis": payload.get("counts") or payload.get("kpis") or {}, "demographics": payload.get("demographics") or {}, "modules": payload.get("modules") or [], "top_items": payload.get("top_items") or {}}
 
-    c.showPage()
-    c.save()
-    return buf.getvalue(), filename
+    try:
+        from weasyprint import HTML
+        html = render_to_string(template, ctx)
+        pdf_bytes = HTML(string=html, base_url=str(settings.BASE_DIR)).write_pdf()
+        return pdf_bytes, filename
+    except Exception:
+        # fallback to the legacy text-based generator
+        try:
+            from reportlab.lib.pagesizes import A4
+            from reportlab.pdfgen import canvas
+        except Exception:
+            text = f"Outreach {evt.title} - {export_type}\n\n{payload}"
+            return text.encode("utf-8"), f"outreach_{evt.id}_{export_type}.txt"
+
+        from reportlab.lib.pagesizes import A4
+        from reportlab.pdfgen import canvas
+        buf = io.BytesIO()
+        c = canvas.Canvas(buf, pagesize=A4)
+        width, height = A4
+        y = height - 40
+        c.setFont("Helvetica-Bold", 14)
+        c.drawString(40, y, f"Outreach Report: {evt.title}")
+        y -= 20
+        c.setFont("Helvetica", 10)
+        c.drawString(40, y, f"Type: {export_type} | Status: {evt.status} | Generated: {timezone.now().isoformat(timespec='seconds')}")
+        y -= 25
+
+        def write_line(line):
+            nonlocal y
+            if y < 60:
+                c.showPage()
+                y = height - 40
+                c.setFont("Helvetica", 10)
+            c.drawString(40, y, str(line)[:110])
+            y -= 14
+
+        if isinstance(payload, dict):
+            for k, v in payload.items():
+                write_line(f"{k}: {v}")
+        elif isinstance(payload, list):
+            for item in payload[:200]:
+                write_line(str(item))
+        else:
+            write_line(str(payload))
+
+        c.showPage()
+        c.save()
+        return buf.getvalue(), filename

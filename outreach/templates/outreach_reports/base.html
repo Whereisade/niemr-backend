@@ -1,0 +1,104 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>{{ event.title }} - Outreach Report</title>
+  <style>
+    @page {
+      size: A4;
+      margin: 18mm 14mm;
+    }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+      color: #0f172a;
+      font-size: 12px;
+      line-height: 1.45;
+    }
+    .muted { color: #64748b; }
+    .small { font-size: 10px; }
+    .h1 { font-size: 20px; font-weight: 800; margin: 0; }
+    .h2 { font-size: 14px; font-weight: 700; margin: 18px 0 8px; }
+    .row { display: flex; gap: 10px; }
+    .card {
+      border: 1px solid #e2e8f0;
+      border-radius: 10px;
+      padding: 10px;
+      background: #ffffff;
+    }
+    .kpi {
+      flex: 1;
+    }
+    .kpi .label { font-size: 10px; color: #64748b; }
+    .kpi .value { font-size: 18px; font-weight: 800; margin-top: 2px; }
+    .pill {
+      display: inline-block;
+      padding: 2px 8px;
+      border-radius: 999px;
+      background: #eef2ff;
+      color: #3730a3;
+      font-size: 10px;
+      font-weight: 700;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin-top: 8px;
+    }
+    th, td {
+      border: 1px solid #e2e8f0;
+      padding: 6px 7px;
+      vertical-align: top;
+      word-break: break-word;
+    }
+    th {
+      background: #f8fafc;
+      font-size: 10px;
+      text-transform: uppercase;
+      letter-spacing: .04em;
+      color: #334155;
+    }
+    tr:nth-child(even) td { background: #fcfcfd; }
+    .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+    .grid3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 10px; }
+    .section { margin-top: 16px; }
+    .hr { height: 1px; background: #e2e8f0; margin: 12px 0; }
+    .footer {
+      position: running(footer);
+    }
+    .header {
+      position: running(header);
+    }
+    .page-footer {
+      font-size: 10px;
+      color: #64748b;
+      display: flex;
+      justify-content: space-between;
+      width: 100%;
+    }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <div class="row" style="justify-content: space-between; align-items: baseline;">
+      <div>
+        <div class="h1">{{ event.title }}</div>
+        <div class="muted">Outreach report</div>
+      </div>
+      <div class="muted small">
+        Generated: {{ generated_at|date:"Y-m-d H:i" }}
+      </div>
+    </div>
+    <div class="hr"></div>
+  </div>
+
+  {% block content %}{% endblock %}
+
+  <div class="footer">
+    <div class="hr"></div>
+    <div class="page-footer">
+      <div>NIEMR Outreach</div>
+      <div>Status: <span class="pill">{{ event.status }}</span></div>
+    </div>
+  </div>
+</body>
+</html>

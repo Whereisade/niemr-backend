@@ -1,0 +1,37 @@
+{% extends "outreach_reports/base.html" %}
+{% block content %}
+  <div class="h2">Patient journey</div>
+
+  <div class="card">
+    <div class="row" style="justify-content: space-between;">
+      <div>
+        <div style="font-weight:800; font-size:14px;">{{ patient.full_name }}</div>
+        <div class="muted small">{{ patient.patient_code }} • {{ patient.sex }} • {{ patient.age_years|default:"—" }} year(s)</div>
+        <div class="muted small">Site: {{ patient.site|default:"—" }}</div>
+      </div>
+      <div class="muted small" style="text-align:right;">
+        {% if filters.from or filters.to %}Scope: {{ filters.from|default:"…" }} → {{ filters.to|default:"…" }}{% endif %}
+      </div>
+    </div>
+  </div>
+
+  <div class="section">
+    <div class="card">
+      <div class="h2" style="margin-top:0;">Timeline</div>
+      <table>
+        <thead><tr><th style="width:120px;">When</th><th style="width:120px;">Module</th><th>Details</th></tr></thead>
+        <tbody>
+          {% for t in timeline %}
+            <tr>
+              <td class="small">{{ t.when|date:"Y-m-d H:i" }}</td>
+              <td>{{ t.title }}</td>
+              <td class="small">{{ t.meta }}</td>
+            </tr>
+          {% empty %}
+            <tr><td colspan="3" class="muted">No activity in scope</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+{% endblock %}

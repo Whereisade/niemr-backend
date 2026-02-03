@@ -1,0 +1,27 @@
+{% extends "outreach_reports/base.html" %}
+{% load outreach_report_tags %}
+{% block content %}
+  <div class="h2">{{ export_type|default:"Export" }} register</div>
+  <div class="muted small">Rows: {{ rows|length }}</div>
+
+  <table>
+    <thead>
+      <tr>
+        {% for h in headers %}
+          <th>{{ h }}</th>
+        {% endfor %}
+      </tr>
+    </thead>
+    <tbody>
+      {% for row in rows %}
+        <tr>
+          {% for h in headers %}
+            <td>{{ row|get_item:h }}</td>
+          {% endfor %}
+        </tr>
+      {% empty %}
+        <tr><td colspan="{{ headers|length }}" class="muted">No data</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+{% endblock %}

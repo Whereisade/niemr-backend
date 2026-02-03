@@ -1,0 +1,36 @@
+{% extends "outreach_reports/base.html" %}
+{% block content %}
+  <div class="h2">Staff activity</div>
+
+  <div class="card">
+    <div style="font-weight:800; font-size:14px;">{{ staff.name }}</div>
+    <div class="muted small">{{ staff.email }}</div>
+    <div class="muted small">Patients served: {{ counts.patients_served }}</div>
+  </div>
+
+  <div class="section grid2">
+    <div class="card">
+      <div class="h2" style="margin-top:0;">By module</div>
+      <table>
+        <thead><tr><th>Module</th><th style="width:80px;">Records</th></tr></thead>
+        <tbody>
+          {% for x in by_module %}
+            <tr><td>{{ x.label }}</td><td>{{ x.records }}</td></tr>
+          {% empty %}<tr><td colspan="2" class="muted">No activity</td></tr>{% endfor %}
+        </tbody>
+      </table>
+    </div>
+
+    <div class="card">
+      <div class="h2" style="margin-top:0;">Patients served</div>
+      <table>
+        <thead><tr><th>Code</th><th>Name</th><th>Sex</th><th>Age</th></tr></thead>
+        <tbody>
+          {% for p in patients %}
+            <tr><td>{{ p.patient_code }}</td><td>{{ p.full_name }}</td><td>{{ p.sex }}</td><td>{{ p.age_years|default:"—" }}</td></tr>
+          {% empty %}<tr><td colspan="4" class="muted">No patients</td></tr>{% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+{% endblock %}
