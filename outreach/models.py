@@ -14,6 +14,8 @@ from .enums import (
     BloodEligibilityStatus,
     BloodDonationOutcome,
     PregnancyStatus,
+    BloodGroup,
+    Genotype,
 )
 
 def _bmi(weight_kg: Decimal | None, height_cm: Decimal | None):
@@ -71,6 +73,9 @@ class OutreachStaffProfile(models.Model):
     outreach_event = models.ForeignKey(OutreachEvent, on_delete=models.CASCADE, related_name="staff_profiles")
     user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="outreach_profiles")
 
+    phone = models.CharField(max_length=30, blank=True, default="")
+    email = models.EmailField(blank=True, default="")
+
     role_template = models.CharField(max_length=40, blank=True, default="")
     permissions = models.JSONField(default=list, blank=True)
 
@@ -110,6 +115,7 @@ class OutreachPatient(models.Model):
     age_years = models.PositiveIntegerField(null=True, blank=True, validators=[MinValueValidator(0), MaxValueValidator(130)])
 
     phone = models.CharField(max_length=30, blank=True, default="")
+    email = models.EmailField(blank=True, default="")
     community = models.CharField(max_length=255, blank=True, default="")
     address = models.CharField(max_length=500, blank=True, default="")
 
@@ -123,6 +129,7 @@ class OutreachPatient(models.Model):
             models.Index(fields=["outreach_event", "patient_code"]),
             models.Index(fields=["outreach_event", "full_name"]),
             models.Index(fields=["outreach_event", "phone"]),
+            models.Index(fields=["outreach_event", "email"], name="outreach_patient_evt_email_idx"),
         ]
 
     def __str__(self):
@@ -297,6 +304,9 @@ class OutreachBloodDonation(models.Model):
     outreach_event = models.ForeignKey(OutreachEvent, on_delete=models.CASCADE, related_name="blood_donations")
     patient = models.ForeignKey(OutreachPatient, null=True, blank=True, on_delete=models.SET_NULL, related_name="blood_donations")
 
+    blood_group = models.CharField(max_length=10, choices=BloodGroup.choices, default=BloodGroup.UNKNOWN)
+    genotype = models.CharField(max_length=8, choices=Genotype.choices, default=Genotype.UNKNOWN)
+
     eligibility_status = models.CharField(max_length=20, choices=BloodEligibilityStatus.choices, default=BloodEligibilityStatus.ELIGIBLE)
     deferral_reason = models.TextField(blank=True, default="")
     outcome = models.CharField(max_length=20, choices=BloodDonationOutcome.choices, default=BloodDonationOutcome.COMPLETED)
@@ -304,6 +314,48 @@ class OutreachBloodDonation(models.Model):
 
     recorded_by = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL, related_name="outreach_blood_donations_recorded")
     recorded_at = models.DateTimeField(default=timezone.now)
+
+
+
+class OutreachReferral(models.Model):
+    outreach_event = models.ForeignKey(OutreachEvent, on_delete=models.CASCADE, related_name="referrals")
+    patient = models.ForeignKey(OutreachPatient, on_delete=models.CASCADE, related_name="referrals")
+    notes = models.TextField(blank=True, default="")
+
+    recorded_by = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL, related_name="outreach_referrals_recorded")
+    recorded_at = models.DateTimeField(default=timezone.now)
+    updated_at = models.DateTimeField(auto_now=True)
+
+
+class OutreachSurgical(models.Model):
+    outreach_event = models.ForeignKey(OutreachEvent, on_delete=models.CASCADE, related_name="surgicals")
+    patient = models.ForeignKey(OutreachPatient, on_delete=models.CASCADE, related_name="surgicals")
+    notes = models.TextField(blank=True, default="")
+
+    recorded_by = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL, related_name="outreach_surgicals_recorded")
+    recorded_at = models.DateTimeField(default=timezone.now)
+    updated_at = models.DateTimeField(auto_now=True)
+
+
+class OutreachEyeCheck(models.Model):
+    outreach_event = models.ForeignKey(OutreachEvent, on_delete=models.CASCADE, related_name="eye_checks")
+    patient = models.ForeignKey(OutreachPatient, on_delete=models.CASCADE, related_name="eye_checks")
+    notes = models.TextField(blank=True, default="")
+
+    recorded_by = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL, related_name="outreach_eye_checks_recorded")
+    recorded_at = models.DateTimeField(default=timezone.now)
+    updated_at = models.DateTimeField(auto_now=True)
+
+
+class OutreachDentalCheck(models.Model):
+    outreach_event = models.ForeignKey(OutreachEvent, on_delete=models.CASCADE, related_name="dental_checks")
+    patient = models.ForeignKey(OutreachPatient, on_delete=models.CASCADE, related_name="dental_checks")
+    notes = models.TextField(blank=True, default="")
+
+    recorded_by = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL, related_name="outreach_dental_checks_recorded")
+    recorded_at = models.DateTimeField(default=timezone.now)
+    updated_at = models.DateTimeField(auto_now=True)
+
 
 class OutreachCounseling(models.Model):
     outreach_event = models.ForeignKey(OutreachEvent, on_delete=models.CASCADE, related_name="counseling_sessions")

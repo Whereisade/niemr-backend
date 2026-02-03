@@ -32,3 +32,24 @@ class PregnancyStatus(models.TextChoices):
     PREGNANT = "PREGNANT", "Pregnant"
     NOT_PREGNANT = "NOT_PREGNANT", "Not pregnant"
     UNKNOWN = "UNKNOWN", "Unknown"
+
+class BloodGroup(models.TextChoices):
+    UNKNOWN = 'UNKNOWN', 'Unknown'
+    A_POS = 'A+', 'A+'
+    A_NEG = 'A-', 'A-'
+    B_POS = 'B+', 'B+'
+    B_NEG = 'B-', 'B-'
+    AB_POS = 'AB+', 'AB+'
+    AB_NEG = 'AB-', 'AB-'
+    O_POS = 'O+', 'O+'
+    O_NEG = 'O-', 'O-'
+
+class Genotype(models.TextChoices):
+    UNKNOWN = 'UNKNOWN', 'Unknown'
+    AA = 'AA', 'AA'
+    AS = 'AS', 'AS'
+    AC = 'AC', 'AC'
+    SS = 'SS', 'SS'
+    SC = 'SC', 'SC'
+    CC = 'CC', 'CC'
+

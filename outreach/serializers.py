@@ -23,6 +23,10 @@ from .models import (
     OutreachVaccineCatalog,
     OutreachImmunization,
     OutreachBloodDonation,
+    OutreachReferral,
+    OutreachSurgical,
+    OutreachEyeCheck,
+    OutreachDentalCheck,
     OutreachCounseling,
     OutreachMaternal,
     OutreachAuditLog,
@@ -79,6 +83,10 @@ class OutreachEventDetailSerializer(OutreachEventSerializer):
             "blood_donations": obj.blood_donations.count(),
             "counseling_sessions": obj.counseling_sessions.count(),
             "maternal_records": obj.maternal_records.count(),
+            "referrals": obj.referrals.count(),
+            "surgicals": obj.surgicals.count(),
+            "eye_checks": obj.eye_checks.count(),
+            "dental_checks": obj.dental_checks.count(),
         }
 
 class OutreachStaffUserSerializer(serializers.ModelSerializer):
@@ -92,7 +100,7 @@ class OutreachStaffProfileSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = OutreachStaffProfile
-        fields = ["id", "user", "role_template", "permissions", "all_sites", "sites", "is_active", "disabled_at", "created_at"]
+        fields = ["id", "user", "phone", "role_template", "permissions", "all_sites", "sites", "is_active", "disabled_at", "created_at"]
 
 class OutreachColleagueSerializer(serializers.ModelSerializer):
     """Staff-safe colleague serializer (no permissions list)."""
@@ -102,12 +110,13 @@ class OutreachColleagueSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = OutreachStaffProfile
-        fields = ["id", "user", "role_template", "all_sites", "sites", "is_active", "disabled_at", "created_at"]
+        fields = ["id", "user", "phone", "role_template", "all_sites", "sites", "is_active", "disabled_at", "created_at"]
 
 
 
 class OutreachStaffCreateSerializer(serializers.Serializer):
     email = serializers.CharField()
+    phone = serializers.CharField(required=False, allow_blank=True, default="")
     full_name = serializers.CharField(required=False, allow_blank=True, default="")
     role_template = serializers.CharField(required=False, allow_blank=True, default="")
     permissions = serializers.ListField(child=serializers.CharField(), required=False)
@@ -152,6 +161,7 @@ class OutreachStaffCreateSerializer(serializers.Serializer):
 
 class OutreachStaffUpdateSerializer(serializers.Serializer):
     # All fields optional; used for PATCH update on a staff profile
+    phone = serializers.CharField(required=False, allow_blank=True)
     role_template = serializers.CharField(required=False, allow_blank=True)
     permissions = serializers.ListField(child=serializers.CharField(), required=False)
     all_sites = serializers.BooleanField(required=False)
@@ -182,7 +192,7 @@ class OutreachPatientSerializer(serializers.ModelSerializer):
         model = OutreachPatient
         fields = [
             "id","outreach_event","site","patient_code","full_name","sex","date_of_birth","age_years",
-            "phone","community","address","created_by","created_at","updated_at"
+            "phone","email","community","address","created_by","created_at","updated_at"
         ]
         read_only_fields = ["id","patient_code","created_by","created_at","updated_at","outreach_event"]
 
@@ -356,10 +366,46 @@ class OutreachBloodDonationSerializer(serializers.ModelSerializer):
     class Meta:
         model = OutreachBloodDonation
         fields = [
-            "id","outreach_event","patient","eligibility_status","deferral_reason","outcome","notes",
+            "id","outreach_event","patient","blood_group","genotype","eligibility_status","deferral_reason","outcome","notes",
             "recorded_by","recorded_at"
         ]
         read_only_fields = ["id","outreach_event","recorded_by","recorded_at"]
+
+
+class OutreachReferralSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = OutreachReferral
+        fields = [
+            "id","outreach_event","patient","notes","recorded_by","recorded_at","updated_at"
+        ]
+        read_only_fields = ["id","outreach_event","recorded_by","recorded_at","updated_at"]
+
+
+class OutreachSurgicalSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = OutreachSurgical
+        fields = [
+            "id","outreach_event","patient","notes","recorded_by","recorded_at","updated_at"
+        ]
+        read_only_fields = ["id","outreach_event","recorded_by","recorded_at","updated_at"]
+
+
+class OutreachEyeCheckSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = OutreachEyeCheck
+        fields = [
+            "id","outreach_event","patient","notes","recorded_by","recorded_at","updated_at"
+        ]
+        read_only_fields = ["id","outreach_event","recorded_by","recorded_at","updated_at"]
+
+
+class OutreachDentalCheckSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = OutreachDentalCheck
+        fields = [
+            "id","outreach_event","patient","notes","recorded_by","recorded_at","updated_at"
+        ]
+        read_only_fields = ["id","outreach_event","recorded_by","recorded_at","updated_at"]
 
 class OutreachCounselingSerializer(serializers.ModelSerializer):
     # Accept legacy frontend values: NORMAL/SENSITIVE/RESTRICTED

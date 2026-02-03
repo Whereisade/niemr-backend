@@ -16,6 +16,10 @@ from .views import (
     OutreachImmunizationViewSet,
     OutreachVaccineCatalogViewSet,
     OutreachBloodDonationViewSet,
+    OutreachReferralViewSet,
+    OutreachSurgicalViewSet,
+    OutreachEyeCheckViewSet,
+    OutreachDentalCheckViewSet,
     OutreachCounselingViewSet,
     OutreachMaternalViewSet,
     OutreachExportViewSet,
@@ -42,6 +46,10 @@ pharm_router.register(r"dispenses", OutreachDispenseViewSet, basename="outreach-
 router.register(r"immunizations", OutreachImmunizationViewSet, basename="outreach-immunizations")
 router.register(r"immunization-vaccines", OutreachVaccineCatalogViewSet, basename="outreach-immunization-vaccines")
 router.register(r"blood-donations", OutreachBloodDonationViewSet, basename="outreach-blood-donations")
+router.register(r"referrals", OutreachReferralViewSet, basename="outreach-referrals")
+router.register(r"surgicals", OutreachSurgicalViewSet, basename="outreach-surgicals")
+router.register(r"eye-checks", OutreachEyeCheckViewSet, basename="outreach-eye-checks")
+router.register(r"dental-checks", OutreachDentalCheckViewSet, basename="outreach-dental-checks")
 router.register(r"counseling", OutreachCounselingViewSet, basename="outreach-counseling")
 router.register(r"maternal", OutreachMaternalViewSet, basename="outreach-maternal")
 

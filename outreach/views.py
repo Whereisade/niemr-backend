@@ -22,6 +22,7 @@ from rest_framework.exceptions import PermissionDenied
 from .constants import (
     MODULE_VITALS, MODULE_ENCOUNTER, MODULE_LAB, MODULE_PHARMACY, MODULE_IMMUNIZATION,
     MODULE_BLOOD_DONATION, MODULE_COUNSELING, MODULE_MATERNAL,
+    MODULE_REFERRAL, MODULE_SURGICALS, MODULE_EYE_CHECKS, MODULE_DENTAL_CHECKS,
     PERM_PATIENTS_VIEW, PERM_PATIENTS_CREATE, PERM_PATIENTS_EDIT,
     PERM_VITALS_CREATE, PERM_VITALS_EDIT,
     PERM_ENCOUNTER_CREATE, PERM_ENCOUNTER_EDIT,
@@ -34,6 +35,10 @@ from .constants import (
     PERM_BLOOD_CREATE, PERM_BLOOD_EDIT,
     PERM_COUNSELING_CREATE, PERM_COUNSELING_EDIT, PERM_COUNSELING_VIEW_SENSITIVE,
     PERM_MATERNAL_CREATE, PERM_MATERNAL_EDIT,
+    PERM_REFERRAL_CREATE, PERM_REFERRAL_EDIT,
+    PERM_SURGICALS_CREATE, PERM_SURGICALS_EDIT,
+    PERM_EYE_CHECKS_CREATE, PERM_EYE_CHECKS_EDIT,
+    PERM_DENTAL_CHECKS_CREATE, PERM_DENTAL_CHECKS_EDIT,
     PERM_REPORTS_VIEW, PERM_REPORTS_EXPORT,
 )
 from .enums import OutreachStatus, LabOrderStatus, CounselingVisibility
@@ -43,7 +48,9 @@ from .models import (
     OutreachPatient, OutreachVitals, OutreachEncounter,
     OutreachLabTestCatalog, OutreachLabOrder, OutreachLabOrderItem, OutreachLabResult,
     OutreachDrugCatalog, OutreachDispense, OutreachVaccineCatalog,
-    OutreachImmunization, OutreachBloodDonation, OutreachCounseling, OutreachMaternal,
+    OutreachImmunization, OutreachBloodDonation,
+    OutreachReferral, OutreachSurgical, OutreachEyeCheck, OutreachDentalCheck,
+    OutreachCounseling, OutreachMaternal,
     OutreachAuditLog, OutreachExport,
 )
 from .permissions import (
@@ -61,7 +68,9 @@ from .serializers import (
     OutreachLabTestSerializer, OutreachLabOrderSerializer, OutreachLabOrderCreateSerializer, OutreachLabResultSerializer,
     OutreachDrugSerializer, OutreachDispenseSerializer, OutreachDispenseCreateSerializer,
     OutreachVaccineCatalogSerializer,
-    OutreachImmunizationSerializer, OutreachBloodDonationSerializer, OutreachCounselingSerializer, OutreachMaternalSerializer,
+    OutreachImmunizationSerializer, OutreachBloodDonationSerializer,
+    OutreachReferralSerializer, OutreachSurgicalSerializer, OutreachEyeCheckSerializer, OutreachDentalCheckSerializer,
+    OutreachCounselingSerializer, OutreachMaternalSerializer,
     OutreachAuditLogSerializer,
     OutreachExportSerializer,
 )
@@ -348,6 +357,7 @@ class OutreachEventViewSet(viewsets.ModelViewSet):
         s.is_valid(raise_exception=True)
 
         email = s.validated_data["email"]
+        phone = (s.validated_data.get("phone") or "").strip()
         full_name = s.validated_data.get("full_name", "")
         role_template = s.validated_data.get("role_template", "")
         permissions = s.validated_data.get("permissions", [])
@@ -362,6 +372,7 @@ class OutreachEventViewSet(viewsets.ModelViewSet):
             outreach_event=evt,
             user=user,
             defaults={
+                "phone": phone,
                 "role_template": role_template,
                 "permissions": permissions,
                 "all_sites": bool(all_sites),
@@ -370,13 +381,14 @@ class OutreachEventViewSet(viewsets.ModelViewSet):
         )
         if not _:
             # update profile if exists
+            profile.phone = phone
             profile.role_template = role_template
             profile.permissions = permissions
             profile.all_sites = bool(all_sites)
             profile.is_active = True
             profile.disabled_at = None
             profile.created_by = request.user
-            profile.save(update_fields=["role_template","permissions","all_sites","is_active","disabled_at","created_by"])
+            profile.save(update_fields=["phone","role_template","permissions","all_sites","is_active","disabled_at","created_by"])
 
         if not profile.all_sites:
             sites = OutreachSite.objects.filter(outreach_event=evt, id__in=site_ids)
@@ -412,6 +424,9 @@ class OutreachEventViewSet(viewsets.ModelViewSet):
         s = OutreachStaffUpdateSerializer(data=request.data)
         s.is_valid(raise_exception=True)
         vd = s.validated_data
+
+        if "phone" in vd:
+            profile.phone = (vd.get("phone") or "").strip()
 
         if "role_template" in vd:
             profile.role_template = (vd.get("role_template") or "").strip()
@@ -542,6 +557,7 @@ class OutreachEventViewSet(viewsets.ModelViewSet):
             try:
                 row = {str(k).strip().lower(): v for k, v in (row or {}).items()}
                 email = (row.get("email") or "").strip().lower()
+                phone = (row.get("phone") or "").strip()
                 full_name = (row.get("full_name") or row.get("name") or "").strip()
                 if not email or "@" not in email:
                     errors.append(f"Row {idx}: invalid email")
@@ -563,6 +579,7 @@ class OutreachEventViewSet(viewsets.ModelViewSet):
                 # reuse same creation logic via serializer validation
                 s = OutreachStaffCreateSerializer(data={
                     "email": email,
+                    "phone": phone,
                     "full_name": full_name,
                     "role_template": role_template,
                     "permissions": permissions,
@@ -577,6 +594,7 @@ class OutreachEventViewSet(viewsets.ModelViewSet):
                 profile, profile_created = OutreachStaffProfile.objects.get_or_create(
                     outreach_event=evt, user=user,
                     defaults={
+                        "phone": phone,
                         "role_template": role_template,
                         "permissions": s.validated_data.get("permissions", []),
                         "all_sites": bool(all_sites),
@@ -587,12 +605,13 @@ class OutreachEventViewSet(viewsets.ModelViewSet):
                     created += 1
                 else:
                     updated += 1
+                    profile.phone = phone
                     profile.role_template = role_template
                     profile.permissions = s.validated_data.get("permissions", [])
                     profile.all_sites = bool(all_sites)
                     profile.is_active = True
                     profile.disabled_at = None
-                    profile.save(update_fields=["role_template","permissions","all_sites","is_active","disabled_at"])
+                    profile.save(update_fields=["phone","role_template","permissions","all_sites","is_active","disabled_at"])
 
                 if not profile.all_sites:
                     sites = OutreachSite.objects.filter(outreach_event=evt, id__in=site_ids)
@@ -1846,6 +1865,242 @@ class OutreachMaternalViewSet(viewsets.ModelViewSet):
 
 
 # ------------------------
+# Referral / Surgicals / Eye checks / Dental checks
+# ------------------------
+
+class OutreachReferralViewSet(viewsets.ModelViewSet):
+    serializer_class = OutreachReferralSerializer
+    authentication_classes = [JWTAuthentication]
+    permission_classes = [IsAuthenticated, IsOutreachStaff]
+    queryset = OutreachReferral.objects.all().select_related("outreach_event","patient").order_by("-recorded_at")
+
+    def get_queryset(self):
+        qs = super().get_queryset()
+        u = self.request.user
+        event_id = self.request.query_params.get("event_id")
+        patient_id = self.request.query_params.get("patient_id")
+        if patient_id:
+            qs = qs.filter(patient_id=patient_id)
+        if is_outreach_super_admin(u):
+            if not event_id:
+                return qs.none()
+            if not _is_platform_admin(u):
+                qs = qs.filter(outreach_event__created_by=u)
+            return qs.filter(outreach_event_id=event_id)
+        profiles = get_active_profiles(u)
+        qs = qs.filter(outreach_event_id__in=list(profiles.values_list("outreach_event_id", flat=True)))
+        if event_id:
+            qs = qs.filter(outreach_event_id=event_id)
+        return qs
+
+    def create(self, request, *args, **kwargs):
+        try:
+            evt = _pick_event_for_request(request, allow_closed=False)
+        except Exception as e:
+            return Response({"detail": str(e)}, status=400)
+        ensure_module_enabled(evt, MODULE_REFERRAL)
+        deny = _require_perm(request, evt, PERM_REFERRAL_CREATE)
+        if deny: return deny
+        ensure_outreach_writeable(evt)
+
+        s = self.get_serializer(data=request.data)
+        s.is_valid(raise_exception=True)
+        patient = OutreachPatient.objects.filter(id=s.validated_data["patient"].id, outreach_event=evt).first()
+        if not patient:
+            return Response({"detail": "Invalid patient for this outreach."}, status=400)
+        if patient.site and not _validate_patient_site(request, evt, patient.site):
+            return Response({"detail": "You are not assigned to this site."}, status=403)
+
+        obj = s.save(outreach_event=evt, recorded_by=request.user)
+        log_action(evt, request.user, "outreach.referral.created", {"id": obj.id, "patient_id": patient.id})
+        return Response(self.get_serializer(obj).data, status=201)
+
+    def update(self, request, *args, **kwargs):
+        obj = self.get_object()
+        evt = obj.outreach_event
+        ensure_module_enabled(evt, MODULE_REFERRAL)
+        if evt.status == OutreachStatus.CLOSED:
+            return Response({"detail": "Closed outreach is read-only."}, status=403)
+        deny = _require_perm(request, evt, PERM_REFERRAL_EDIT)
+        if deny: return deny
+        return super().update(request, *args, **kwargs)
+
+
+class OutreachSurgicalViewSet(viewsets.ModelViewSet):
+    serializer_class = OutreachSurgicalSerializer
+    authentication_classes = [JWTAuthentication]
+    permission_classes = [IsAuthenticated, IsOutreachStaff]
+    queryset = OutreachSurgical.objects.all().select_related("outreach_event","patient").order_by("-recorded_at")
+
+    def get_queryset(self):
+        qs = super().get_queryset()
+        u = self.request.user
+        event_id = self.request.query_params.get("event_id")
+        patient_id = self.request.query_params.get("patient_id")
+        if patient_id:
+            qs = qs.filter(patient_id=patient_id)
+        if is_outreach_super_admin(u):
+            if not event_id:
+                return qs.none()
+            if not _is_platform_admin(u):
+                qs = qs.filter(outreach_event__created_by=u)
+            return qs.filter(outreach_event_id=event_id)
+        profiles = get_active_profiles(u)
+        qs = qs.filter(outreach_event_id__in=list(profiles.values_list("outreach_event_id", flat=True)))
+        if event_id:
+            qs = qs.filter(outreach_event_id=event_id)
+        return qs
+
+    def create(self, request, *args, **kwargs):
+        try:
+            evt = _pick_event_for_request(request, allow_closed=False)
+        except Exception as e:
+            return Response({"detail": str(e)}, status=400)
+        ensure_module_enabled(evt, MODULE_SURGICALS)
+        deny = _require_perm(request, evt, PERM_SURGICALS_CREATE)
+        if deny: return deny
+        ensure_outreach_writeable(evt)
+
+        s = self.get_serializer(data=request.data)
+        s.is_valid(raise_exception=True)
+        patient = OutreachPatient.objects.filter(id=s.validated_data["patient"].id, outreach_event=evt).first()
+        if not patient:
+            return Response({"detail": "Invalid patient for this outreach."}, status=400)
+        if patient.site and not _validate_patient_site(request, evt, patient.site):
+            return Response({"detail": "You are not assigned to this site."}, status=403)
+
+        obj = s.save(outreach_event=evt, recorded_by=request.user)
+        log_action(evt, request.user, "outreach.surgicals.created", {"id": obj.id, "patient_id": patient.id})
+        return Response(self.get_serializer(obj).data, status=201)
+
+    def update(self, request, *args, **kwargs):
+        obj = self.get_object()
+        evt = obj.outreach_event
+        ensure_module_enabled(evt, MODULE_SURGICALS)
+        if evt.status == OutreachStatus.CLOSED:
+            return Response({"detail": "Closed outreach is read-only."}, status=403)
+        deny = _require_perm(request, evt, PERM_SURGICALS_EDIT)
+        if deny: return deny
+        return super().update(request, *args, **kwargs)
+
+
+class OutreachEyeCheckViewSet(viewsets.ModelViewSet):
+    serializer_class = OutreachEyeCheckSerializer
+    authentication_classes = [JWTAuthentication]
+    permission_classes = [IsAuthenticated, IsOutreachStaff]
+    queryset = OutreachEyeCheck.objects.all().select_related("outreach_event","patient").order_by("-recorded_at")
+
+    def get_queryset(self):
+        qs = super().get_queryset()
+        u = self.request.user
+        event_id = self.request.query_params.get("event_id")
+        patient_id = self.request.query_params.get("patient_id")
+        if patient_id:
+            qs = qs.filter(patient_id=patient_id)
+        if is_outreach_super_admin(u):
+            if not event_id:
+                return qs.none()
+            if not _is_platform_admin(u):
+                qs = qs.filter(outreach_event__created_by=u)
+            return qs.filter(outreach_event_id=event_id)
+        profiles = get_active_profiles(u)
+        qs = qs.filter(outreach_event_id__in=list(profiles.values_list("outreach_event_id", flat=True)))
+        if event_id:
+            qs = qs.filter(outreach_event_id=event_id)
+        return qs
+
+    def create(self, request, *args, **kwargs):
+        try:
+            evt = _pick_event_for_request(request, allow_closed=False)
+        except Exception as e:
+            return Response({"detail": str(e)}, status=400)
+        ensure_module_enabled(evt, MODULE_EYE_CHECKS)
+        deny = _require_perm(request, evt, PERM_EYE_CHECKS_CREATE)
+        if deny: return deny
+        ensure_outreach_writeable(evt)
+
+        s = self.get_serializer(data=request.data)
+        s.is_valid(raise_exception=True)
+        patient = OutreachPatient.objects.filter(id=s.validated_data["patient"].id, outreach_event=evt).first()
+        if not patient:
+            return Response({"detail": "Invalid patient for this outreach."}, status=400)
+        if patient.site and not _validate_patient_site(request, evt, patient.site):
+            return Response({"detail": "You are not assigned to this site."}, status=403)
+
+        obj = s.save(outreach_event=evt, recorded_by=request.user)
+        log_action(evt, request.user, "outreach.eye_checks.created", {"id": obj.id, "patient_id": patient.id})
+        return Response(self.get_serializer(obj).data, status=201)
+
+    def update(self, request, *args, **kwargs):
+        obj = self.get_object()
+        evt = obj.outreach_event
+        ensure_module_enabled(evt, MODULE_EYE_CHECKS)
+        if evt.status == OutreachStatus.CLOSED:
+            return Response({"detail": "Closed outreach is read-only."}, status=403)
+        deny = _require_perm(request, evt, PERM_EYE_CHECKS_EDIT)
+        if deny: return deny
+        return super().update(request, *args, **kwargs)
+
+
+class OutreachDentalCheckViewSet(viewsets.ModelViewSet):
+    serializer_class = OutreachDentalCheckSerializer
+    authentication_classes = [JWTAuthentication]
+    permission_classes = [IsAuthenticated, IsOutreachStaff]
+    queryset = OutreachDentalCheck.objects.all().select_related("outreach_event","patient").order_by("-recorded_at")
+
+    def get_queryset(self):
+        qs = super().get_queryset()
+        u = self.request.user
+        event_id = self.request.query_params.get("event_id")
+        patient_id = self.request.query_params.get("patient_id")
+        if patient_id:
+            qs = qs.filter(patient_id=patient_id)
+        if is_outreach_super_admin(u):
+            if not event_id:
+                return qs.none()
+            if not _is_platform_admin(u):
+                qs = qs.filter(outreach_event__created_by=u)
+            return qs.filter(outreach_event_id=event_id)
+        profiles = get_active_profiles(u)
+        qs = qs.filter(outreach_event_id__in=list(profiles.values_list("outreach_event_id", flat=True)))
+        if event_id:
+            qs = qs.filter(outreach_event_id=event_id)
+        return qs
+
+    def create(self, request, *args, **kwargs):
+        try:
+            evt = _pick_event_for_request(request, allow_closed=False)
+        except Exception as e:
+            return Response({"detail": str(e)}, status=400)
+        ensure_module_enabled(evt, MODULE_DENTAL_CHECKS)
+        deny = _require_perm(request, evt, PERM_DENTAL_CHECKS_CREATE)
+        if deny: return deny
+        ensure_outreach_writeable(evt)
+
+        s = self.get_serializer(data=request.data)
+        s.is_valid(raise_exception=True)
+        patient = OutreachPatient.objects.filter(id=s.validated_data["patient"].id, outreach_event=evt).first()
+        if not patient:
+            return Response({"detail": "Invalid patient for this outreach."}, status=400)
+        if patient.site and not _validate_patient_site(request, evt, patient.site):
+            return Response({"detail": "You are not assigned to this site."}, status=403)
+
+        obj = s.save(outreach_event=evt, recorded_by=request.user)
+        log_action(evt, request.user, "outreach.dental_checks.created", {"id": obj.id, "patient_id": patient.id})
+        return Response(self.get_serializer(obj).data, status=201)
+
+    def update(self, request, *args, **kwargs):
+        obj = self.get_object()
+        evt = obj.outreach_event
+        ensure_module_enabled(evt, MODULE_DENTAL_CHECKS)
+        if evt.status == OutreachStatus.CLOSED:
+            return Response({"detail": "Closed outreach is read-only."}, status=403)
+        deny = _require_perm(request, evt, PERM_DENTAL_CHECKS_EDIT)
+        if deny: return deny
+        return super().update(request, *args, **kwargs)
+
+
+# ------------------------
 # Exports ViewSet (read-only list/retrieve)
 # ------------------------
 
@@ -1889,6 +2144,10 @@ def build_report_payload(evt: OutreachEvent, export_type: str, filters: dict):
                 "blood_donations": evt.blood_donations.count(),
                 "counseling_sessions": evt.counseling_sessions.count(),
                 "maternal_records": evt.maternal_records.count(),
+                "referrals": evt.referrals.count(),
+                "surgicals": evt.surgicals.count(),
+                "eye_checks": evt.eye_checks.count(),
+                "dental_checks": evt.dental_checks.count(),
             },
             "demographics": {
                 "sex": list(evt.patients.values("sex").annotate(count=Count("id")).order_by("-count")),
@@ -1904,6 +2163,7 @@ def build_report_payload(evt: OutreachEvent, export_type: str, filters: dict):
                 "sex": p.sex,
                 "age_years": p.age_years,
                 "phone": p.phone,
+                "email": p.email,
                 "site": p.site.name if p.site else "",
                 "created_at": p.created_at,
             }
