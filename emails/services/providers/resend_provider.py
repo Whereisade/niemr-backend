@@ -1,9 +1,12 @@
-import json, urllib.request
+import json
+import urllib.request
+
 from django.conf import settings
 
 def _http_post(url, data, headers):
     req = urllib.request.Request(url, data=data, headers=headers, method="POST")
-    with urllib.request.urlopen(req, timeout=30) as resp:
+    timeout = getattr(settings, "EMAILS_HTTP_TIMEOUT", 10)
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
         return resp.read().decode("utf-8")
 
 def send_via_resend(*, outbox) -> tuple[str | None, str | None]:

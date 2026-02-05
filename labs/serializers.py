@@ -408,6 +408,8 @@ class LabOrderReadSerializer(serializers.ModelSerializer):
     items = LabOrderItemReadSerializer(many=True)
     patient_name = serializers.SerializerMethodField(read_only=True)
     outsourced_to_name = serializers.SerializerMethodField(read_only=True)
+    facility_name = serializers.SerializerMethodField(read_only=True)
+    ordered_by_name = serializers.SerializerMethodField(read_only=True)
     
     # ========================================================================
     # LEGACY HMO FIELDS (Backward Compatibility)
@@ -442,7 +444,9 @@ class LabOrderReadSerializer(serializers.ModelSerializer):
             "patient_hmo_tier_level",
             # Order details
             "facility",
+            "facility_name",
             "ordered_by",
+            "ordered_by_name",
             "priority",
             "status",
             "ordered_at",
@@ -461,6 +465,24 @@ class LabOrderReadSerializer(serializers.ModelSerializer):
         last = getattr(obj.patient, "last_name", "") or ""
         name = (first + " " + last).strip()
         return name or str(obj.patient)
+
+    def get_facility_name(self, obj):
+        f = getattr(obj, "facility", None)
+        if not f:
+            return None
+        return getattr(f, "display_name", None) or getattr(f, "name", None) or f"Facility #{f.id}"
+
+    def get_ordered_by_name(self, obj):
+        u = getattr(obj, "ordered_by", None)
+        if not u:
+            return None
+        if hasattr(u, "get_full_name"):
+            full = (u.get_full_name() or "").strip()
+        else:
+            first = getattr(u, "first_name", "") or ""
+            last = getattr(u, "last_name", "") or ""
+            full = f"{first} {last}".strip()
+        return full or getattr(u, "email", None) or f"User #{u.id}"
 
     def get_patient_insurance_status(self, obj):
         p = getattr(obj, "patient", None)

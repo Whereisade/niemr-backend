@@ -64,7 +64,10 @@ if not DEBUG and SECRET_KEY == "dev-secret":
 # Email (Resend SMTP)
 # ---------------------------------------------------------------------
 EMAILS_PROVIDER = (os.getenv("EMAILS_PROVIDER", "SMTP") or "SMTP").upper()
+EMAILS_DELIVERY_MODE = (os.getenv("EMAILS_DELIVERY_MODE", "THREAD") or "THREAD").upper()
 
+# HTTP timeout (seconds) used by API-based providers (e.g., Resend)
+EMAILS_HTTP_TIMEOUT = int(os.getenv("EMAILS_HTTP_TIMEOUT", "10"))
 # Optional Resend settings (only required if EMAILS_PROVIDER=RESEND)
 RESEND_API_KEY = os.getenv("RESEND_API_KEY", "")
 RESEND_FROM = os.getenv("RESEND_FROM", "no-reply@niemr.app")

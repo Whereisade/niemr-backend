@@ -1,4 +1,7 @@
+import threading
+
 from django.conf import settings
+from django.db import close_old_connections
 from django.utils import timezone
 
 from emails.models import Outbox, EmailStatus
@@ -22,6 +25,7 @@ def send_email(
     reply_to=None,
     attachment_file_ids=None,
     queue_if_failed: bool = True,
+    delivery_mode: str | None = None,
 ) -> int:
     """Single entry point for all system emails.
 
@@ -46,8 +50,35 @@ def send_email(
         status=EmailStatus.QUEUED,
     )
 
-    _attempt_send(o, queue_if_failed=queue_if_failed)
+    # Delivery modes:
+    # - INLINE: send during request (previous behavior)
+    # - THREAD: send in a background thread (non-blocking)
+    # - QUEUE: do not send now; rely on `python manage.py process_outbox`
+    mode = (delivery_mode or getattr(settings, "EMAILS_DELIVERY_MODE", "INLINE") or "INLINE").upper()
+
+    if mode == "INLINE":
+        _attempt_send(o, queue_if_failed=queue_if_failed)
+    elif mode == "THREAD":
+        _start_async_send(outbox_id=o.id, queue_if_failed=queue_if_failed)
+    else:
+        # QUEUE (or unknown) -> leave as QUEUED for a worker/cron to process
+        pass
     return o.id
+
+
+def _start_async_send(*, outbox_id: int, queue_if_failed: bool):
+    """Attempt to send an outbox item in a background thread."""
+    def _run():
+        close_old_connections()
+        try:
+            o = Outbox.objects.filter(id=outbox_id).first()
+            if o:
+                _attempt_send(o, queue_if_failed=queue_if_failed)
+        finally:
+            close_old_connections()
+
+    t = threading.Thread(target=_run, name=f"email-send-{outbox_id}", daemon=True)
+    t.start()
 
 def _attempt_send(outbox: Outbox, *, queue_if_failed: bool):
     outbox.status = EmailStatus.SENDING

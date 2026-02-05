@@ -338,6 +338,9 @@ class AppointmentViewSet(
                     data=data_payload,
                     action_url="/facility/appointments",
                     group_key=group_key,
+                    # Avoid blocking the booking request by sending emails here.
+                    # Appointment emails are handled separately (send_confirmation / send_provider_assignment).
+                    allow_email=False,
                 )
 
             # Facility staff
@@ -363,6 +366,8 @@ class AppointmentViewSet(
                     data=data_payload,
                     action_url="/facility/appointments",
                     group_key=group_key,
+                    # In-app only for this booking event; don't block the request on outbound email.
+                    allow_email=False,
                 )
 
             # Patient (and guardian, if dependent)
@@ -377,6 +382,8 @@ class AppointmentViewSet(
                     data=data_payload,
                     action_url="/patient/appointments",
                     group_key=group_key,
+                    # Patient email confirmation is sent via appointments/services/notify.py
+                    allow_email=False,
                 )
         except Exception:
             pass
