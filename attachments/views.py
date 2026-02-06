@@ -95,6 +95,52 @@ def _resolve_content_type_and_id(ref_type, ref_id):
     return ct, obj_id
 
 
+def _get_patient_id_from_object(obj):
+    """Best-effort extraction of patient_id from an arbitrary model instance."""
+    if not obj:
+        return None
+    pid = getattr(obj, "patient_id", None)
+    if pid:
+        return pid
+    p = getattr(obj, "patient", None)
+    if p is None:
+        return None
+    # patient FK might be an object or an integer
+    if isinstance(p, int):
+        return p
+    return getattr(p, "id", None)
+
+
+def _get_patient_for_ref(ct, obj_id):
+    """
+    Try to resolve a Patient instance for a referenced object.
+
+    We keep this generic to avoid importing feature apps (labs/imaging/etc.)
+    while still supporting patient-scoped attachment access.
+    """
+    try:
+        model = ct.model_class() if ct else None
+    except Exception:
+        model = None
+
+    if not model:
+        return None
+
+    try:
+        obj = model.objects.filter(pk=obj_id).first()
+    except Exception:
+        return None
+
+    if not obj:
+        return None
+
+    patient_id = _get_patient_id_from_object(obj)
+    if not patient_id:
+        return None
+
+    return Patient.objects.filter(id=patient_id).select_related("user").first()
+
+
 class FileViewSet(
     viewsets.GenericViewSet,
     mixins.RetrieveModelMixin,
@@ -111,9 +157,49 @@ class FileViewSet(
         u = self.request.user
         q = self.queryset
 
+        params = self.request.query_params
+
+        # 🔗 Object-scoped filters (labs, imaging, encounters, etc.)
+        ref_type = params.get("ref_type") or params.get("owner_type")
+        ref_id = params.get("ref_id") or params.get("owner_id")
+
+        # Compatibility parameters used in some frontend code
+        lab_order = params.get("lab_order")
+        imaging_request = params.get("imaging_request")
+
+        if not (ref_type and ref_id) and lab_order:
+            ref_type, ref_id = "LAB_ORDER", lab_order
+        if not (ref_type and ref_id) and imaging_request:
+            ref_type, ref_id = "IMAGING_REQUEST", imaging_request
+
+        ct, obj_id = (None, None)
+        if ref_type and ref_id:
+            ct, obj_id = _resolve_content_type_and_id(ref_type, ref_id)
+
+        role = (getattr(u, "role", "") or "").upper()
+
         # Scope by user
-        if getattr(u, "role", None) == "PATIENT":
-            q = q.filter(patient__user_id=u.id)
+        if role == "PATIENT":
+            # Important: Some attachments are linked to the lab order but do NOT have file.patient set.
+            # If the patient is requesting object-scoped attachments, validate ownership on the
+            # referenced object and then list linked files.
+            if ct and obj_id:
+                p = _get_patient_for_ref(ct, obj_id)
+                if not p or p.user_id != getattr(u, "id", None):
+                    return q.none()
+
+                # Show linked files for this object. Exclude INTERNAL by default.
+                q = (
+                    q.filter(links__content_type=ct, links__object_id=obj_id)
+                    .exclude(visibility=Visibility.INTERNAL)
+                    .distinct()
+                )
+
+                # If files have patient set, ensure they match the patient; otherwise allow null.
+                q = q.filter(Q(patient_id=p.id) | Q(patient__isnull=True))
+            else:
+                q = q.filter(patient__user_id=u.id)
+
         elif getattr(u, "facility_id", None):
             q = q.filter(facility_id=u.facility_id)
 
@@ -136,8 +222,6 @@ class FileViewSet(
                         | Q(patient__prescriptions__outsourced_to_id=uid)
                     ).distinct()
 
-        params = self.request.query_params
-
         # Simple filters
         patient = params.get("patient")
         tag = params.get("tag")
@@ -150,27 +234,10 @@ class FileViewSet(
         if vis:
             q = q.filter(visibility=vis)
 
-        # 🔗 Object-scoped filters (labs, imaging, encounters, etc.)
-        ref_type = params.get("ref_type") or params.get("owner_type")
-        ref_id = params.get("ref_id") or params.get("owner_id")
-
-        # Compatibility parameters used in some frontend code
-        lab_order = params.get("lab_order")
-        imaging_request = params.get("imaging_request")
-
-        if not (ref_type and ref_id) and lab_order:
-            ref_type, ref_id = "LAB_ORDER", lab_order
-        if not (ref_type and ref_id) and imaging_request:
-            ref_type, ref_id = "IMAGING_REQUEST", imaging_request
-
-        if ref_type and ref_id:
-            ct, obj_id = _resolve_content_type_and_id(ref_type, ref_id)
+        # Apply object-scoped filters for non-patient (or patient without special handling)
+        if ref_type and ref_id and not (role == "PATIENT" and ct and obj_id):
             if ct and obj_id:
-                # Use the reverse relation: File -> AttachmentLink (related_name="links")
-                q = q.filter(
-                    links__content_type=ct,
-                    links__object_id=obj_id,
-                ).distinct()
+                q = q.filter(links__content_type=ct, links__object_id=obj_id).distinct()
 
         return q
 
@@ -205,22 +272,8 @@ class FileViewSet(
         if data.get("patient"):
             patient = get_object_or_404(Patient, id=data["patient"])
 
-        f = File.objects.create(
-            file=data["file"],
-            original_name=data["file"].name,
-            mime_type=getattr(data["file"], "content_type", ""),
-            uploaded_by=request.user,
-            facility=(
-                getattr(request.user, "facility", None)
-                or (patient.facility if patient else None)
-            ),
-            patient=patient,
-            visibility=data.get("visibility"),
-            tag=data.get("tag", ""),
-            description=data.get("description", ""),
-        )
-
-        # 🔗 Optional: link this file to a specific object
+        # If patient isn't provided, try to infer it from the referenced object.
+        # This fixes cases where lab staff attach files to a LabOrder but don't set file.patient.
         raw = request.data  # QueryDict from DRF
 
         ref_type = (
@@ -237,6 +290,25 @@ class FileViewSet(
         )
 
         ct, obj_id = _resolve_content_type_and_id(ref_type, ref_id)
+        if not patient and ct and obj_id:
+            patient = _get_patient_for_ref(ct, obj_id)
+
+        f = File.objects.create(
+            file=data["file"],
+            original_name=data["file"].name,
+            mime_type=getattr(data["file"], "content_type", ""),
+            uploaded_by=request.user,
+            facility=(
+                getattr(request.user, "facility", None)
+                or (patient.facility if patient else None)
+            ),
+            patient=patient,
+            visibility=data.get("visibility"),
+            tag=data.get("tag", ""),
+            description=data.get("description", ""),
+        )
+
+        # 🔗 Optional: link this file to a specific object
         if ct and obj_id:
             AttachmentLink.objects.get_or_create(
                 file=f,

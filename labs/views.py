@@ -912,7 +912,9 @@ class LabOrderViewSet(
         instance = serializer.save()
         
         # Use read serializer for response to properly handle ForeignKey fields
-        read_serializer = LabOrderReadSerializer(instance)
+        read_serializer = LabOrderReadSerializer(
+            instance, context=self.get_serializer_context()
+        )
         headers = self.get_success_headers(read_serializer.data)
         return Response(read_serializer.data, status=status.HTTP_201_CREATED, headers=headers)
 
@@ -920,7 +922,8 @@ class LabOrderViewSet(
         obj = self.get_object()
         self.permission_classes = [IsAuthenticated, CanViewLabOrder]
         self.check_object_permissions(request, obj)
-        return Response(LabOrderReadSerializer(obj).data)
+        serializer = self.get_serializer(obj)
+        return Response(serializer.data)
 
     @action(detail=True, methods=["post"], permission_classes=[IsAuthenticated, IsLabOrAdmin])
     def collect(self, request, pk=None):

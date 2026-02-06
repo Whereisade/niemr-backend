@@ -426,6 +426,8 @@ class LabOrderReadSerializer(serializers.ModelSerializer):
     patient_system_hmo_name = serializers.SerializerMethodField(read_only=True)
     patient_hmo_tier_name = serializers.SerializerMethodField(read_only=True)
     patient_hmo_tier_level = serializers.SerializerMethodField(read_only=True)
+    results_ready = serializers.SerializerMethodField(read_only=True)
+    results = serializers.SerializerMethodField(read_only=True)
 
     class Meta:
         model = LabOrder
@@ -456,6 +458,8 @@ class LabOrderReadSerializer(serializers.ModelSerializer):
             "outsourced_to",
             "outsourced_to_name",
             "items",
+            "results_ready",
+            "results",
         ]
 
     def get_patient_name(self, obj):
@@ -487,6 +491,39 @@ class LabOrderReadSerializer(serializers.ModelSerializer):
     def get_patient_insurance_status(self, obj):
         p = getattr(obj, "patient", None)
         return getattr(p, "insurance_status", None) if p else None
+
+    def get_results_ready(self, obj):
+        if getattr(obj, "status", None) == OrderStatus.COMPLETED:
+            return True
+        for it in obj.items.all():
+            if it.completed_at or it.result_value is not None or (it.result_text or "").strip():
+                return True
+        return False
+
+    def get_results(self, obj):
+        results = []
+        for it in obj.items.all():
+            has_result = (
+                it.completed_at
+                or it.result_value is not None
+                or (it.result_text or "").strip()
+            )
+            if not has_result:
+                continue
+            results.append(
+                {
+                    "item_id": it.id,
+                    "test_name": getattr(it, "display_name", None) or it.display_name,
+                    "result_value": it.result_value,
+                    "result_text": it.result_text,
+                    "result_unit": it.result_unit,
+                    "ref_low": it.ref_low,
+                    "ref_high": it.ref_high,
+                    "flag": it.flag,
+                    "completed_at": it.completed_at,
+                }
+            )
+        return results
 
     # ========================================================================
     # LEGACY HMO GETTERS (for backward compatibility)
