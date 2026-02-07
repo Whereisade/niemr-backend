@@ -174,9 +174,18 @@ class PatientViewSet(viewsets.GenericViewSet,
         total_visits = Encounter.objects.filter(patient_id__in=patient_ids).count()
         total_appointments = Appointment.objects.filter(patient_id__in=patient_ids).count()
 
-        # Billing outstanding = sum(charge.amount - allocated_total)
+        # Billing outstanding (PATIENT LIABILITY ONLY)
+        #
+        # If a patient is insured (HMO), those outstanding amounts should not be
+        # shown on the patient dashboard as "your" outstanding bills.
+        # We therefore only include self-pay charges here.
         charges_qs = (
             Charge.objects.filter(patient_id__in=patient_ids)
+            .filter(
+                patient__insurance_status="SELF_PAY",
+                patient__system_hmo__isnull=True,
+                patient__hmo__isnull=True,
+            )
             .exclude(status=ChargeStatus.VOID)
             .annotate(allocated_total=Coalesce(Sum("allocations__amount"), Decimal("0.00")))
             .annotate(outstanding=F("amount") - F("allocated_total"))

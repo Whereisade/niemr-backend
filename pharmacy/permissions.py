@@ -38,9 +38,15 @@ class CanViewRx(BasePermission):
 
         if role in {UserRole.ADMIN, UserRole.SUPER_ADMIN}:
             return True
+        # Patient: can view own records, plus dependents (if guardian)
+        if role == UserRole.PATIENT:
+            base_patient = getattr(u, "patient_profile", None)
+            p = getattr(obj, "patient", None)
+            if base_patient and p is not None and (getattr(p, "id", None) == getattr(base_patient, "id", None) or getattr(p, "parent_patient_id", None) == getattr(base_patient, "id", None)):
+                return True
 
-        # patient owns
-        if obj.patient.user_id == getattr(u, "id", None):
+        # patient owns (legacy user linkage)
+        if getattr(getattr(obj, "patient", None), "user_id", None) == getattr(u, "id", None):
             return True
 
         # facility staff scope

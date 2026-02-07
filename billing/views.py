@@ -30,6 +30,8 @@ from .enums import ChargeStatus, PaymentMethod, PaymentSource
 from notifications.services.notify import notify_patient
 from notifications.enums import Topic, Priority
 
+from patients.models import Patient
+
 
 # --- Service Catalog ---
 class ServiceViewSet(viewsets.GenericViewSet, mixins.ListModelMixin, mixins.CreateModelMixin):
@@ -159,6 +161,24 @@ class ChargeViewSet(
             q = q.filter(patient_id=patient_id)
         if hmo_id:
             q = q.filter(Q(patient__system_hmo_id=hmo_id) | Q(patient__hmo_id=hmo_id))
+
+        # Derived payer filter (no stored bill_to on Charge yet)
+        #
+        # payment_source=PATIENT_DIRECT -> patient is self-pay (no attached HMO)
+        # payment_source=HMO          -> patient is insured (has attached HMO)
+        payer = (self.request.query_params.get("payment_source") or "").upper()
+        if payer == PaymentSource.PATIENT_DIRECT:
+            q = q.filter(
+                patient__insurance_status="SELF_PAY",
+                patient__system_hmo__isnull=True,
+                patient__hmo__isnull=True,
+            )
+        elif payer == PaymentSource.HMO:
+            q = q.filter(
+                Q(patient__insurance_status="INSURED")
+                | Q(patient__system_hmo__isnull=False)
+                | Q(patient__hmo__isnull=False)
+            )
         if status_:
             q = q.filter(status=status_)
         if start:
@@ -334,6 +354,18 @@ class ChargeViewSet(
         if not patient_id:
             return Response({"detail": "patient is required"}, status=400)
 
+        # Determine if patient is insured (HMO-covered) so we can avoid
+        # treating HMO outstanding as *patient* outstanding.
+        try:
+            patient_obj = Patient.objects.select_related("system_hmo", "hmo").get(id=patient_id)
+        except Patient.DoesNotExist:
+            return Response({"detail": "patient not found"}, status=404)
+
+        is_insured = (
+            (getattr(patient_obj, "insurance_status", "") or "").upper() == "INSURED"
+            or bool(getattr(patient_obj, "system_hmo_id", None) or getattr(patient_obj, "hmo_id", None))
+        )
+
         charges = Charge.objects.filter(patient_id=patient_id).exclude(status=ChargeStatus.VOID)
         payments = Payment.objects.filter(patient_id=patient_id)
 
@@ -347,25 +379,63 @@ class ChargeViewSet(
                 payments = payments.filter(owner=u, facility__isnull=True)
 
         ch_total = charges.aggregate(s=Coalesce(Sum("amount"), Decimal("0.00")))["s"]
-        pay_total = payments.aggregate(s=Coalesce(Sum("amount"), Decimal("0.00")))["s"]
+        pay_total_patient = payments.aggregate(s=Coalesce(Sum("amount"), Decimal("0.00")))["s"]
 
-        alloc_total = (
+        # Allocations applied to these charges (can come from patient payments OR HMO bulk payments).
+        alloc_total_all = (
             PaymentAllocation.objects.filter(charge__in=charges)
             .aggregate(s=Coalesce(Sum("amount"), Decimal("0.00")))["s"]
         )
 
-        outstanding = Decimal(ch_total) - Decimal(alloc_total)
-        unallocated = Decimal(pay_total) - Decimal(alloc_total)
+        alloc_patient = (
+            PaymentAllocation.objects.filter(charge__in=charges, payment__patient_id=patient_obj.id)
+            .aggregate(s=Coalesce(Sum("amount"), Decimal("0.00")))["s"]
+        )
+
+        alloc_hmo = (
+            PaymentAllocation.objects.filter(charge__in=charges, payment__payment_source=PaymentSource.HMO)
+            .aggregate(s=Coalesce(Sum("amount"), Decimal("0.00")))["s"]
+        )
+
+        overall_outstanding = Decimal(ch_total) - Decimal(alloc_total_all)
+
+        # Patient-facing (and "patient liability") outstanding:
+        patient_portion = Decimal("0.00") if is_insured else Decimal(ch_total)
+        patient_outstanding = Decimal("0.00") if is_insured else overall_outstanding
+
+        # HMO context:
+        hmo_portion = Decimal(ch_total) if is_insured else Decimal("0.00")
+        hmo_unpaid = overall_outstanding if is_insured else Decimal("0.00")
+
+        # Unallocated should be based on patient payments only (avoid negatives when HMO allocations exist).
+        unallocated_patient = Decimal(pay_total_patient) - Decimal(alloc_patient)
+        if unallocated_patient < 0:
+            unallocated_patient = Decimal("0.00")
 
         return Response(
             {
                 "patient_id": int(patient_id),
+
+                # Totals across all charges for this patient
                 "charges_total": ch_total,
-                "payments_total": pay_total,
-                "allocated_total": alloc_total,
-                "outstanding": outstanding,
-                "unallocated": unallocated,
-                "balance": outstanding,
+                "allocated_total": alloc_total_all,
+                "overall_outstanding": overall_outstanding,
+
+                # Patient payments only
+                "payments_total": pay_total_patient,
+                "patient_allocated_total": alloc_patient,
+                "unallocated": unallocated_patient,
+
+                # Liability split
+                "patient_portion": patient_portion,
+                "patient_outstanding": patient_outstanding,
+                "hmo_portion": hmo_portion,
+                "hmo_allocated_total": alloc_hmo,
+                "hmo_unpaid": hmo_unpaid,
+
+                # Backward-compat fields
+                "outstanding": patient_outstanding,
+                "balance": patient_outstanding,
             }
         )
 

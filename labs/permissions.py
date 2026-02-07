@@ -47,6 +47,14 @@ class CanViewLabOrder(BasePermission):
             return True
 
         patient = getattr(obj, "patient", None)
+
+        # Patient: can view own records, plus dependents (if guardian)
+        if role == UserRole.PATIENT and patient is not None:
+            base_patient = getattr(user, "patient_profile", None)
+            if base_patient and (getattr(patient, "id", None) == getattr(base_patient, "id", None) or getattr(patient, "parent_patient_id", None) == getattr(base_patient, "id", None)):
+                return True
+
+        # Patient legacy: direct user linkage
         if patient is not None and getattr(patient, "user_id", None) == getattr(user, "id", None):
             return True
 

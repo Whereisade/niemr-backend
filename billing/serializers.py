@@ -116,6 +116,19 @@ class ChargeReadSerializer(serializers.ModelSerializer):
     patient_system_hmo = serializers.SerializerMethodField()
     created_by_name = serializers.SerializerMethodField()
 
+    # ---------------------------------------------------------------------
+    # Derived payer context
+    # ---------------------------------------------------------------------
+    # We do not currently store a "bill_to" field on the Charge model.
+    # For now, we derive a payer context from the patient's insurance state
+    # so the UI can avoid treating HMO-covered charges as *patient* debt.
+    payment_source = serializers.SerializerMethodField()
+    hmo_id = serializers.SerializerMethodField()
+    hmo_name = serializers.SerializerMethodField()
+    patient_portion = serializers.SerializerMethodField()
+    hmo_portion = serializers.SerializerMethodField()
+    claim_status = serializers.SerializerMethodField()
+
     # annotated by ChargeViewSet.get_queryset
     allocated_total = serializers.DecimalField(max_digits=12, decimal_places=2, read_only=True)
     outstanding = serializers.SerializerMethodField()
@@ -128,6 +141,12 @@ class ChargeReadSerializer(serializers.ModelSerializer):
             "patient_name",
             "patient_hmo",
             "patient_system_hmo",
+            "payment_source",
+            "hmo_id",
+            "hmo_name",
+            "patient_portion",
+            "hmo_portion",
+            "claim_status",
             "facility",
             "owner",
             "service",
@@ -148,6 +167,30 @@ class ChargeReadSerializer(serializers.ModelSerializer):
             "created_by_name",
             "created_at",
         ]
+
+    def _patient_is_insured(self, patient) -> bool:
+        if not patient:
+            return False
+        # Prefer explicit insurance status, but also treat any attached HMO as insured.
+        status = (getattr(patient, "insurance_status", "") or "").upper()
+        if status == "INSURED":
+            return True
+        return bool(getattr(patient, "system_hmo_id", None) or getattr(patient, "hmo_id", None))
+
+    def _patient_hmo_display(self, patient):
+        """Return (hmo_id, hmo_name) for display.
+
+        Prefer SystemHMO, fall back to legacy HMO.
+        """
+        if not patient:
+            return (None, "")
+        shmo = getattr(patient, "system_hmo", None)
+        if shmo:
+            return (shmo.id, shmo.name)
+        legacy = getattr(patient, "hmo", None)
+        if legacy:
+            return (legacy.id, legacy.name)
+        return (None, "")
 
     def get_patient_name(self, obj):
         p = getattr(obj, "patient", None)
@@ -197,6 +240,32 @@ class ChargeReadSerializer(serializers.ModelSerializer):
         amt = Decimal(str(getattr(obj, "amount", 0) or 0))
         alloc = Decimal(str(getattr(obj, "allocated_total", 0) or 0))
         return amt - alloc
+
+    def get_payment_source(self, obj):
+        p = getattr(obj, "patient", None)
+        return "HMO" if self._patient_is_insured(p) else "PATIENT_DIRECT"
+
+    def get_hmo_id(self, obj):
+        p = getattr(obj, "patient", None)
+        hid, _ = self._patient_hmo_display(p)
+        return hid
+
+    def get_hmo_name(self, obj):
+        p = getattr(obj, "patient", None)
+        _, name = self._patient_hmo_display(p)
+        return name
+
+    def get_patient_portion(self, obj):
+        amt = Decimal(str(getattr(obj, "amount", 0) or 0))
+        return Decimal("0.00") if self.get_payment_source(obj) == "HMO" else amt
+
+    def get_hmo_portion(self, obj):
+        amt = Decimal(str(getattr(obj, "amount", 0) or 0))
+        return amt if self.get_payment_source(obj) == "HMO" else Decimal("0.00")
+
+    def get_claim_status(self, obj):
+        # Placeholder: claim tracking is not yet modeled for charges.
+        return None
 
 
 # ============================================================================

@@ -835,7 +835,11 @@ class LabOrderViewSet(
         role = (getattr(u, "role", "") or "").upper()
 
         if role == UserRole.PATIENT:
-            q = q.filter(patient__user_id=u.id)
+            base_patient = getattr(u, "patient_profile", None)
+            if base_patient:
+                q = q.filter(Q(patient=base_patient) | Q(patient__parent_patient=base_patient))
+            else:
+                q = q.none()
         elif getattr(u, "facility_id", None):
             # FIX: Include both in-house AND outsourced orders for facility staff
             q = q.filter(
@@ -924,6 +928,90 @@ class LabOrderViewSet(
         self.check_object_permissions(request, obj)
         serializer = self.get_serializer(obj)
         return Response(serializer.data)
+
+
+    @action(detail=False, methods=["post"], url_path="patient-request", permission_classes=[IsAuthenticated])
+    def patient_request(self, request, *args, **kwargs):
+        # Patient-initiated lab orders for independent labs (outsourced_to)
+        u = request.user
+        role = (getattr(u, "role", "") or "").upper()
+        if role != UserRole.PATIENT:
+            return Response({"detail": "Only patients can perform this action."}, status=403)
+
+        base_patient = getattr(u, "patient_profile", None)
+        if not base_patient:
+            return Response({"detail": "No patient profile linked to this user."}, status=400)
+
+        data = request.data.copy()
+        appointment_id = data.pop("appointment_id", None)
+
+        # Normalize patient id (self or dependent)
+        raw_patient_id = data.get("patient")
+        target_patient_id = None
+        if raw_patient_id not in (None, "", "null"):
+            try:
+                target_patient_id = int(raw_patient_id)
+            except Exception:
+                return Response({"detail": "Invalid patient id."}, status=400)
+
+        if target_patient_id is None or target_patient_id == base_patient.id:
+            data["patient"] = base_patient.id
+        else:
+            allowed_ids = set(base_patient.dependents.values_list("id", flat=True))
+            if target_patient_id not in allowed_ids:
+                return Response(
+                    {"detail": "You can only request lab tests for yourself or your registered dependents."},
+                    status=400,
+                )
+            data["patient"] = target_patient_id
+
+        if not data.get("outsourced_to"):
+            return Response(
+                {"detail": "outsourced_to (independent lab scientist user id) is required."},
+                status=400,
+            )
+
+        # Create using existing serializer
+        write = LabOrderCreateSerializer(data=data, context={"request": request})
+        write.is_valid(raise_exception=True)
+        order = write.save()
+
+        # Link to appointment (best-effort)
+        if appointment_id not in (None, "", "null"):
+            try:
+                from appointments.models import Appointment
+
+                appt_id = int(appointment_id)
+                appt = Appointment.objects.filter(id=appt_id).select_related("patient").first()
+                if appt and appt.patient_id == int(data["patient"]):
+                    # Ensure guardian can only link their own/dependent appointments
+                    if appt.patient_id == base_patient.id or getattr(appt.patient, "parent_patient_id", None) == base_patient.id:
+                        appt.lab_order_id = order.id
+                        appt.save(update_fields=["lab_order_id", "updated_at"])
+            except Exception:
+                pass
+
+        # Notify outsourced provider (in-app, best-effort)
+        try:
+            if order.outsourced_to_id:
+                patient_name = getattr(order.patient, "full_name", None) or f"Patient #{order.patient_id}"
+                notify_user(
+                    user=order.outsourced_to,
+                    topic=Topic.GENERAL,
+                    priority=Priority.NORMAL,
+                    title="New lab order",
+                    body=f"New lab order from {patient_name}.",
+                    facility_id=None,
+                    data={"lab_order_id": order.id, "patient_id": order.patient_id},
+                    action_url="/provider/labs",
+                    group_key=f"LABORDER:{order.id}:CREATED",
+                    allow_email=False,
+                )
+        except Exception:
+            pass
+
+        read = LabOrderReadSerializer(order, context=self.get_serializer_context())
+        return Response(read.data, status=status.HTTP_201_CREATED)
 
     @action(detail=True, methods=["post"], permission_classes=[IsAuthenticated, IsLabOrAdmin])
     def collect(self, request, pk=None):

@@ -309,6 +309,8 @@ class AppointmentListSerializer(serializers.ModelSerializer):
     patient_name = serializers.SerializerMethodField(read_only=True)
     provider_name = serializers.SerializerMethodField(read_only=True)
     facility_name = serializers.SerializerMethodField(read_only=True)
+    # ✅ Show the facility name for facility bookings, and business/practice name for independent providers
+    provider_org_name = serializers.SerializerMethodField(read_only=True)
 
     # NEW: nurse display (derived from linked encounter)
     nurse = serializers.SerializerMethodField(read_only=True)
@@ -328,6 +330,7 @@ class AppointmentListSerializer(serializers.ModelSerializer):
             "patient_name",
             "facility",
             "facility_name",
+            "provider_org_name",
             "provider",
             "provider_name",
             "nurse",
@@ -358,6 +361,40 @@ class AppointmentListSerializer(serializers.ModelSerializer):
         if not obj.facility_id:
             return None
         return getattr(obj.facility, "name", None) or str(obj.facility)
+
+    def get_provider_org_name(self, obj):
+        """
+        For patient list UX, we want the "Facility" column to still show something
+        even when the booking is with an independent provider (lab/pharmacy/doctor).
+
+        - Facility booking: facility.name
+        - Independent provider booking: provider_profile.business_name (fallback to provider full name)
+        """
+        # Facility-based appointment
+        if obj.facility_id:
+            return getattr(obj.facility, "name", None) or str(obj.facility)
+
+        # Independent provider appointment
+        provider = getattr(obj, "provider", None)
+        if not provider:
+            return None
+
+        prof = getattr(provider, "provider_profile", None)
+        if prof is not None:
+            try:
+                name = (prof.get_display_name() or "").strip()
+            except Exception:
+                name = (getattr(prof, "business_name", "") or "").strip()
+            if name:
+                return name
+
+        # Fallback to provider name
+        first = getattr(provider, "first_name", "") or ""
+        last = getattr(provider, "last_name", "") or ""
+        full = (first + " " + last).strip()
+        if full:
+            return full
+        return getattr(provider, "email", None) or None
 
     def get_provider_name(self, obj):
         enc = _get_prefetched_encounter(obj)

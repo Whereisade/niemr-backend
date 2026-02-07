@@ -45,7 +45,11 @@ class AppointmentViewSet(
     mixins.ListModelMixin,
 ):
     queryset = Appointment.objects.select_related(
-        "patient", "facility", "provider", "created_by"
+        "patient",
+        "facility",
+        "provider",
+        "provider__provider_profile",  # independent provider business/practice name
+        "created_by",
     )
     authentication_classes = [JWTAuthentication]
     permission_classes = [IsAuthenticated]

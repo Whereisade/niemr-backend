@@ -13,6 +13,8 @@ from rest_framework_simplejwt.authentication import JWTAuthentication
 from facilities.permissions_utils import has_facility_permission
 from accounts.enums import UserRole
 from patients.models import SystemHMO, HMOTier
+from notifications.services.notify import notify_user, notify_patient
+from notifications.enums import Topic, Priority
 from .models import Drug, StockItem, StockTxn, Prescription
 from .serializers import (
     DrugSerializer,
@@ -939,7 +941,11 @@ class PrescriptionViewSet(
         role = (getattr(u, "role", "") or "").upper()
 
         if role == UserRole.PATIENT:
-            q = q.filter(patient__user_id=u.id)
+            base_patient = getattr(u, "patient_profile", None)
+            if base_patient:
+                q = q.filter(Q(patient=base_patient) | Q(patient__parent_patient=base_patient))
+            else:
+                q = q.none()
         elif getattr(u, "facility_id", None):
             # Facility staff
             q = q.filter(facility_id=u.facility_id)
@@ -1018,6 +1024,145 @@ class PrescriptionViewSet(
         self.permission_classes = [IsAuthenticated, CanViewRx]
         self.check_object_permissions(request, obj)
         return Response(PrescriptionReadSerializer(obj).data)
+
+
+    @action(detail=False, methods=["post"], url_path="patient-request", permission_classes=[IsAuthenticated])
+    def patient_request(self, request, *args, **kwargs):
+        # Patient-initiated medication requests to independent pharmacies (outsourced_to)
+        u = request.user
+        role = (getattr(u, "role", "") or "").upper()
+        if role != UserRole.PATIENT:
+            return Response({"detail": "Only patients can perform this action."}, status=403)
+
+        base_patient = getattr(u, "patient_profile", None)
+        if not base_patient:
+            return Response({"detail": "No patient profile linked to this user."}, status=400)
+
+        data = request.data.copy()
+        appointment_id = data.pop("appointment_id", None)
+
+        # Normalize patient id (self or dependent)
+        raw_patient_id = data.get("patient")
+        target_patient_id = None
+        if raw_patient_id not in (None, "", "null"):
+            try:
+                target_patient_id = int(raw_patient_id)
+            except Exception:
+                return Response({"detail": "Invalid patient id."}, status=400)
+
+        if target_patient_id is None or target_patient_id == base_patient.id:
+            data["patient"] = base_patient.id
+        else:
+            allowed_ids = set(base_patient.dependents.values_list("id", flat=True))
+            if target_patient_id not in allowed_ids:
+                return Response(
+                    {"detail": "You can only request medications for yourself or your registered dependents."},
+                    status=400,
+                )
+            data["patient"] = target_patient_id
+
+        outsourced_to = data.get("outsourced_to")
+        if not outsourced_to:
+            return Response({"detail": "outsourced_to (independent pharmacy user id) is required."}, status=400)
+
+        # Normalize items and inject safe defaults for required fields
+        items = data.get("items") or []
+        if not isinstance(items, list) or len(items) == 0:
+            return Response({"detail": "items must be a non-empty list."}, status=400)
+
+        try:
+            outsourced_to_id = int(outsourced_to)
+        except Exception:
+            return Response({"detail": "Invalid outsourced_to value."}, status=400)
+
+        from .models import Drug
+        normalized = []
+        for it in items:
+            if isinstance(it, str):
+                it = {"drug_code": it}
+            if not isinstance(it, dict):
+                continue
+
+            code = (it.get("drug_code") or "").strip()
+            name = (it.get("drug_name") or "").strip()
+            qty = it.get("qty_prescribed") or it.get("qty") or 1
+
+            # Lookup strength for nicer default dose (best-effort)
+            dose = (it.get("dose") or "").strip()
+            if not dose and code:
+                try:
+                    d = Drug.objects.filter(
+                        code__iexact=code,
+                        facility__isnull=True,
+                        created_by_id=outsourced_to_id,
+                        is_active=True,
+                    ).first()
+                    if not d:
+                        d = Drug.objects.filter(
+                            code__iexact=code,
+                            facility__isnull=True,
+                            created_by__isnull=True,
+                            is_active=True,
+                        ).first()
+                    if d and getattr(d, "strength", None):
+                        dose = str(d.strength).strip()
+                except Exception:
+                    dose = dose
+
+            if not dose:
+                dose = "As directed"
+
+            frequency = (it.get("frequency") or "").strip() or "As directed"
+            duration = it.get("duration_days") or 1
+            instruction = (it.get("instruction") or "").strip()
+
+            try:
+                duration = int(duration)
+            except Exception:
+                duration = 1
+            try:
+                qty = int(qty)
+            except Exception:
+                qty = 1
+
+            normalized.append(
+                {
+                    "drug_code": code,
+                    "drug_name": name,
+                    "dose": dose,
+                    "frequency": frequency,
+                    "duration_days": max(duration, 1),
+                    "qty_prescribed": max(qty, 1),
+                    "instruction": instruction,
+                }
+            )
+
+        data["items"] = normalized
+
+        write = PrescriptionCreateSerializer(data=data, context={"request": request})
+        write.is_valid(raise_exception=True)
+        rx = write.save()
+
+        # Notify assigned independent pharmacy (best-effort)
+        try:
+            if rx.outsourced_to_id:
+                patient_name = getattr(rx.patient, "full_name", None) or f"Patient #{rx.patient_id}"
+                notify_user(
+                    user=rx.outsourced_to,
+                    topic=Topic.GENERAL,
+                    priority=Priority.NORMAL,
+                    title="New medication request",
+                    body=f"New medication request from {patient_name}.",
+                    facility_id=None,
+                    data={"prescription_id": rx.id, "patient_id": rx.patient_id},
+                    action_url="/provider/pharmacy",
+                    group_key=f"RX:{rx.id}:CREATED",
+                    allow_email=False,
+                )
+        except Exception:
+            pass
+
+        return Response(PrescriptionReadSerializer(rx).data, status=status.HTTP_201_CREATED)
 
     @action(detail=True, methods=["post"], permission_classes=[IsAuthenticated, IsPharmacyStaff])
     def dispense(self, request, pk=None):
