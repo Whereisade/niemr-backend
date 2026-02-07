@@ -7,12 +7,13 @@ from django.db.models import Q
 from django.shortcuts import get_object_or_404
 from rest_framework import viewsets, mixins, status
 from rest_framework.decorators import action
+from rest_framework.exceptions import PermissionDenied
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework_simplejwt.authentication import JWTAuthentication
 from facilities.permissions_utils import has_facility_permission
 from accounts.enums import UserRole
-from patients.models import SystemHMO, HMOTier
+from patients.models import SystemHMO, HMOTier, Patient, PatientProviderLink
 from notifications.services.notify import notify_user, notify_patient
 from notifications.enums import Topic, Priority
 from .models import Drug, StockItem, StockTxn, Prescription
@@ -27,6 +28,61 @@ from .serializers import (
 from .permissions import IsStaff, CanViewRx, IsPharmacyStaff, CanPrescribe
 from .enums import RxStatus, TxnType
 from .services.stock_alerts import check_and_notify_low_stock
+
+
+def can_user_access_patient_system_scope(user, patient_id):
+    """
+    Same patient access rules as Patient object permissions, used to safely
+    enable system-wide medication history when requested via ?scope=system.
+    """
+    role = (getattr(user, "role", "") or "").upper()
+    try:
+        pid = int(patient_id)
+    except Exception:
+        return False
+
+    if role in {UserRole.ADMIN, UserRole.SUPER_ADMIN}:
+        return True
+
+    if role == UserRole.PATIENT:
+        base_patient = getattr(user, "patient_profile", None)
+        if not base_patient:
+            return False
+        return Patient.objects.filter(Q(id=base_patient.id) | Q(parent_patient=base_patient)).filter(id=pid).exists()
+
+    if getattr(user, "facility_id", None):
+        return Patient.objects.filter(id=pid, facility_id=user.facility_id).exists()
+
+    uid = getattr(user, "id", None)
+    if not uid:
+        return False
+
+    if PatientProviderLink.objects.filter(patient_id=pid, provider_id=uid).exists():
+        return True
+
+    try:
+        from appointments.models import Appointment
+        from encounters.models import Encounter
+        from labs.models import LabOrder
+    except Exception:
+        Appointment = None
+        Encounter = None
+        LabOrder = None
+
+    if Appointment and Appointment.objects.filter(patient_id=pid, provider_id=uid).exists():
+        return True
+
+    if Encounter and Encounter.objects.filter(patient_id=pid).filter(Q(created_by_id=uid) | Q(provider_id=uid) | Q(nurse_id=uid)).exists():
+        return True
+
+    if LabOrder and LabOrder.objects.filter(patient_id=pid).filter(Q(ordered_by_id=uid) | Q(outsourced_to_id=uid)).exists():
+        return True
+
+    if Prescription.objects.filter(patient_id=pid).filter(Q(prescribed_by_id=uid) | Q(outsourced_to_id=uid)).exists():
+        return True
+
+    return False
+
 
 
 # --- Catalog ---
@@ -940,35 +996,41 @@ class PrescriptionViewSet(
         u = self.request.user
         role = (getattr(u, "role", "") or "").upper()
 
-        if role == UserRole.PATIENT:
-            base_patient = getattr(u, "patient_profile", None)
-            if base_patient:
-                q = q.filter(Q(patient=base_patient) | Q(patient__parent_patient=base_patient))
-            else:
-                q = q.none()
-        elif getattr(u, "facility_id", None):
-            # Facility staff
-            q = q.filter(facility_id=u.facility_id)
-            
-            # Doctors only see prescriptions they created
-            if role == UserRole.DOCTOR:
-                q = q.filter(prescribed_by_id=u.id)
-            # PHARMACY, NURSE, ADMIN, SUPER_ADMIN see all facility prescriptions
-        else:
-            # independent (no facility)
-            if role in {UserRole.ADMIN, UserRole.SUPER_ADMIN}:
-                pass
-            elif role == UserRole.PHARMACY:
-                # Independent pharmacy should see:
-                # - outsourced prescriptions assigned to them
-                # - prescriptions they created themselves (self-prescribed workflows)
-                q = q.filter(Q(outsourced_to_id=u.id) | Q(prescribed_by_id=u.id))
-            else:
-                q = q.filter(prescribed_by_id=u.id)
-
         patient_id = self.request.query_params.get("patient")
+        scope = (self.request.query_params.get("scope") or "").strip().lower()
+        system_scope = bool(patient_id) and scope in {"system", "all", "global"}
+
+        if system_scope:
+            if not can_user_access_patient_system_scope(u, patient_id):
+                raise PermissionDenied("You do not have permission to view this patient's system-wide medication history.")
+        else:
+            if role == UserRole.PATIENT:
+                base_patient = getattr(u, "patient_profile", None)
+                if base_patient:
+                    q = q.filter(Q(patient=base_patient) | Q(patient__parent_patient=base_patient))
+                else:
+                    q = q.none()
+            elif getattr(u, "facility_id", None):
+                # Facility staff
+                q = q.filter(facility_id=u.facility_id)
+
+                # Doctors only see prescriptions they created
+                if role == UserRole.DOCTOR:
+                    q = q.filter(prescribed_by_id=u.id)
+                # PHARMACY, NURSE, ADMIN, SUPER_ADMIN see all facility prescriptions
+            else:
+                # independent (no facility)
+                if role in {UserRole.ADMIN, UserRole.SUPER_ADMIN}:
+                    pass
+                elif role == UserRole.PHARMACY:
+                    # Independent pharmacy: outsourced assigned + prescriptions created by self
+                    q = q.filter(Q(outsourced_to_id=u.id) | Q(prescribed_by_id=u.id))
+                else:
+                    q = q.filter(prescribed_by_id=u.id)
+
         if patient_id:
             q = q.filter(patient_id=patient_id)
+
 
         status_ = self.request.query_params.get("status")
         if status_:

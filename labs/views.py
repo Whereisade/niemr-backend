@@ -8,12 +8,13 @@ from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 from rest_framework import mixins, status, viewsets
 from rest_framework.decorators import action
+from rest_framework.exceptions import PermissionDenied
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework_simplejwt.authentication import JWTAuthentication
 
 from accounts.enums import UserRole
-from patients.models import SystemHMO, HMOTier
+from patients.models import SystemHMO, HMOTier, Patient, PatientProviderLink
 from notifications.services.notify import notify_user, notify_patient
 from notifications.enums import Topic, Priority
 from facilities.permissions_utils import has_facility_permission
@@ -27,6 +28,74 @@ from .serializers import (
     LabTestSerializer,
     ResultEntrySerializer,
 )
+
+
+def can_user_access_patient_system_scope(user, patient_id):
+    """
+    Ensure the requesting user can view the specified patient's data,
+    matching the same rules used by Patient object permissions.
+
+    Used to safely enable system-wide history (cross-facility/provider)
+    when the requester is already allowed to access the patient.
+    """
+    role = (getattr(user, "role", "") or "").upper()
+    try:
+        pid = int(patient_id)
+    except Exception:
+        return False
+
+    # System admins can view
+    if role in {UserRole.ADMIN, UserRole.SUPER_ADMIN}:
+        return True
+
+    # Patient can view self + dependents
+    if role == UserRole.PATIENT:
+        base_patient = getattr(user, "patient_profile", None)
+        if not base_patient:
+            return False
+        return Patient.objects.filter(Q(id=base_patient.id) | Q(parent_patient=base_patient)).filter(id=pid).exists()
+
+    # Facility staff can view patients within their facility
+    if getattr(user, "facility_id", None):
+        return Patient.objects.filter(id=pid, facility_id=user.facility_id).exists()
+
+    # Independent staff: only if related via links/records
+    uid = getattr(user, "id", None)
+    if not uid:
+        return False
+
+    if PatientProviderLink.objects.filter(patient_id=pid, provider_id=uid).exists():
+        return True
+
+    # Local imports to avoid circular dependencies
+    try:
+        from appointments.models import Appointment
+        from encounters.models import Encounter
+        from pharmacy.models import Prescription
+    except Exception:
+        Appointment = None
+        Encounter = None
+        Prescription = None
+
+    if Appointment and Appointment.objects.filter(patient_id=pid, provider_id=uid).exists():
+        return True
+
+    if Encounter and Encounter.objects.filter(patient_id=pid).filter(
+        Q(created_by_id=uid) | Q(provider_id=uid) | Q(nurse_id=uid)
+    ).exists():
+        return True
+
+    if LabOrder.objects.filter(patient_id=pid).filter(
+        Q(ordered_by_id=uid) | Q(outsourced_to_id=uid)
+    ).exists():
+        return True
+
+    if Prescription and Prescription.objects.filter(patient_id=pid).filter(
+        Q(prescribed_by_id=uid) | Q(outsourced_to_id=uid)
+    ).exists():
+        return True
+
+    return False
 
 
 class LabTestViewSet(viewsets.GenericViewSet, mixins.ListModelMixin, mixins.CreateModelMixin, mixins.UpdateModelMixin, mixins.DestroyModelMixin):
@@ -834,30 +903,35 @@ class LabOrderViewSet(
         u = self.request.user
         role = (getattr(u, "role", "") or "").upper()
 
-        if role == UserRole.PATIENT:
-            base_patient = getattr(u, "patient_profile", None)
-            if base_patient:
-                q = q.filter(Q(patient=base_patient) | Q(patient__parent_patient=base_patient))
-            else:
-                q = q.none()
-        elif getattr(u, "facility_id", None):
-            # FIX: Include both in-house AND outsourced orders for facility staff
-            q = q.filter(
-                Q(facility_id=u.facility_id) | 
-                Q(ordered_by__facility_id=u.facility_id)  # Include outsourced orders created by facility staff
-            )
-        else:
-            if role in {UserRole.ADMIN, UserRole.SUPER_ADMIN}:
-                pass
-            elif role == UserRole.LAB:
-                # Independent lab should see:
-                # - outsourced orders assigned to them
-                # - orders they created themselves
-                q = q.filter(Q(outsourced_to_id=u.id) | Q(ordered_by_id=u.id))
-            else:
-                q = q.filter(ordered_by_id=u.id)
-
         patient_id = self.request.query_params.get("patient")
+        scope = (self.request.query_params.get("scope") or "").strip().lower()
+        system_scope = bool(patient_id) and scope in {"system", "all", "global"}
+
+        if system_scope:
+            if not can_user_access_patient_system_scope(u, patient_id):
+                raise PermissionDenied("You do not have permission to view this patient's system-wide lab history.")
+        else:
+            if role == UserRole.PATIENT:
+                base_patient = getattr(u, "patient_profile", None)
+                if base_patient:
+                    q = q.filter(Q(patient=base_patient) | Q(patient__parent_patient=base_patient))
+                else:
+                    q = q.none()
+            elif getattr(u, "facility_id", None):
+                # Facility staff: include in-house and outsourced orders created by facility staff
+                q = q.filter(
+                    Q(facility_id=u.facility_id) |
+                    Q(ordered_by__facility_id=u.facility_id)
+                )
+            else:
+                if role in {UserRole.ADMIN, UserRole.SUPER_ADMIN}:
+                    pass
+                elif role == UserRole.LAB:
+                    # Independent lab: outsourced assigned + orders created by self
+                    q = q.filter(Q(outsourced_to_id=u.id) | Q(ordered_by_id=u.id))
+                else:
+                    q = q.filter(ordered_by_id=u.id)
+
         if patient_id:
             q = q.filter(patient_id=patient_id)
 
