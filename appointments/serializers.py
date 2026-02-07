@@ -89,7 +89,23 @@ class AppointmentSerializer(serializers.ModelSerializer):
         name = (first + " " + last).strip()
         return name or str(obj.patient)
 
+    def _is_independent_provider(self, provider):
+        """Independent provider = has provider_profile AND no facility_id."""
+        if not provider:
+            return False
+        if getattr(provider, "facility_id", None):
+            return False
+        return getattr(provider, "provider_profile", None) is not None
+
+    def get_provider_is_independent(self, obj):
+        return self._is_independent_provider(getattr(obj, "provider", None))
+
     def get_facility_name(self, obj):
+        provider = getattr(obj, "provider", None)
+        req = self.context.get("request")
+        # Patient UX: hide facility for independent provider bookings (even if legacy data has facility set)
+        if req and getattr(req.user, "role", None) == "PATIENT" and self._is_independent_provider(provider):
+            return None
         if not obj.facility_id:
             return None
         return getattr(obj.facility, "name", None) or str(obj.facility)
@@ -211,10 +227,16 @@ class AppointmentSerializer(serializers.ModelSerializer):
         user = request.user
         patient = attrs.get("patient")
 
-        # 1) Start from the staff user's facility (most restrictive & safe)
-        facility = getattr(user, "facility", None)
+        # 1) Facility inference
+        # - Facility staff: default to their facility (safe)
+        # - Patients: DO NOT default to patient.user.facility (patients can book independent providers)
+        facility = None
+        user_role = (getattr(user, "role", "") or "").upper()
 
-        # 2) If user has no facility (PATIENT, SUPER_ADMIN, or independent provider), try payload
+        if user_role != "PATIENT":
+            facility = getattr(user, "facility", None)
+
+        # 2) If still none, try payload facility (patients in facility booking mode send this)
         if facility is None:
             facility_val = attrs.get("facility", None)
 
@@ -228,16 +250,17 @@ class AppointmentSerializer(serializers.ModelSerializer):
                     except (ValueError, TypeError, Facility.DoesNotExist):
                         raise serializers.ValidationError("Invalid facility id.")
 
-        # 3) Fallback to the patient's facility if still None
-        if facility is None and patient is not None:
-            facility = getattr(patient, "facility", None)
+        # 3) If still none, infer from the provider's facility (facility-based provider)
+        provider_for_facility = attrs.get("provider")
+        if facility is None and provider_for_facility is not None:
+            facility = getattr(provider_for_facility, "facility", None)
 
         # 4) For updates, fall back to the existing instance's facility
         if facility is None and getattr(self, "instance", None) is not None:
             facility = getattr(self.instance, "facility", None)
 
-        # 5) ✅ FIX: Only require facility if user has facility_id (facility-based staff)
-        user_has_facility = getattr(user, "facility_id", None) is not None
+        # 5) Only require facility for facility-based staff users (NOT patients)
+        user_has_facility = getattr(user, "facility_id", None) is not None and user_role != "PATIENT"
         if facility is None and user_has_facility:
             raise serializers.ValidationError(
                 "Facility is required for facility-based appointments."
@@ -311,6 +334,7 @@ class AppointmentListSerializer(serializers.ModelSerializer):
     facility_name = serializers.SerializerMethodField(read_only=True)
     # ✅ Show the facility name for facility bookings, and business/practice name for independent providers
     provider_org_name = serializers.SerializerMethodField(read_only=True)
+    provider_is_independent = serializers.SerializerMethodField(read_only=True)
 
     # NEW: nurse display (derived from linked encounter)
     nurse = serializers.SerializerMethodField(read_only=True)
@@ -331,6 +355,7 @@ class AppointmentListSerializer(serializers.ModelSerializer):
             "facility",
             "facility_name",
             "provider_org_name",
+            "provider_is_independent",
             "provider",
             "provider_name",
             "nurse",
@@ -349,6 +374,18 @@ class AppointmentListSerializer(serializers.ModelSerializer):
             "created_at",
         ]
 
+    def _is_independent_provider(self, provider):
+        # Independent provider = has provider_profile AND no facility_id
+        if not provider:
+            return False
+        if getattr(provider, "facility_id", None):
+            return False
+        return getattr(provider, "provider_profile", None) is not None
+
+    def get_provider_is_independent(self, obj):
+        return self._is_independent_provider(getattr(obj, "provider", None))
+
+
     def get_patient_name(self, obj):
         if not obj.patient_id:
             return None
@@ -357,25 +394,38 @@ class AppointmentListSerializer(serializers.ModelSerializer):
         name = (first + " " + last).strip()
         return name or str(obj.patient)
 
+
     def get_facility_name(self, obj):
+        provider = getattr(obj, "provider", None)
+        req = self.context.get("request")
+        # Patient UX: hide facility for independent provider bookings (even if legacy data has facility set)
+        if req and getattr(req.user, "role", None) == "PATIENT" and self._is_independent_provider(provider):
+            return None
+
         if not obj.facility_id:
             return None
         return getattr(obj.facility, "name", None) or str(obj.facility)
 
     def get_provider_org_name(self, obj):
-        """
-        For patient list UX, we want the "Facility" column to still show something
-        even when the booking is with an independent provider (lab/pharmacy/doctor).
+        # Provider organisation label for list views.
+        #
+        # - Patient view: show facility name only; leave blank for independent providers.
+        # - Other roles: facility booking shows facility name; independent booking shows business/practice name.
+        req = self.context.get("request")
+        provider = getattr(obj, "provider", None)
 
-        - Facility booking: facility.name
-        - Independent provider booking: provider_profile.business_name (fallback to provider full name)
-        """
+        if req and getattr(req.user, "role", None) == "PATIENT":
+            if self._is_independent_provider(provider):
+                return None
+            if obj.facility_id:
+                return getattr(obj.facility, "name", None) or str(obj.facility)
+            return None
+
         # Facility-based appointment
         if obj.facility_id:
             return getattr(obj.facility, "name", None) or str(obj.facility)
 
         # Independent provider appointment
-        provider = getattr(obj, "provider", None)
         if not provider:
             return None
 

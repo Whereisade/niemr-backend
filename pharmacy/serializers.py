@@ -446,6 +446,7 @@ class PrescriptionReadSerializer(serializers.ModelSerializer):
     patient_hmo_relationship_status = serializers.SerializerMethodField()
     facility_name = serializers.SerializerMethodField()
     prescribed_by_name = serializers.SerializerMethodField()
+    facility_or_provider_name = serializers.SerializerMethodField()
 
     class Meta:
         model = Prescription
@@ -459,6 +460,7 @@ class PrescriptionReadSerializer(serializers.ModelSerializer):
             "patient_hmo_relationship_status",
             "facility",
             "facility_name",
+            "facility_or_provider_name",
             "prescribed_by",
             "prescribed_by_name",
             "encounter_id",
@@ -505,6 +507,30 @@ class PrescriptionReadSerializer(serializers.ModelSerializer):
         if not f:
             return None
         return f.name or f"Facility #{f.id}"
+
+    def get_facility_or_provider_name(self, obj):
+        # Prefer the independent pharmacy if outsourced
+        if getattr(obj, 'outsourced_to_id', None):
+            return self.get_outsourced_to_name(obj)
+
+        # Facility prescriptions
+        if getattr(obj, 'facility_id', None):
+            return self.get_facility_name(obj)
+
+        # Independent pharmacy (facility is null) - use business/practice name when available
+        u = getattr(obj, 'prescribed_by', None)
+        if not u:
+            return None
+        prof = getattr(u, 'provider_profile', None)
+        if prof is not None:
+            try:
+                name = (prof.get_display_name() or '').strip()
+            except Exception:
+                name = (getattr(prof, 'business_name', '') or '').strip()
+            if name:
+                return name
+        return self.get_prescribed_by_name(obj)
+
 
     def get_prescribed_by_name(self, obj):
         u = getattr(obj, "prescribed_by", None)

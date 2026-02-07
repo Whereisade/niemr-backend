@@ -53,6 +53,7 @@ class EncounterListSerializer(serializers.ModelSerializer):
     # NEW: Distinguish between nurse and provider
     nurse_name = serializers.SerializerMethodField(read_only=True)
     provider_name = serializers.SerializerMethodField(read_only=True)
+    provider_is_independent = serializers.SerializerMethodField(read_only=True)
     created_by_name = serializers.SerializerMethodField(read_only=True)
 
     class Meta:
@@ -69,6 +70,7 @@ class EncounterListSerializer(serializers.ModelSerializer):
             "nurse_name",
             "provider",
             "provider_name",
+            "provider_is_independent",
             "occurred_at",
             "status",
             "stage",
@@ -92,7 +94,22 @@ class EncounterListSerializer(serializers.ModelSerializer):
         full = f"{first} {last}".strip()
         return full if full else None
 
+    def _is_independent_provider(self, provider):
+        # Independent provider = has provider_profile AND no facility_id
+        if not provider:
+            return False
+        if getattr(provider, "facility_id", None):
+            return False
+        return getattr(provider, "provider_profile", None) is not None
+
+    def get_provider_is_independent(self, obj):
+        return self._is_independent_provider(getattr(obj, "provider", None))
+
+
     def get_facility_name(self, obj):
+        req = self.context.get("request")
+        if req and getattr(req.user, "role", None) == "PATIENT" and self._is_independent_provider(getattr(obj, "provider", None)):
+            return None
         if not obj.facility:
             return None
         return getattr(obj.facility, "name", None)
@@ -181,7 +198,13 @@ class EncounterSerializer(serializers.ModelSerializer):
         return getattr(obj.patient, "last_name", None)
 
     # Facility fields
+
     def get_facility_name(self, obj):
+        req = self.context.get("request")
+        provider = getattr(obj, "provider", None)
+        if req and getattr(req.user, "role", None) == "PATIENT":
+            if provider and not getattr(provider, "facility_id", None) and getattr(provider, "provider_profile", None) is not None:
+                return None
         if not obj.facility:
             return None
         return getattr(obj.facility, "name", None)
