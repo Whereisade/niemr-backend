@@ -1206,6 +1206,9 @@ class LabOrderViewSet(
             allowed = True
         elif getattr(u, "facility_id", None) and order.facility_id == u.facility_id:
             allowed = True
+        # ✅ Independent lab user: can cancel orders assigned (outsourced) to them
+        elif role == UserRole.LAB and getattr(order, "outsourced_to_id", None) == getattr(u, "id", None):
+            allowed = True
         elif order.ordered_by_id == u.id:
             allowed = True
 

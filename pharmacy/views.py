@@ -1165,6 +1165,76 @@ class PrescriptionViewSet(
         return Response(PrescriptionReadSerializer(rx).data, status=status.HTTP_201_CREATED)
 
     @action(detail=True, methods=["post"], permission_classes=[IsAuthenticated, IsPharmacyStaff])
+    def cancel(self, request, pk=None):
+        """Cancel a prescription.
+
+        Intended for independent pharmacies and facility pharmacies.
+        - Cannot cancel if any item has been dispensed.
+        - Cannot cancel if already dispensed.
+        - For outsourced prescriptions, only the assigned pharmacy (or admins) may cancel.
+        """
+        if not has_facility_permission(request.user, 'can_view_prescriptions'):
+            return Response(
+                {"detail": "You do not have permission to manage prescriptions."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        rx = self.get_object()
+        u = request.user
+        role = (getattr(u, "role", "") or "").upper()
+
+        # If outsourced, ONLY assigned pharmacy (or admins) can cancel
+        if rx.outsourced_to_id:
+            if role not in {UserRole.ADMIN, UserRole.SUPER_ADMIN} and u.id != rx.outsourced_to_id:
+                return Response({"detail": "This prescription is outsourced to another pharmacy."}, status=403)
+
+        # If not outsourced, facility pharmacy must match facility (admins can bypass)
+        if not rx.outsourced_to_id and role not in {UserRole.ADMIN, UserRole.SUPER_ADMIN}:
+            if u.facility_id and rx.facility_id != u.facility_id:
+                return Response({"detail": "Prescription is not in your facility."}, status=403)
+            if not u.facility_id:
+                # Independent pharmacies can cancel:
+                # - outsourced prescriptions assigned to them (handled above)
+                # - their own prescriptions they issued (self-prescribed workflows)
+                if role != UserRole.PHARMACY or rx.prescribed_by_id != u.id:
+                    return Response({"detail": "Independent pharmacies can only cancel outsourced prescriptions assigned to them or their own prescriptions."}, status=403)
+
+        status_norm = (getattr(rx, "status", "") or "").upper()
+        if status_norm == "CANCELLED":
+            return Response(PrescriptionReadSerializer(rx).data)
+
+        # If any dispense has occurred, block cancellation
+        if status_norm in {"DISPENSED", "PARTIALLY_DISPENSED"} or rx.items.filter(qty_dispensed__gt=0).exists():
+            return Response(
+                {"detail": "This prescription has already been dispensed and cannot be cancelled."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        rx.status = RxStatus.CANCELLED
+        rx.save(update_fields=["status"])
+
+        # Best-effort notification back to prescriber (if different)
+        try:
+            if getattr(rx, "prescribed_by_id", None) and rx.prescribed_by_id != u.id:
+                patient_name = getattr(rx.patient, "full_name", None) or f"Patient #{rx.patient_id}"
+                notify_user(
+                    user=rx.prescribed_by,
+                    topic=Topic.GENERAL,
+                    priority=Priority.NORMAL,
+                    title="Prescription cancelled",
+                    body=f"Prescription for {patient_name} was cancelled by the pharmacy.",
+                    facility_id=getattr(rx, "facility_id", None),
+                    data={"prescription_id": rx.id, "patient_id": rx.patient_id},
+                    action_url=f"/facility/pharmacy?rx={rx.id}",
+                    group_key=f"RX:{rx.id}:CANCELLED",
+                    allow_email=False,
+                )
+        except Exception:
+            pass
+
+        return Response(PrescriptionReadSerializer(rx).data)
+
+    @action(detail=True, methods=["post"], permission_classes=[IsAuthenticated, IsPharmacyStaff])
     def dispense(self, request, pk=None):
         if not has_facility_permission(request.user, 'can_dispense_prescriptions'):
             return Response(

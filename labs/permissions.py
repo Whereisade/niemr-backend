@@ -98,4 +98,8 @@ class IsLabOrAdmin(BasePermission):
         if getattr(obj, "outsourced_to_id", None):
             return getattr(obj, "outsourced_to_id", None) == getattr(user, "id", None)
 
+        # Independent labs (no facility) may work on orders they created themselves.
+        if not getattr(user, "facility_id", None) and getattr(obj, "ordered_by_id", None) == getattr(user, "id", None):
+            return True
+
         return bool(getattr(user, "facility_id", None) and getattr(obj, "facility_id", None) == user.facility_id)
