@@ -11,7 +11,7 @@ from rest_framework_simplejwt.authentication import JWTAuthentication
 from rest_framework.exceptions import ValidationError
 from facilities.permissions_utils import has_facility_permission
 from facilities.permissions import IsFacilityAdmin, IsFacilityStaff, IsFacilitySuperAdmin
-from .models import Patient, PatientDocument, HMO, Allergy, PatientProviderLink
+from .models import Patient, PatientDocument, HMO, Allergy, PatientProviderLink, PatientFacilityLink
 from .models import SystemHMO, HMOTier, FacilityHMO, PatientFacilityHMOApproval
 from .serializers import (
     PatientSerializer, PatientCreateByStaffSerializer, PatientDocumentSerializer,
@@ -79,7 +79,8 @@ class PatientViewSet(viewsets.GenericViewSet,
                 q = q.none()
         # Facility staff: scope to their facility patients
         elif getattr(u, "facility_id", None):
-            q = q.filter(facility_id=u.facility_id)
+            fid = u.facility_id
+            q = q.filter(Q(facility_id=fid) | Q(facility_links__facility_id=fid)).distinct()
         else:
             # Independent staff users (no facility) must NOT see all patients.
             role = (getattr(u, "role", "") or "").upper()
@@ -116,6 +117,12 @@ class PatientViewSet(viewsets.GenericViewSet,
     def perform_create(self, serializer):
         """On independent provider create, auto-link patient to the creator."""
         patient = serializer.save()
+        # Ensure facility visit link exists for facility-created patients
+        try:
+            if getattr(patient, "facility_id", None):
+                PatientFacilityLink.objects.get_or_create(patient=patient, facility_id=patient.facility_id)
+        except Exception:
+            pass
         u = self.request.user
         
         # For independent provider staff (no facility), link the created patient

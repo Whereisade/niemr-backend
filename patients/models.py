@@ -964,6 +964,39 @@ class PatientProviderLink(models.Model):
         return f"PatientProviderLink(patient={self.patient_id}, provider={self.provider_id})"
     
 
+
+class PatientFacilityLink(models.Model):
+    """Permanent link between a Patient and a Facility they have visited.
+
+    Why:
+      - A patient can visit multiple facilities over time.
+      - Each facility should keep the patient in its records permanently.
+    """
+
+    patient = models.ForeignKey(
+        "patients.Patient",
+        on_delete=models.CASCADE,
+        related_name="facility_links",
+    )
+    facility = models.ForeignKey(
+        Facility,
+        on_delete=models.CASCADE,
+        related_name="patient_links",
+    )
+    first_seen_at = models.DateTimeField(auto_now_add=True)
+    last_seen_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        unique_together = ("patient", "facility")
+        indexes = [
+            models.Index(fields=["facility", "patient"]),
+            models.Index(fields=["patient", "facility"]),
+        ]
+
+    def __str__(self):
+        return f"PatientFacilityLink(patient={self.patient_id}, facility={self.facility_id})"
+
+
 class PatientDocument(models.Model):
     class DocumentType(models.TextChoices):
         BLOOD_TEST = "BLOOD_TEST", "Blood test"

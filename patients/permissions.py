@@ -15,8 +15,16 @@ class IsSelfOrFacilityStaff(BasePermission):
             return False
         if obj.user_id == getattr(u, "id", None):
             return True
-        if u.role in self.staff_roles and u.facility_id and obj.facility_id == u.facility_id:
-            return True
+        if u.role in self.staff_roles and u.facility_id:
+            if obj.facility_id == u.facility_id:
+                return True
+
+            # Allow access if the patient has ever been linked to this facility (visited before).
+            try:
+                if obj.facility_links.filter(facility_id=u.facility_id).exists():
+                    return True
+            except Exception:
+                pass
 
         # Independent staff (no facility): allow access only if the patient is related to the user
         # via appointments/encounters/labs/prescriptions.

@@ -250,8 +250,14 @@ class EncounterViewSet(
         if not patient:
             return Response({"detail": "Patient not found"}, status=404)
 
-        if request.user.facility_id and patient.facility_id != request.user.facility_id:
-            return Response({"detail": "Patient is not in your facility"}, status=403)
+        if request.user.facility_id:
+            fid = request.user.facility_id
+            if patient.facility_id != fid:
+                try:
+                    if not patient.facility_links.filter(facility_id=fid).exists():
+                        return Response({"detail": "Patient is not in your facility"}, status=403)
+                except Exception:
+                    return Response({"detail": "Patient is not in your facility"}, status=403)
 
         user_role = getattr(request.user, "role", "").upper()
         

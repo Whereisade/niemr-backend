@@ -2,7 +2,7 @@
 from django.contrib import admin
 from django.utils.html import format_html
 from .models import (
-    Patient, PatientDocument, HMO, Allergy, PatientProviderLink,
+    Patient, PatientDocument, HMO, Allergy, PatientProviderLink, PatientFacilityLink,
     SystemHMO, HMOTier, FacilityHMO, PatientFacilityHMOApproval
 )
 
@@ -96,6 +96,18 @@ class PatientProviderLinkAdmin(admin.ModelAdmin):
     list_filter = ("created_at",)
     raw_id_fields = ("patient", "provider")
 
+
+
+@admin.register(PatientFacilityLink)
+class PatientFacilityLinkAdmin(admin.ModelAdmin):
+    list_display = ("patient", "facility", "first_seen_at", "last_seen_at")
+    search_fields = (
+        "patient__first_name",
+        "patient__last_name",
+        "facility__name",
+    )
+    list_filter = ("facility", "first_seen_at", "last_seen_at")
+    raw_id_fields = ("patient", "facility")
 
 @admin.register(HMO)
 class HMOAdmin(admin.ModelAdmin):

@@ -3,6 +3,7 @@ from typing import Iterable
 from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.db import transaction
+from django.db.models import Q
 from notifications.models import Notification, Preference
 from notifications.enums import Channel, Priority
 from accounts.enums import UserRole
@@ -237,7 +238,7 @@ def get_facility_patient_users(facility_id: int):
     except Exception:
         return []
 
-    qs = Patient.objects.filter(facility_id=facility_id).select_related(
+    qs = Patient.objects.filter(Q(facility_id=facility_id) | Q(facility_links__facility_id=facility_id)).distinct().select_related(
         "user",
         "guardian_user",
         "parent_patient__user",

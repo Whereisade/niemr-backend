@@ -9,7 +9,7 @@ from rest_framework_simplejwt.authentication import JWTAuthentication
 from django.contrib.auth import get_user_model
 from billing.models import Service, Price, Charge
 from accounts.enums import UserRole
-from patients.models import SystemHMO, HMOTier
+from patients.models import SystemHMO, HMOTier, PatientFacilityLink
 from facilities.permissions_utils import has_facility_permission
 from billing.services.pricing import get_service_price_info, resolve_price
 from .models import Appointment
@@ -293,17 +293,21 @@ class AppointmentViewSet(
             headers=self.get_success_headers(serializer.data),
         )
 
-        # Auto-link patient to facility
+        # Auto-link patient to facility visit history (do NOT overwrite previous facility)
         try:
             appt = Appointment.objects.select_related("patient", "facility").get(
                 id=resp.data["id"]
             )
             patient = appt.patient
-            if appt.facility_id and (
-                not patient.facility_id or patient.facility_id != appt.facility_id
-            ):
-                patient.facility = appt.facility
-                patient.save(update_fields=["facility"])
+            if appt.facility_id:
+                PatientFacilityLink.objects.get_or_create(
+                    patient=patient,
+                    facility_id=appt.facility_id,
+                )
+                # Keep the original `Patient.facility` as the first-known facility (if empty).
+                if not patient.facility_id:
+                    patient.facility_id = appt.facility_id
+                    patient.save(update_fields=["facility"])
         except Exception:
             pass
 
